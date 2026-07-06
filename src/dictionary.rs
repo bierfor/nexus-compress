@@ -62,7 +62,7 @@ pub struct DictEntry {
 /// loaded from a file) and then queried during LZ77 encoding. It is
 /// shared between encoder and decoder (both must have the same
 /// dictionary to roundtrip).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Dictionary {
     /// All entries, in insertion order. `id` is the index into this
     /// vec, so `entries[id as usize]` is O(1).

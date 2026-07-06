@@ -17,6 +17,7 @@ pub mod cm;
 pub mod codec;
 pub mod cost;
 pub mod dedup;
+pub mod dict_codec;
 pub mod dictionary;
 pub mod format;
 pub mod lz77;

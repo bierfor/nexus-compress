@@ -59,6 +59,7 @@ const TAG_DUPLICATE: u8 = 3;
 const TAG_RANS_LITERALS_V2: u8 = 4;
 const TAG_V3_MULTISTREAM: u8 = 5;
 const TAG_V3_MULTISTREAM_RLE: u8 = 7;
+const TAG_V3_MULTISTREAM_DICT: u8 = 8;
 
 /// CDC chunk size parameters.
 ///
@@ -194,18 +195,45 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, stats: &BlockStats) ->
         None
     };
 
-    match (standard, rle_path) {
-        (Some(s), Some(r)) if r.len() < s.len() => r,
-        (Some(s), _) => s,
-        (None, Some(r)) => r,
-        (None, None) => {
-            *block_type = BlockType::Raw;
-            let mut raw = Vec::with_capacity(1 + block.len());
-            raw.push(TAG_RAW);
-            raw.extend_from_slice(block);
-            raw
-        }
+    // Try the v4.5 dict-aware path. This is the most expensive path
+    // (5 rANS streams, 2-bit op-flags, dict lookup per LZ77 step) so
+    // we ONLY try it when the pre-scan suggests dict refs will help
+    // (select != NONE) and the block is large enough that the table
+    // overhead (≈5 KB for 5 tables) is amortized.
+    let dict_path = if block.len() >= 8 * 1024
+        && crate::dict_codec::should_try_v45(block)
+    {
+        crate::dict_codec::encode_v45_multistream(block).map(|mut payload| {
+            payload.insert(0, TAG_V3_MULTISTREAM_DICT);
+            payload
+        })
+    } else {
+        None
+    };
+
+    // Pick the smallest of (standard, rle, dict, none).
+    let candidates: Vec<(usize, Vec<u8>)> = [
+        standard.map(|p| (0usize, p)),
+        rle_path.map(|p| (1usize, p)),
+        dict_path.map(|p| (2usize, p)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if candidates.is_empty() {
+        *block_type = BlockType::Raw;
+        let mut raw = Vec::with_capacity(1 + block.len());
+        raw.push(TAG_RAW);
+        raw.extend_from_slice(block);
+        return raw;
     }
+
+    candidates
+        .into_iter()
+        .min_by_key(|(_, p)| p.len())
+        .map(|(_, p)| p)
+        .unwrap()
 }
 
 /// Build the v3 multistream payload (without the leading tag byte) for
@@ -440,6 +468,14 @@ fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType,
     // v3 + RLE pre-filter: same as above, but RLE-decode the LZ77 output.
     if payload[0] == TAG_V3_MULTISTREAM_RLE {
         return decode_block_v3(payload, cache, true);
+    }
+    // v4.5: dict-aware path with 5 rANS streams and 2-bit op-flags.
+    // The decoder re-loads the same sub-dict based on the dict_select
+    // field in the payload (same file-baked dicts as the encoder used).
+    if payload[0] == TAG_V3_MULTISTREAM_DICT {
+        let block = crate::dict_codec::decode_v45_multistream(&payload[1..]);
+        cache.push(block.clone());
+        return block;
     }
 
     // v0 / v2: single rANS stream
