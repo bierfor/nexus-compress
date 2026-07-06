@@ -108,23 +108,48 @@ pub async fn self_test_cmd() -> Result<SelfTestResult, String> {
 /// The dialog is opened synchronously on the main thread — Tauri
 /// 2.x dialog plugin blocks the main thread for the native
 /// picker but releases immediately when the user picks or
-/// cancels.
+/// cancels. On macOS the dialog can open behind other windows
+/// if the app isn't focused, so we explicitly `set_focus` on the
+/// main window first.
 #[tauri::command]
 pub async fn pick_directory_cmd(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri::Manager;
     use tauri_plugin_dialog::{DialogExt, FilePath};
+
+    // Bring the main window to the foreground so the NSOpenPanel
+    // appears on top. Without this on macOS the dialog can open
+    // invisibly behind another app and the user thinks the
+    // button does nothing.
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_focus();
+    }
+
     let (tx, rx) = std::sync::mpsc::channel::<Option<FilePath>>();
     app.dialog()
         .file()
         .pick_folder(move |path: Option<FilePath>| {
             let _ = tx.send(path);
         });
-    let result = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
+
+    // Block the worker thread (NOT the main thread) until the
+    // user picks or cancels. The dialog itself runs on the main
+    // thread, so this is safe.
+    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
         .await
         .map_err(|e| format!("dialog join failed: {}", e))?;
-    // Convert FilePath -> String. On desktop FilePath is a
-    // PathBuf; on mobile it carries a URI. We only target desktop
-    // so .into_path() is fine.
-    Ok(result.and_then(|fp| fp.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
+
+    // Convert FilePath -> PathBuf. On macOS desktop this is the
+    // Path variant; on mobile it would be Url. We only target
+    // desktop, but report the conversion failure clearly if it
+    // happens.
+    let path_str = match picked {
+        None => None,
+        Some(fp) => match fp.into_path() {
+            Ok(p) => Some(p.to_string_lossy().into_owned()),
+            Err(e) => return Err(format!("FilePath -> PathBuf failed: {}", e)),
+        },
+    };
+    Ok(path_str)
 }
 
 /// Compress a directory into an NXAR archive. The Rust side walks

@@ -510,17 +510,20 @@ els.btnPickFolder.addEventListener("click", async () => {
   let picked;
   try {
     picked = await invoke("pick_directory_cmd");
+    console.log("[nexus] pick_directory_cmd returned:", picked);
   } catch (e) {
-    log("err", `folder picker failed: ${e}`);
+    console.error("[nexus] pick_directory_cmd failed:", e);
+    log("err", `folder picker failed: <strong>${e}</strong>`);
+    log("info", "Tauri permission? check capabilities/default.json for dialog:default");
     setStatus("err", "picker failed");
     return;
   }
-  if (!picked) {
-    log("info", "folder picker cancelled");
+  if (picked === null || picked === undefined || picked === "") {
+    log("info", "folder picker cancelled (or returned empty)");
     setStatus("ok", "ready");
     return;
   }
-  log("rx", `picked: ${picked}`);
+  log("rx", `picked: <strong>${picked}</strong>`);
 
   // Compress the folder.
   setStatus("working", "compressing folder…");
@@ -532,40 +535,52 @@ els.btnPickFolder.addEventListener("click", async () => {
   const level = Number(els.levelSlider.value) === 0 ? "fast" : "premium";
   const t0 = performance.now();
   try {
-    const [result, archive] = await invoke("compress_directory_cmd", {
+    log("info", `calling compress_directory_cmd(inputDir="${picked}", level="${level}")`);
+    const result = await invoke("compress_directory_cmd", {
       inputDir: picked,
       level,
     });
+    // Tauri serializes tuples as arrays; the Rust side returns
+    // (DirectoryResult, Vec<u8>) so `result` is `[result, archive]`.
+    const [dirResult, archive] = result;
     const wall = performance.now() - t0;
     showResult(
-      result.total_original_size,
-      result.total_compressed_size,
-      result.aggregate_ratio,
-      result.total_time_ms,
+      dirResult.total_original_size,
+      dirResult.total_compressed_size,
+      dirResult.aggregate_ratio,
+      dirResult.total_time_ms,
     );
     log(
       "ok",
-      `compressed <strong>${result.n_files}</strong> files in <strong>${fmtMs(result.total_time_ms)}</strong> ` +
-        `· ratio <strong>${fmtRatio(result.aggregate_ratio)}</strong> ` +
-        `· <strong>${fmtBytes(result.total_original_size)}</strong> → <strong>${fmtBytes(result.total_compressed_size)}</strong>`,
+      `compressed <strong>${dirResult.n_files}</strong> files in <strong>${fmtMs(dirResult.total_time_ms)}</strong> ` +
+        `· ratio <strong>${fmtRatio(dirResult.aggregate_ratio)}</strong> ` +
+        `· <strong>${fmtBytes(dirResult.total_original_size)}</strong> → <strong>${fmtBytes(dirResult.total_compressed_size)}</strong>`,
       true,
     );
     log(
       "info",
-      `wall ${fmtMs(wall)} · engine ${fmtMs(result.total_time_ms)} · ` +
-        `IPC overhead ${fmtMs(Math.max(0, wall - result.total_time_ms))}`,
+      `wall ${fmtMs(wall)} · engine ${fmtMs(dirResult.total_time_ms)} · ` +
+        `IPC overhead ${fmtMs(Math.max(0, wall - dirResult.total_time_ms))}`,
     );
-    lastDirResult = result;
+    lastDirResult = dirResult;
     lastArchive = new Uint8Array(archive);
     lastDirPath = picked;
-    els.dropSecondary.textContent = `${picked.split("/").pop()} · ${result.n_files} files`;
-    els.sourceMeta.textContent = `${result.n_files} files`;
-    renderFileList(result);
+    els.dropSecondary.textContent = `${picked.split("/").pop()} · ${dirResult.n_files} files`;
+    els.sourceMeta.textContent = `${dirResult.n_files} files`;
+    renderFileList(dirResult);
     els.saveRow.hidden = false;
-    els.telemetryMeta.textContent = "ok · " + fmtRatio(result.aggregate_ratio);
+    els.telemetryMeta.textContent = "ok · " + fmtRatio(dirResult.aggregate_ratio);
     setStatus("ok", "folder compressed");
   } catch (e) {
-    log("err", `folder compress failed: ${e}`);
+    console.error("[nexus] compress_directory_cmd failed:", e);
+    log("err", `folder compress failed: <strong>${e}</strong>`);
+    if (typeof e === "string" && e.includes("not_found")) {
+      log("warn", "the path may not exist or isn't a directory — try another folder");
+    } else if (typeof e === "string" && e.includes("empty")) {
+      log("warn", "the directory has no regular files — add some files and retry");
+    } else if (typeof e === "string" && e.includes("io")) {
+      log("warn", "filesystem error — check the folder permissions");
+    }
     setStatus("err", "folder failed");
   } finally {
     els.dropzone.classList.remove("processing");
