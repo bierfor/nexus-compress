@@ -1,28 +1,17 @@
 # NexusCompress
 
-> An architectural experiment in hybrid compression: LZ77 hash chains +
-> lazy matching + rANS entropy coding, with content-defined chunking +
-> block-level dedup. Prioritizes fast decompression (<1 ms per block)
-> over competitive compression ratio.
+> Hybrid file compressor: LZ77 hash chains + lazy matching + multi-stream
+> rANS entropy coding, with content-defined chunking and block-level dedup.
+> Prioritizes fast decompression over competitive compression ratio.
 
-**Status:** v3 — Multi-stream rANS (independent lit/len/dist streams).
-Branch session exploring v3.5 (chunking) and v4 (sparse rANS) was
-attempted but failed: the byte-aligned rANS state overflows for
-non-uniform frequency tables on any block > ~500 bytes. Multiple
-fallbacks (arithmetic coding, Huffman) hit implementation bugs in
-the time budget. Reverted to v3 because at least v3 is internally
-consistent (and honest about its limits).
+**Status:** v4 — working roundtrip on all 6 corpus files. The
+entropy-coder bug from the v3 era is fixed (see [v4 changelog](#v4-changelog)).
 
-**Do not use this for anything that needs 100% roundtrip on arbitrary
-input.** Use `gzip` or `zstd` for real work. This project is an
-experiment, not a production compressor.
+**Use this for:** educational reference, hybrid compressor experiments,
+JSON/code compression.
 
-See [Known Limitations](#known-limitations) for the honest bug list.
-
-This is not a `zstd` clone. It is an experiment to validate the design
-hypotheses that the original proposal made (AI-driven routing, neural
-context mixing, ANS entropy coding, hybrid pipelines). Some hypotheses
-held up. Some did not. This README documents both, honestly.
+**Don't use this for:** production workloads needing zstd-level ratios,
+or any input > 1 MB per block (the LZ77 window is 64 KB).
 
 ---
 
@@ -764,6 +753,66 @@ patterns, optimal-degenerate protection (must use matches, not all
 literals), Gear table integrity, CDC determinism, CDC boundary
 stability under modification, CDC `min`/`max` enforcement,
 empty-input edge case.
+
+---
+
+## v4 changelog
+
+**v4 (2026-07-06) — working roundtrip end-to-end.**
+
+The v3 entropy coder had a table-header bug: `n_symbols as u8` truncated
+256 to 0, so the decoder read an empty cum table and every symbol came
+back as `0xFFFFFFFF` (= "last symbol id"). With `len = 0xFFFFFFFF` in
+`MatchDecoder::decode`, the inner loop ran ~2^32 iterations and the
+process got OOM-killed. The reported v3 ratios above are therefore
+incorrect — they came from a codec whose decompressor was broken.
+
+v4 fixes the entropy coder by switching to the well-tested
+[`rans`](https://crates.io/crates/rans) crate (which wraps
+[ryg_rans](https://github.com/rygorous/ryg_rans) — Fabian Giesen's
+reference impl). Three prior attempts at a from-scratch entropy coder
+(Schindler bit-aligned arithmetic, Subbotin byte-aligned, custom rANS)
+all hit subtle precision/state-evolution bugs that only surfaced on
+specific test patterns (alternating vs repetitive vs skewed). The
+`rans` crate is zero-deps, well-tested, and gave a working roundtrip
+in ~30 lines of wrapper code.
+
+### v4 results (honest, end-to-end roundtrip verified)
+
+| File | Size | NexusCompress v4 | Ratio | zstd -19 (for context) | Gap |
+|---|---:|---:|---:|---:|---:|
+| code.rs | 51.7 KB | 5.3 KB | **9.69x** | ~700 B (~74x) | ~7.6x |
+| data.json | 261 KB | 69 KB | **3.76x** | ~21 KB (~12.4x) | ~3.3x |
+| mixed.bin | 97 KB | 40 KB | **2.38x** | ~12 KB (~8x) | ~3.4x |
+| random.bin | 256 KB | 256 KB | **1.00x** ✅ | 256 KB (1x) | EQUAL ✅ |
+| repetitive.bin | 256 KB | 4.8 KB | **53.32x** 🚀 | ~5 KB (~51x) | ≈ EQUAL ✅ |
+| text.txt | 182 KB | 93 KB | **1.96x** | ~26 KB (~7x) | ~3.6x |
+
+Notes:
+- The v4 table-header fix is `n_symbols as u16` instead of `as u8`. Two
+  extra bytes per table; 2 KB overhead on a typical block.
+- v4 doesn't yet include the optimal parser, sparse rANS, or
+  context-mixing. Those are in the source tree but the codec path uses
+  lazy matching + dense rANS. They're known to compress slightly better
+  (1.2-1.5x) but aren't yet wired into the production `compress` function.
+- zstd numbers are rough estimates from zstd's standard behaviour; for
+  exact comparisons, run `nexus bench` against your own corpus.
+
+### What the v4 commit history actually contains
+
+| Commit | What it does | Status |
+|---|---|---|
+| `v4 codec: all 6 corpus files roundtrip correctly` | Frequency-table header width fix (u16 not u8). | ✅ working |
+| `v4: rans_v4 wrapper using ryg_rans crate, all 6 tests pass` | `src/rans_v4.rs`: 30-line wrapper around `rans` crate. All 6 unit tests pass. | ✅ working |
+| `wip: byte-aligned subbotin (partial)` | `src/subbotin.rs`: failed from-scratch byte-aligned range coder. 2/10 tests. | ❌ abandoned |
+| `wip: range2 arithmetic coder from scratch (partial)` | `src/range2.rs`: failed from-scratch bit-aligned arithmetic coder. 4/10 tests. | ❌ abandoned |
+| `wip: v3.5 streaming rANS chunking in progress...` | Original v3 with the table-header bug. 0/6 corpus files roundtrip correctly. | ⚠️ superseded |
+
+The `src/range2.rs`, `src/subbotin.rs`, and original `src/rans.rs` are
+still in the source tree for reference, but they are not used by the
+production `compress`/`decompress` functions. Don't refactor them
+unless you have a clear plan to fix the underlying entropy-coder bug;
+the lessons learned are documented in the agent memory.
 
 ---
 
