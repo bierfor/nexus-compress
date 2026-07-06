@@ -1,9 +1,13 @@
 // NexusRAR — UI controller.
 //
-// Talks to the Rust backend via Tauri IPC (`window.__TAURI__.core.invoke`).
+// Talks to the Rust backend via Tauri IPC. In Tauri 2.x the global
+// `window.__TAURI__` is only present when `app.withGlobalTauri` is
+// set in tauri.conf.json — we don't enable that, so we call the
+// low-level `window.__TAURI_INTERNALS__.invoke` directly. Same
+// signature as the high-level `invoke` from `@tauri-apps/api/core`.
 // No bundler, no framework. Plain ES2022 modules.
 
-const { invoke } = window.__TAURI__.core;
+const invoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
 
 // -----------------------------------------------------------------------
 // DOM refs
@@ -146,11 +150,25 @@ els.levelSlider.addEventListener("input", () => {
 // -----------------------------------------------------------------------
 // Dropzone
 // -----------------------------------------------------------------------
-els.dropzone.addEventListener("click", () => els.fileInput.click());
+function openFilePicker() {
+  // `display: none` file inputs refuse the `.click()` call on some
+  // WebKit versions. The CSS now positions the input off-screen
+  // with `opacity: 0` instead, which keeps the native OS picker
+  // functional. If the click still fails (e.g. Tauri security
+  // policy), surface the error in the telemetry console.
+  try {
+    els.fileInput.click();
+  } catch (e) {
+    log("err", `file picker failed: ${e}`);
+    log("warn", "check the Tauri security CSP / capabilities for the dialog plugin");
+  }
+}
+
+els.dropzone.addEventListener("click", openFilePicker);
 els.dropzone.addEventListener("keydown", (e) => {
   if (e.key === "Enter" || e.key === " ") {
     e.preventDefault();
-    els.fileInput.click();
+    openFilePicker();
   }
 });
 
@@ -177,8 +195,14 @@ els.fileInput.addEventListener("change", () => {
   }),
 );
 els.dropzone.addEventListener("drop", (e) => {
-  const f = e.dataTransfer.files[0];
-  if (f) loadFile(f);
+  // Tauri 2.x intercepts OS file drops before they reach the
+  // webview's HTML5 `drop` event. The file picker (click on
+  // dropzone) is the v1 path. Real OS drag-drop requires the
+  // `tauri-plugin-fs` + `tauri-plugin-dialog` packages — see
+  // README "Trade-offs / not-yet". The HTML5 drop handler is
+  // here only to clean up the `.dragover` CSS class.
+  e.preventDefault();
+  els.dropzone.classList.remove("dragover");
 });
 
 async function loadFile(file) {
@@ -194,9 +218,25 @@ async function loadFile(file) {
   els.sourceMeta.textContent = file.name;
   els.btnCompress.disabled = false;
   els.btnDecompress.disabled = false;
+  updateDecompressButton();
   hideResult();
   setStatus("ok", "ready");
   log("ok", "file ready · click COMPRESS to run the engine");
+}
+
+/// Update the decompress button label based on what the click
+/// would actually do. After a successful compress, the label
+/// switches to "verify roundtrip" so the user knows the button
+/// will decompress the just-produced compressed output.
+function updateDecompressButton() {
+  if (lastOutput && lastOutput.isCompressed) {
+    els.btnDecompress.textContent = "verify roundtrip";
+    els.btnDecompress.title =
+      "decompress the last compressed output and confirm it roundtrips to the original";
+  } else {
+    els.btnDecompress.textContent = "decompress";
+    els.btnDecompress.title = "decompress the loaded file (must be a NexusCompress stream)";
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -243,6 +283,7 @@ els.btnCompress.addEventListener("click", async () => {
       bytes: new Uint8Array(res.compressed),
       isCompressed: true,
     };
+    updateDecompressButton();
     els.telemetryMeta.textContent = "ok · " + fmtRatio(res.ratio);
     setStatus("ok", "compressed");
   } catch (e) {
@@ -256,30 +297,55 @@ els.btnCompress.addEventListener("click", async () => {
 // -----------------------------------------------------------------------
 // Decompress
 // -----------------------------------------------------------------------
+//
+// Smart button: if the last operation was a successful COMPRESS
+// (so `lastOutput` holds a compressed stream), decompress THAT
+// — this is the "verify roundtrip" path the user expects after
+// clicking compress. If no compressed output exists, fall back
+// to decompressing `lastFile` (the file loaded via picker /
+// drop), which is the "I have a .nxr file and want to recover
+// the original" path.
+
+function pickDecompressTarget() {
+  if (lastOutput && lastOutput.isCompressed) {
+    return { source: lastOutput, reason: "roundtrip-verify" };
+  }
+  if (lastFile) {
+    return { source: lastFile, reason: "input-file" };
+  }
+  return null;
+}
+
 els.btnDecompress.addEventListener("click", async () => {
-  if (!lastFile) return;
+  const target = pickDecompressTarget();
+  if (!target) return;
+  const { source, reason } = target;
   setStatus("working", "decompressing…");
   els.dropzone.classList.add("processing");
   hideResult();
-  log("tx", `decompress ${lastFile.name}`);
+  log(
+    "tx",
+    `decompress ${source.name}` +
+      (reason === "roundtrip-verify" ? " · (roundtrip verify)" : ""),
+  );
 
   const t0 = performance.now();
   try {
-    const input = Array.from(lastFile.bytes);
+    const input = Array.from(source.bytes);
     const res = await invoke("decompress_bytes_cmd", { input });
 
     const t1 = performance.now();
     const wall = t1 - t0;
     showResult(
       res.size,
-      lastFile.bytes.length,
-      lastFile.bytes.length > 0 ? lastFile.bytes.length / res.size : 0,
+      source.bytes.length,
+      source.bytes.length > 0 ? source.bytes.length / res.size : 0,
       res.decompress_time_ms,
     );
     log(
       "ok",
       `decompressed in <strong>${fmtMs(res.decompress_time_ms)}</strong> ` +
-        `· <strong>${fmtBytes(lastFile.bytes.length)}</strong> → <strong>${fmtBytes(res.size)}</strong>`,
+        `· <strong>${fmtBytes(source.bytes.length)}</strong> → <strong>${fmtBytes(res.size)}</strong>`,
       true,
     );
     log(
@@ -288,11 +354,44 @@ els.btnDecompress.addEventListener("click", async () => {
         `engine ${fmtMs(res.decompress_time_ms)} · ` +
         `IPC overhead ${fmtMs(Math.max(0, wall - res.decompress_time_ms))}`,
     );
+    // Promote the recovered bytes to lastOutput so the user can
+    // chain operations without losing the result.
     lastOutput = {
-      name: lastFile.name.replace(/\.nxr$/, ""),
+      name: source.name.replace(/\.nxr$/i, ""),
       bytes: new Uint8Array(res.data),
       isCompressed: false,
     };
+
+    // Bonus: when this was a roundtrip verify, confirm the
+    // recovered bytes are byte-identical to the original
+    // (when we have one).
+    if (reason === "roundtrip-verify" && lastFile) {
+      const recovered = lastOutput.bytes;
+      const original = lastFile.bytes;
+      const sameLen = recovered.length === original.length;
+      let sameContent = sameLen;
+      if (sameLen) {
+        for (let i = 0; i < original.length; i++) {
+          if (recovered[i] !== original[i]) {
+            sameContent = false;
+            break;
+          }
+        }
+      }
+      if (sameContent) {
+        log(
+          "ok",
+          `roundtrip OK · <strong>${fmtBytes(original.length)}</strong> recovered byte-identical from <strong>${fmtBytes(source.bytes.length)}</strong> compressed`,
+          true,
+        );
+      } else {
+        log(
+          "err",
+          `roundtrip MISMATCH · expected ${original.length} B, got ${recovered.length} B`,
+        );
+      }
+    }
+
     els.telemetryMeta.textContent = "ok · decompressed";
     setStatus("ok", "decompressed");
   } catch (e) {
@@ -357,5 +456,6 @@ async function loadEngineInfo() {
 
 window.addEventListener("DOMContentLoaded", () => {
   log("info", "NexusRAR booting…");
+  updateDecompressButton();
   loadEngineInfo();
 });
