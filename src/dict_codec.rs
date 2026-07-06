@@ -71,6 +71,23 @@ const PRESCAN_BYTES: usize = 500;
 /// which are the highest-score (most common) ones.
 pub const MAX_DICT_ENTRIES: usize = 256;
 
+/// Number of entries in the full (non-compact) trained dict. Used by
+/// the v4.8 per-block local-sub-dict path, which scans the block,
+/// picks the top-K entries from this full set, and emits a 5348-bit
+/// bitmask marking which entries are active for this block.
+pub const FULL_DICT_ENTRIES: usize = 5348;
+
+/// Bitmask size for the v4.8 local-sub-dict path: one bit per full-dict
+/// entry. 5348 bits = 669 bytes. Fixed per block (the cost of being
+/// able to pick any of the 5348 trained tokens).
+pub const LOCAL_BITMASK_BYTES: usize = (FULL_DICT_ENTRIES + 7) / 8;
+
+/// Maximum number of entries the per-block local sub-dict can hold.
+/// The encoder picks the top-K by frequency in the block. 100 is a
+/// good balance: enough to cover most matches, small enough that the
+/// rANS alphabet stays concentrated.
+pub const MAX_LOCAL_ENTRIES: usize = 100;
+
 /// Baked-in trained dictionary (from sprint 2.5, trained on
 /// `corpus/{code,text,data.json}`). 60KB on disk, ~5348 entries.
 ///
@@ -133,7 +150,11 @@ pub mod select {
     pub const TRAINED: u8 = 1;
     pub const CODE: u8 = 2;
     pub const JSON: u8 = 3;
-    pub const _TEXT: u8 = 4; // reserved; trained.dict covers text too
+    /// v4.8: per-block local sub-dict picked from the full 5348-entry
+    /// trained.dict. Uses a 669-byte bitmask (5348 bits) per block.
+    /// Decoder rebuilds the same local sub-dict from the bitmask.
+    pub const LOCAL: u8 = 4;
+    pub const _TEXT: u8 = 5; // reserved; trained.dict covers text too
 }
 
 /// Heuristic: pick the best sub-dict for a block based on its first
@@ -247,6 +268,66 @@ pub fn load_sub_dict(select: u8) -> Option<Dictionary> {
 /// `select::NONE`.
 pub fn should_try_v45(block: &[u8]) -> bool {
     dict_select_for_block(block) != select::NONE
+}
+
+/// Bitmask size for the 5th stream's table section, in bytes.
+/// Depends on dict_select:
+///   - 0 (None): no bitmask (no dict section at all)
+///   - 1, 2, 3 (Trained / Code / JSON): 32 bytes (256-bit alphabet)
+///   - 4 (Local): 669 bytes (5348-bit alphabet)
+pub fn dict_bitmask_bytes(select: u8) -> usize {
+    match select {
+        select::LOCAL => LOCAL_BITMASK_BYTES,
+        _ => DICT_BITMASK_BYTES,
+    }
+}
+
+/// Select the top-K most-frequent dict entries for a block.
+///
+/// Scans `data` looking for matches of `global` entries. For each
+/// position, the longest match is taken (greedy skip-ahead). Returns
+/// up to `max_entries` of the most-frequent original ids, sorted
+/// in id-ascending order (so the bitmask walks them in order).
+pub fn select_local_dict_ids(
+    data: &[u8],
+    global: &Dictionary,
+    max_entries: usize,
+    min_match_len: usize,
+) -> Vec<u16> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<u16, u32> = HashMap::new();
+    let mut pos = 0;
+    while pos < data.len() {
+        if let Some((id, dlen)) = global.lookup_at(data, pos) {
+            if dlen >= min_match_len {
+                *counts.entry(id).or_insert(0) += 1;
+                pos += dlen; // skip past this match
+            } else {
+                pos += 1;
+            }
+        } else {
+            pos += 1;
+        }
+    }
+    let mut entries: Vec<(u16, u32)> = counts.into_iter().collect();
+    // Sort by count desc, then id asc for stable output.
+    entries.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    entries.truncate(max_entries);
+    let mut ids: Vec<u16> = entries.into_iter().map(|(id, _)| id).collect();
+    // For the bitmask: dense_idx = order of set bits, ascending by id.
+    ids.sort_unstable();
+    ids
+}
+
+/// Build a local Dictionary from a sorted list of original ids.
+pub fn build_local_dict(global: &Dictionary, ids: &[u16]) -> Dictionary {
+    let mut local = Dictionary::new();
+    for &id in ids {
+        if let Some(token) = global.get(id) {
+            local.insert(token, 1);
+        }
+    }
+    local
 }
 
 // ---------------------------------------------------------------
@@ -384,6 +465,136 @@ pub fn encode_v45_multistream(data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// Build the v4.5 dict multistream payload with a CUSTOM local sub-dict
+/// selected per-block from the full 5348-entry trained dict. The bitmask
+/// is 5348 bits = 669 bytes (vs. 32 bytes for the fixed-256 path).
+///
+/// On the wire: dict_select = `select::LOCAL` (4). The decoder reads
+/// the 669-byte bitmask, walks the set bits to build a remap
+/// (dense_idx -> original_id), and reconstructs the same local sub-dict
+/// from the global trained dict using the same chosen ids.
+///
+/// Returns `None` if the encoded form is not smaller than the input, or
+/// if the block has no dict matches at all (K=0; nothing to encode).
+pub fn encode_v45_multistream_local(data: &[u8]) -> Option<Vec<u8>> {
+    if data.is_empty() {
+        return None;
+    }
+
+    // 1. Build the local sub-dict: top-K entries from the full trained dict.
+    let full = trained_dict();
+    let local_ids = select_local_dict_ids(data, &full, MAX_LOCAL_ENTRIES, 3);
+    if local_ids.is_empty() {
+        return None; // No matches in this block.
+    }
+    let local_dict = build_local_dict(&full, &local_ids);
+    let k = local_ids.len();
+
+    // 2. LZ77 with the LOCAL sub-dict.
+    let mut mf = MatchFinder::new();
+    let ops = mf.encode_with_dict(data, &local_dict);
+
+    // 3. Split ops into 5 streams.
+    let mut literals: Vec<u8> = Vec::new();
+    let mut lengths: Vec<u8> = Vec::new();
+    let mut dist_lows: Vec<u8> = Vec::new();
+    let mut dist_highs: Vec<u8> = Vec::new();
+    let mut dict_ids: Vec<u32> = Vec::new();
+    for op in &ops {
+        match op {
+            Op::Lit(b) => literals.push(*b),
+            Op::Match { dist, len } => {
+                lengths.push(*len as u8);
+                dist_lows.push((*dist & 0xFF) as u8);
+                dist_highs.push(((*dist >> 8) & 0xFF) as u8);
+            }
+            Op::DictRef { id, len: _ } => dict_ids.push(*id as u32),
+        }
+    }
+
+    // 4. Sparse encoding for the 4 base streams (32-byte bitmask each).
+    let (lit_table_section, lit_stream) = crate::rans_v4::sparse_rans_encode_u8(&literals, 12);
+    let (len_table_section, len_stream) = crate::rans_v4::sparse_rans_encode_u8(&lengths, 12);
+    let (dist_lo_table_section, dist_lo_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_lows, 12);
+    let (dist_hi_table_section, dist_hi_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_highs, 12);
+
+    // 5. Build the 5348-bit bitmask from the K chosen original ids.
+    let mut local_bitmask = [0u8; LOCAL_BITMASK_BYTES];
+    for &id in &local_ids {
+        let id_u16 = id as usize;
+        if id_u16 < FULL_DICT_ENTRIES {
+            let byte = id_u16 / 8;
+            let bit = id_u16 % 8;
+            local_bitmask[byte] |= 1 << bit;
+        }
+    }
+    // Build reverse remap: original_id -> dense_idx (in id-ascending order).
+    let mut reverse_remap = [0u16; FULL_DICT_ENTRIES];
+    for (dense_idx, &orig) in local_ids.iter().enumerate() {
+        reverse_remap[orig as usize] = dense_idx as u16;
+    }
+    // Remap dict_ids from local (0..K-1) to dense (0..K-1) — they
+    // happen to be the same because we sorted local_ids by id ascending.
+    // The "dense" alphabet is the local sub-dict's ids (0..K-1).
+    let dict_dense_ids: Vec<u32> = dict_ids.iter().map(|&d| d).collect();
+    let dict_table = build_sparse_dict_table(&dict_dense_ids, k);
+    let dict_stream = rans_encode(&dict_dense_ids, &dict_table);
+
+    // 6. Build the dict table section: 669-byte bitmask + densified rANS table.
+    let mut dict_table_bytes = Vec::with_capacity(LOCAL_BITMASK_BYTES + 64);
+    dict_table_bytes.extend_from_slice(&local_bitmask);
+    dict_table_bytes.extend_from_slice(&encode_table(&dict_table));
+
+    // 7. Op-flags.
+    let op_flags_bytes = pack_op_flags(&ops);
+
+    // 8. Assemble.
+    let mut out = Vec::with_capacity(
+        1 + 11 * 4
+            + lit_table_section.len()
+            + lit_stream.len()
+            + len_table_section.len()
+            + len_stream.len()
+            + dist_lo_table_section.len()
+            + dist_lo_stream.len()
+            + dist_hi_table_section.len()
+            + dist_hi_stream.len()
+            + dict_table_bytes.len()
+            + dict_stream.len()
+            + op_flags_bytes.len(),
+    );
+    out.push(select::LOCAL); // mark this as the LOCAL path
+    push_u32(&mut out, ops.len() as u32);
+    push_u32(&mut out, lit_table_section.len() as u32);
+    push_u32(&mut out, lit_stream.len() as u32);
+    push_u32(&mut out, len_table_section.len() as u32);
+    push_u32(&mut out, len_stream.len() as u32);
+    push_u32(&mut out, dist_lo_table_section.len() as u32);
+    push_u32(&mut out, dist_lo_stream.len() as u32);
+    push_u32(&mut out, dist_hi_table_section.len() as u32);
+    push_u32(&mut out, dist_hi_stream.len() as u32);
+    push_u32(&mut out, dict_table_bytes.len() as u32);
+    push_u32(&mut out, dict_stream.len() as u32);
+    push_u32(&mut out, op_flags_bytes.len() as u32);
+    out.extend_from_slice(&lit_table_section);
+    out.extend_from_slice(&lit_stream);
+    out.extend_from_slice(&len_table_section);
+    out.extend_from_slice(&len_stream);
+    out.extend_from_slice(&dist_lo_table_section);
+    out.extend_from_slice(&dist_lo_stream);
+    out.extend_from_slice(&dist_hi_table_section);
+    out.extend_from_slice(&dist_hi_stream);
+    out.extend_from_slice(&dict_table_bytes);
+    out.extend_from_slice(&dict_stream);
+    out.extend_from_slice(&op_flags_bytes);
+
+    if out.len() >= data.len() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 // ---------------------------------------------------------------
 // Decoder
 // ---------------------------------------------------------------
@@ -395,7 +606,21 @@ pub fn decode_v45_multistream(payload: &[u8]) -> Vec<u8> {
     let mut off = 0usize;
     let dict_select = payload[off];
     off += 1;
-    let sub_dict = load_sub_dict(dict_select).expect("dict_select refers to unknown dict");
+
+    // v4.8: dict_select = 4 (LOCAL) uses a 5348-bit bitmask and
+    // rebuilds the local sub-dict from the bitmask + global dict.
+    // Other values use a fixed sub-dict from `load_sub_dict`.
+    let bitmask_bytes = dict_bitmask_bytes(dict_select);
+    let sub_dict = if dict_select == select::LOCAL {
+        // The actual remap + sub-dict are built below from the bitmask.
+        // We need a placeholder dict here to pass type checks; it gets
+        // replaced before being used.
+        // Use the global trained dict as a placeholder; we'll replace
+        // it once the bitmask is read.
+        Dictionary::new()
+    } else {
+        load_sub_dict(dict_select).expect("dict_select refers to unknown dict")
+    };
 
     let n_ops = read_u32(payload, &mut off) as usize;
     // Read 10 u32 sizes.
@@ -433,20 +658,46 @@ pub fn decode_v45_multistream(payload: &[u8]) -> Vec<u8> {
     let dict_stream = &payload[off..off + dict_stream_len];
     off += dict_stream_len;
 
-    // Decode the dict table (sparse v4.6 format):
-    //   [32 bytes bitmask][rANS table for the dense alphabet]
-    if dict_table_bytes.len() < DICT_BITMASK_BYTES {
+    // Decode the dict table. The bitmask size depends on dict_select:
+    //   0..=3: 32-byte bitmask (256-alphabet sub-dicts)
+    //   4    : 669-byte bitmask (5348-alphabet, local sub-dict)
+    if dict_table_bytes.len() < bitmask_bytes {
         panic!(
             "dict table section too short: {} bytes (need at least {} for bitmask)",
             dict_table_bytes.len(),
-            DICT_BITMASK_BYTES
+            bitmask_bytes
         );
     }
-    let mut dict_bitmask = [0u8; DICT_BITMASK_BYTES];
-    dict_bitmask.copy_from_slice(&dict_table_bytes[..DICT_BITMASK_BYTES]);
-    let dict_table_inner_bytes = &dict_table_bytes[DICT_BITMASK_BYTES..];
+    let dict_bitmask: Vec<u8> = dict_table_bytes[..bitmask_bytes].to_vec();
+    let dict_table_inner_bytes = &dict_table_bytes[bitmask_bytes..];
     let dict_table = decode_table(dict_table_inner_bytes);
-    let dict_remap = sparse_dict_decode_remap(&dict_bitmask);
+
+    // Build the dict remap and sub-dict from the bitmask.
+    // For LOCAL: walk the 5348-bit bitmask, get the chosen original
+    // ids (in id-ascending order), build the local sub-dict.
+    // For others: walk the 256-bit bitmask, get the local ids.
+    let (dict_remap, sub_dict) = if dict_select == select::LOCAL {
+        let mut remap: Vec<u16> = Vec::new();
+        for id in 0..FULL_DICT_ENTRIES as u16 {
+            let byte = (id / 8) as usize;
+            let bit = id % 8;
+            if dict_bitmask[byte] & (1 << bit) != 0 {
+                remap.push(id);
+            }
+        }
+        let full = trained_dict();
+        let mut local = Dictionary::new();
+        for &id in &remap {
+            if let Some(token) = full.get(id) {
+                local.insert(token, 1);
+            }
+        }
+        (remap, local)
+    } else {
+        let mut bitmask_arr = [0u8; DICT_BITMASK_BYTES];
+        bitmask_arr.copy_from_slice(&dict_bitmask);
+        (sparse_dict_decode_remap(&bitmask_arr), sub_dict)
+    };
     let op_flags_bytes = &payload[off..off + op_flags_len];
 
     // Decode the rANS streams. v4.7: the 4 base streams use the
@@ -463,19 +714,28 @@ pub fn decode_v45_multistream(payload: &[u8]) -> Vec<u8> {
     let len_values = crate::rans_v4::sparse_rans_decode_u8(len_table_bytes, len_stream, n_matches);
     let dist_lo_values = crate::rans_v4::sparse_rans_decode_u8(dist_lo_table_bytes, dist_lo_stream, n_matches);
     let dist_hi_values = crate::rans_v4::sparse_rans_decode_u8(dist_hi_table_bytes, dist_hi_stream, n_matches);
-    // The dict stream encodes dense indices (0..N-1). We need to
-    // remap each dense index to the original dict id via the bitmask.
+    // The dict stream encodes dense indices (0..N-1). For FIXED sub-dicts
+    // (Trained/Code/JSON) the dense id needs to be remapped to the
+    // sub-dict's id (0..255). For the LOCAL sub-dict, the dense id
+    // IS the local id directly (because the encoder built the rANS
+    // stream from the local ids 0..K-1 with no remap).
     let dict_dense_values = rans_decode(dict_stream, &dict_table, n_dict_refs);
-    let dict_values: Vec<u32> = dict_dense_values
-        .iter()
-        .map(|&d| {
-            if (d as usize) < dict_remap.len() {
-                dict_remap[d as usize] as u32
-            } else {
-                panic!("dense dict idx {} out of range (remap size {})", d, dict_remap.len())
-            }
-        })
-        .collect();
+    let dict_values: Vec<u32> = if dict_select == select::LOCAL {
+        // LOCAL: dense id IS the local id. Use directly.
+        dict_dense_values
+    } else {
+        // FIXED: remap dense to local id.
+        dict_dense_values
+            .iter()
+            .map(|&d| {
+                if (d as usize) < dict_remap.len() {
+                    dict_remap[d as usize] as u32
+                } else {
+                    panic!("dense dict idx {} out of range (remap size {})", d, dict_remap.len())
+                }
+            })
+            .collect()
+    };
 
     // Reconstruct ops by interleaving per the flags.
     let mut ops: Vec<Op> = Vec::with_capacity(n_ops);
@@ -972,5 +1232,96 @@ mod tests {
             "sparse payload suspiciously large: {} bytes",
             payload.len()
         );
+    }
+
+    // ---------------------------------------------------------------
+    // v4.8: per-block local sub-dict from the full 5348-entry dict
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn select_local_dict_ids_basic() {
+        // The text dict has "the" (id 0, score 1000), "and" (id 1, 800),
+        // "ing" (id 2, 600), etc. A text block uses many of these.
+        let data = b"the the the and the and ing ing";
+        let full = trained_dict();
+        let ids = select_local_dict_ids(data, &full, 10, 3);
+        assert!(!ids.is_empty(), "should find at least one match");
+        // All ids should be in the full dict's range.
+        for &id in &ids {
+            assert!((id as usize) < FULL_DICT_ENTRIES);
+        }
+        // Ids should be sorted ascending (for the bitmask walk).
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "ids must be sorted ascending");
+    }
+
+    #[test]
+    fn select_local_dict_ids_empty_for_unmatched() {
+        // Pseudo-random data: the dict has no matches in this block.
+        let mut data = Vec::with_capacity(2000);
+        let mut s: u32 = 0xdeadbeef;
+        for _ in 0..2000 {
+            s = s.wrapping_mul(1103515245).wrapping_add(12345);
+            data.push((s >> 16) as u8);
+        }
+        let full = trained_dict();
+        let ids = select_local_dict_ids(&data, &full, 100, 3);
+        // Should be empty or near-empty.
+        assert!(ids.len() < 5, "expected few or no matches, got {}", ids.len());
+    }
+
+    #[test]
+    fn build_local_dict_roundtrips() {
+        let data = b"the and ing of to in is";
+        let full = trained_dict();
+        let ids = select_local_dict_ids(data, &full, 10, 3);
+        let local = build_local_dict(&full, &ids);
+        assert!(local.len() == ids.len());
+        // Each id should map to a token that's in the local dict.
+        for &id in &ids {
+            let token = full.get(id).unwrap();
+            assert!(local.iter().any(|(_, t)| t == token));
+        }
+    }
+
+    #[test]
+    fn dict_bitmask_bytes_per_select() {
+        // 32 bytes for fixed sub-dicts, 669 bytes for LOCAL.
+        assert_eq!(dict_bitmask_bytes(select::TRAINED), 32);
+        assert_eq!(dict_bitmask_bytes(select::CODE), 32);
+        assert_eq!(dict_bitmask_bytes(select::JSON), 32);
+        assert_eq!(dict_bitmask_bytes(select::LOCAL), LOCAL_BITMASK_BYTES);
+        assert_eq!(LOCAL_BITMASK_BYTES, (FULL_DICT_ENTRIES + 7) / 8);
+    }
+
+    #[test]
+    fn roundtrip_via_local_path() {
+        // Build a data block with dict matches.
+        let phrase = b"the cat sat on the mat ";
+        let mut data = Vec::new();
+        for _ in 0..2000 {
+            data.extend_from_slice(phrase);
+        }
+        // The LOCAL path is only tried on the v4.5 path in the
+        // codec. We test the standalone encode/decode here.
+        let payload = encode_v45_multistream_local(&data).expect("LOCAL encode should succeed");
+        let decoded = decode_v45_multistream(&payload);
+        assert_eq!(decoded, data, "LOCAL roundtrip failed");
+    }
+
+    #[test]
+    fn local_path_k0_falls_back() {
+        // Pseudo-random data: no dict matches → encode_v45_multistream_local returns None.
+        let mut data = Vec::with_capacity(2000);
+        let mut s: u32 = 0xc0ffee;
+        for _ in 0..2000 {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            data.push(s as u8);
+        }
+        let result = encode_v45_multistream_local(&data);
+        assert!(result.is_none(), "LOCAL on random data should return None");
     }
 }

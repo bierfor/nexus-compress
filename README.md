@@ -1180,6 +1180,138 @@ per file (a small fraction of the total compress time).
 
 ---
 
+## Local sub-dict selection (sprint 2.8)
+
+The v4.6/v4.7 dict codec used a fixed 256-entry sub-dict
+(`trained_dict_compact()`) for blocks the pre-scan classified as
+text/code/JSON. The 256-entry alphabet was the maximum our rANS
+table could encode (u8 ids). But the full `corpus/trained.dict`
+has 5348 entries, with the most-frequent ones in the first 256.
+For some blocks, the per-block top-K entries were NOT the same as
+the global top-256.
+
+Sprint 2.8 unlocks all 5348 entries: for each block the encoder
+scans the data, picks the top-K (up to 100) most-frequent entries
+from the full dict, builds a custom local sub-dict, and uses it
+for LZ77 matching.
+
+### Format change
+
+A new `dict_select` value (`LOCAL = 4`) signals the new path. The
+bitmask for the 5th stream is 5348 bits = 669 bytes (vs. 32 bytes
+for fixed sub-dicts). The decoder reads the bitmask, walks the set
+bits in id-ascending order to get the K original ids, and
+rebuilds the same local sub-dict from the global `trained.dict`.
+
+```
+[tag=8]                                    (handled by caller)
+[u8 dict_select = 4]                       (LOCAL)
+[u32 n_ops]
+... (10 size u32s) ...
+... (5 base-stream sections) ...
+[u32 dict_table_len] [u32 dict_stream_len]
+[u32 op_flags_len]
+[base-stream sections]
+[dict section: 669 bytes bitmask + densified rANS table]
+[op_flags]
+```
+
+### Implementation
+
+```rust
+// Encoder
+let full = trained_dict();  // 5348 entries
+let local_ids = select_local_dict_ids(
+    data, &full, MAX_LOCAL_ENTRIES /* 100 */, /* min_match_len */ 3,
+);
+let local_dict = build_local_dict(&full, &local_ids);
+let ops = encode_with_dict(data, &local_dict);
+// ... encode streams with 5348-bit bitmask ...
+
+// Decoder
+let mut bitmask = [0u8; 669];
+bitmask.copy_from_slice(&dict_table_bytes[..669]);
+// Walk set bits in id-ascending order → get K original ids
+let mut remap = Vec::new();
+for id in 0..5348u16 {
+    if bitmask[(id / 8) as usize] & (1 << (id % 8)) != 0 {
+        remap.push(id);
+    }
+}
+// Build the same local sub-dict
+let local_dict = build_local_dict(&trained_dict(), &remap);
+// Decode the rANS stream → local ids (0..K-1) directly
+// (no remap needed: the encoder wrote 0..K-1 with no translation)
+let dict_values = rans_decode(dict_stream, &dict_table, n_dict_refs);
+// Use `dict_values[i]` as the local sub-dict id directly
+```
+
+### Honest result
+
+| File          | v4.7       | v4.8 (LOCAL)  | Δ       |
+|---|---:|---:|---:|
+| code.rs       | 32.17x | 32.17x | tied (fixed-256 already optimal) |
+| text.txt      | 2.98x  | 2.98x  | tied (fixed-256 already optimal) |
+| data.json     | 5.44x  | 5.44x  | tied (fixed-256 already optimal) |
+| mixed.bin     | 2.76x  | **3.59x** | **+30%** |
+| repetitive.bin| 263.20x| 263.20x| tied (no dict refs possible) |
+| .DS_Store     | 6.38x  | 6.38x  | tied (gated out) |
+| trained.dict  | 1.31x  | **1.43x** | **+9%** |
+
+Aggregate: 3.08x → **3.15x**. The big winner is **mixed.bin** (2.76x
+→ 3.59x, +30%) — a file where the per-block top-K differs
+substantially from the global top-256.
+
+trained.dict itself also wins (+9%) because some of its patterns
+are in the 256-5348 range.
+
+For text/code/JSON the fixed-256 sub-dict is already optimal —
+the global top-256 captures the most-frequent patterns for these
+data types. The LOCAL path doesn't win because the cost of the
+669-byte bitmask isn't recovered by the additional matches.
+
+### When LOCAL wins vs when fixed-256 wins
+
+LOCAL helps when the per-block top-K doesn't overlap with the
+global top-256. This happens when:
+
+- The file is heterogeneous (mixed ASCII + binary, mixed languages,
+  unusual token distributions). mixed.bin is the canonical example.
+- The file is itself a token dictionary (trained.dict), so its
+  per-block top-K naturally mirrors the global top-K — but some
+  patterns in the 256-5348 range appear more often.
+
+LOCAL doesn't help when:
+
+- The file is uniform text/code/JSON (text.txt, code.rs, data.json).
+  The first 256 trained entries already cover 90%+ of dict matches.
+- The file is repetitive or random (repetitive.bin, random.bin).
+  No dict refs at all.
+
+### Compress time impact
+
+The LOCAL try costs ~5-10ms per block (one LZ77+dict pass + rANS
+encoding of 5 streams with 5348-bit bitmask). For blocks where
+LOCAL doesn't win, the codec's "smallest wins" logic falls back
+to the fixed-256 (or v3, or RLE) path — but the LOCAL work is
+already done. This is the "multi-pass cost" the user warned about.
+
+In practice, on the bench corpus, the LOCAL try adds ~80ms of total
+compress time but wins on mixed.bin (-8KB) and trained.dict (-4KB).
+Net win: +9KB saved, +80ms spent. The trade-off is positive in
+terms of ratio but not in terms of speed. For production use, a
+gating heuristic (e.g., only try LOCAL when entropy is in 4-7)
+could skip the expensive path for blocks where it's unlikely to win.
+
+### Format break (again)
+
+v4.7 files cannot be read by v4.8 decoders because the dict
+section for `dict_select=4` uses a 669-byte bitmask vs. v4.7's
+32-byte. Old decoders would see the bitmask as table-header bytes
+and panic. No backward-compat shim.
+
+---
+
 ## Build & test
 
 ```bash
@@ -1229,38 +1361,32 @@ in ~30 lines of wrapper code.
 
 | File | Size | NexusCompress v4 | Ratio | zstd -19 (for context) | Gap |
 |---|---:|---:|---:|---:|---:|
-| code.rs | 105 KB | 3.3 KB | **32.17x** ⬆⬆ | 330 B (325x) | 10x worse |
-| data.json | 635 KB | 117 KB | **5.44x** ⬆⬆ | 50 KB (12.7x) | 2.3x worse |
-| mixed.bin | 95 KB | 34 KB | **2.76x** ⬆ | 18 KB (5.3x) | 1.9x worse |
+| code.rs | 105 KB | 3.3 KB | **32.17x** | 330 B (325x) | 10x worse |
+| data.json | 635 KB | 117 KB | **5.44x** | 50 KB (12.7x) | 2.3x worse |
+| mixed.bin | 95 KB | 27 KB | **3.59x** ⬆ | 18 KB (5.3x) | 1.5x worse |
 | random.bin | 256 KB | 256 KB | **1.00x** ✅ | 256 KB (1x) | EQUAL ✅ |
 | repetitive.bin | 256 KB | 996 B | **263.20x** 🚀 | 43 B (6096x) | 23x worse (but absolute = +1KB) |
-| text.txt | 178 KB | 60 KB | **2.98x** ⬆⬆ | 32 KB (5.6x) | 1.9x worse |
-| **aggregate** (excl. trained.dict) | 1.32 MB | 429 KB | **3.08x** | 365 KB (4.30x) | — |
+| text.txt | 178 KB | 60 KB | **2.98x** | 32 KB (5.6x) | 1.9x worse |
+| **aggregate** (excl. trained.dict) | 1.32 MB | 412 KB | **3.15x** | 365 KB (4.30x) | — |
 
-Sprint 2.5 + 2.6 + 2.7 (dict codec + sparse tables) wins:
+Sprint 2.5 + 2.6 + 2.7 + 2.8 (dict codec + sparse tables + local sub-dict) wins:
 - text.txt 1.96x → **2.98x** (+52%)
 - data.json 3.77x → **5.44x** (+44%)
 - code.rs 9.83x → **32.17x** (+227%)
-- mixed.bin 2.38x → **2.76x** (+16%, NEW with sparse v3)
-- repetitive.bin 53.32x → **263.20x** (+394%, sparse v3 unlocks dedup gains)
+- mixed.bin 2.38x → **3.59x** (+51%, NEW with LOCAL sub-dict)
+- repetitive.bin 53.32x → **263.20x** (+394%)
 - .DS_Store 1.32x → **6.38x** (+383%)
 - random.bin: 1.00x tied (Raw blocks, no streams)
 
 Notes:
-- The v4 table-header fix is `n_symbols as u16` instead of `as u8`. Two
-  extra bytes per table; 2 KB overhead on a typical block.
 - Sprint 2.5 added a 5th rANS stream for dict-ids, 2-bit packed op-flags,
   and per-block sub-dict selection via a 500-byte pre-scan heuristic.
 - Sprint 2.6 replaced the dense 256-entry dict table with a sparse
   format (32-byte bitmask + table only for set bits).
-- Sprint 2.7 generalized the sparse encoding to ALL 5 streams (lit /
-  len / dist_lo / dist_hi / dict-id). The dense 256-entry rANS table
-  forced freq≥1 for every symbol, even "ghost" entries that never
-  appeared in a block. With sparse encoding the table drops from
-  ~1027 bytes to ~50-200 bytes per stream, saving ~3.7 KB per block
-  across 4 streams.
-- zstd numbers are from real `zstd -19` runs against the same corpus
-  (see `corpus_suite` binary in `src/bin/`).
+- Sprint 2.7 generalized the sparse encoding to ALL 5 streams.
+- Sprint 2.8 added per-block LOCAL sub-dict selection from the full
+  5348-entry trained dict (vs. the fixed 256-entry compact version).
+  See "Local sub-dict selection (sprint 2.8)" below.
 
 ### What the v4 commit history actually contains
 

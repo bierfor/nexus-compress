@@ -211,11 +211,26 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, stats: &BlockStats) ->
         None
     };
 
-    // Pick the smallest of (standard, rle, dict, none).
+    // Try the v4.8 LOCAL path. Builds a per-block sub-dict from the
+    // top-K entries of the full 5348-entry trained dict. Uses a
+    // 669-byte bitmask (5348 bits) to mark which entries are active.
+    // Wins when the block has many dict matches AND the fixed 256-entry
+    // compact sub-dict doesn't cover the most-frequent entries.
+    let local_path = if block.len() >= 8 * 1024 {
+        crate::dict_codec::encode_v45_multistream_local(block).map(|mut payload| {
+            payload.insert(0, TAG_V3_MULTISTREAM_DICT);
+            payload
+        })
+    } else {
+        None
+    };
+
+    // Pick the smallest of (standard, rle, dict, local, none).
     let candidates: Vec<(usize, Vec<u8>)> = [
         standard.map(|p| (0usize, p)),
         rle_path.map(|p| (1usize, p)),
         dict_path.map(|p| (2usize, p)),
+        local_path.map(|p| (3usize, p)),
     ]
     .into_iter()
     .flatten()
