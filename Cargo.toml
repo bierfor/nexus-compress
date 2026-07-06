@@ -1,0 +1,65 @@
+[package]
+name = "nexus-compress"
+version = "0.1.0"
+edition = "2021"
+description = "NexusCompress - hybrid compressor (LZ77 + CM + rANS)"
+license = "MIT"
+
+[[bin]]
+name = "nexus"
+path = "src/main.rs"
+
+[[bench]]
+name = "bench"
+path = "benches/bench.rs"
+harness = false
+
+[[example]]
+name = "inspect_cdc"
+path = "examples/inspect_cdc.rs"
+
+[[example]]
+name = "cdc_sweep"
+path = "examples/cdc_sweep.rs"
+
+[[example]]
+name = "debug_optimal"
+path = "examples/debug_optimal.rs"
+
+[[example]]
+name = "debug_basic"
+path = "examples/debug_basic.rs"
+
+[[example]]
+name = "debug_real"
+path = "examples/debug_real.rs"
+
+[[example]]
+name = "debug_codec"
+path = "examples/debug_codec.rs"
+
+[[example]]
+name = "debug_lazy_vs_opt"
+path = "examples/debug_lazy_vs_opt.rs"
+
+[[example]]
+name = "inspect_entropy"
+path = "examples/inspect_entropy.rs"
+
+[[example]]
+name = "debug_v3"
+path = "examples/debug_v3.rs"
+
+[[example]]
+name = "debug_rans"
+path = "examples/debug_rans.rs"
+
+[[example]]
+name = "test_rans"
+path = "examples/test_rans.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
