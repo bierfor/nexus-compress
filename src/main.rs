@@ -18,28 +18,72 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "usage:\n  nexus c <input> <output.nexus>\n  nexus d <input.nexus> <output>\n  nexus bench"
+            "usage:\n  nexus c <input> <output.nexus>      # input is a file\n  \
+             nexus c <dir>  <output.nxar>      # input is a directory (auto-detected)\n  \
+             nexus d <input.nexus|nxar> <output>\n  \
+             nexus bench"
         );
         std::process::exit(2);
     }
     match args[1].as_str() {
         "c" | "compress" => {
-            let input = fs::read(&args[2]).expect("read input");
-            let out = compress(&input);
-            fs::write(&args[3], &out).expect("write output");
-            eprintln!(
-                "{} -> {} ({:.2}x), {} blocks",
-                args[2],
-                args[3],
-                input.len() as f64 / out.len().max(1) as f64,
-                (input.len() + 256 * 1024 - 1) / (256 * 1024)
-            );
+            if args.len() < 4 {
+                eprintln!("usage: nexus c <input> <output>");
+                std::process::exit(2);
+            }
+            let input = std::path::Path::new(&args[2]);
+            let output = &args[3];
+            if input.is_dir() {
+                // Directory compression → NXAR archive.
+                let (result, archive) = nexus_compress::api::compress_directory(
+                    input,
+                    nexus_compress::api::CompressionLevel::Fast,
+                )
+                .expect("compress directory");
+                fs::write(output, &archive).expect("write output");
+                eprintln!(
+                    "{} -> {} ({:.2}x), {} files, {} bytes -> {} bytes",
+                    args[2],
+                    args[3],
+                    result.aggregate_ratio,
+                    result.n_files,
+                    result.total_original_size,
+                    result.total_compressed_size
+                );
+            } else {
+                let bytes = fs::read(input).expect("read input");
+                let out = compress(&bytes);
+                fs::write(output, &out).expect("write output");
+                eprintln!(
+                    "{} -> {} ({:.2}x), {} blocks",
+                    args[2],
+                    args[3],
+                    bytes.len() as f64 / out.len().max(1) as f64,
+                    (bytes.len() + 256 * 1024 - 1) / (256 * 1024)
+                );
+            }
         }
         "d" | "decompress" => {
+            if args.len() < 4 {
+                eprintln!("usage: nexus d <input.nexus|nxar> <output>");
+                std::process::exit(2);
+            }
             let input = fs::read(&args[2]).expect("read input");
-            let out = decompress(&input);
-            fs::write(&args[3], &out).expect("write output");
-            eprintln!("{} -> {} ({} bytes)", args[2], args[3], out.len());
+            // Auto-detect NXAR vs .nexus by magic.
+            if input.len() >= 4 && &input[0..4] == b"NXAR" {
+                let out_path = std::path::Path::new(&args[3]);
+                std::fs::create_dir_all(out_path).expect("create output dir");
+                let result = nexus_compress::api::decompress_directory(&input, out_path)
+                    .expect("decompress directory");
+                eprintln!(
+                    "{} -> {} ({} files, {:.2}x)",
+                    args[2], args[3], result.n_files, result.aggregate_ratio
+                );
+            } else {
+                let out = decompress(&input);
+                fs::write(&args[3], &out).expect("write output");
+                eprintln!("{} -> {} ({} bytes)", args[2], args[3], out.len());
+            }
         }
         "bench" => {
             run_bench();

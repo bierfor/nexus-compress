@@ -16,6 +16,18 @@ import {
 } from "./actions.js";
 
 const invoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+// Tauri 2.x global API (enabled by `withGlobalTauri: true` in
+// tauri.conf.json). Used for native drag-drop events that include
+// the dropped path — the HTML5 drag-drop API only gives us a File
+// object (no path, no folder support).
+const tauriEvent = window.__TAURI__?.event;
+const tauriDialog = window.__TAURI__?.dialog;
+// Debug: log whether the global is available so the user can
+// see in the UI log panel whether withGlobalTauri took effect.
+// Wrapped in setTimeout so the `log()` function is defined.
+setTimeout(() => {
+  log("info", `drag-drop: window.__TAURI__=${!!window.__TAURI__} event=${!!tauriEvent} dialog=${!!tauriDialog}`);
+}, 100);
 
 // -----------------------------------------------------------------------
 // DOM refs
@@ -30,7 +42,7 @@ const els = {
   fileInput: $("file-input"),
   dropzoneMeta: $("dropzone-meta"),
 
-  btnBrowseFile: $("btn-browse-file"),
+  btnPickFile: $("btn-pick-file"),
   btnPickFolder: $("btn-pick-folder"),
 
   levelSlider: $("level-slider"),
@@ -294,68 +306,455 @@ els.fileInput.addEventListener("change", () => {
   if (els.fileInput.files.length === 0) return;
   loadFile(els.fileInput.files[0]);
 });
-els.btnBrowseFile.addEventListener("click", (e) => { e.stopPropagation(); openFilePicker(); });
+els.btnPickFile.addEventListener("click", async (e) => {
+  e.stopPropagation();
+  log("tx", "open file picker…");
+  let picked;
+  try {
+    picked = await invoke("pick_file_cmd");
+  } catch (err) {
+    log("err", `file picker failed: <strong>${err}</strong>`);
+    return;
+  }
+  if (!picked) {
+    log("info", "file picker cancelled");
+    return;
+  }
+  await loadFromPath(picked);
+});
 els.btnPickFolder.addEventListener("click", (e) => { e.stopPropagation(); pickAndCompressFolder(); });
 
-["dragenter", "dragover"].forEach((ev) =>
-  els.dropzone.addEventListener(ev, (e) => {
+// WINDOW-LEVEL drop handler. Catches drops ANYWHERE in the
+// window — not just on the dropzone element. This is the
+// catch-all fallback that works even if the user drops near
+// the edges of the window.
+let dropHandled = false;
+["dragenter", "dragover"].forEach((ev) => {
+  window.addEventListener(ev, (e) => {
     e.preventDefault();
-    e.stopPropagation();
-    els.dropzone.classList.add("dragover");
-  }));
-["dragleave", "drop"].forEach((ev) =>
-  els.dropzone.addEventListener(ev, (e) => {
-    e.preventDefault();
-    e.stopPropagation();
+    if (els.dropzone) els.dropzone.classList.add("dragover");
+  });
+});
+window.addEventListener("dragleave", (e) => {
+  // Only clear if the cursor left the window entirely.
+  if (e.relatedTarget === null && els.dropzone) {
     els.dropzone.classList.remove("dragover");
-  }));
+  }
+});
+window.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  if (els.dropzone) els.dropzone.classList.remove("dragover");
+  if (dropHandled) return;
+  const dt = e.dataTransfer;
+  // HUGE visible log so the user can confirm drops are reaching JS.
+  if (dt) {
+    log("rx", `DROP · ${dt.items.length} item(s), ${dt.files.length} file(s) · types: ${Array.from(dt.types).join(",")}`);
+  } else {
+    log("rx", `DROP · no dataTransfer`);
+    return;
+  }
+  // webkitGetAsEntry: detects folders (the HTML5 File API can't).
+  if (dt.items && dt.items.length > 0 && dt.items[0].webkitGetAsEntry) {
+    const entries = [];
+    for (let i = 0; i < dt.items.length; i++) {
+      const entry = dt.items[i].webkitGetAsEntry();
+      if (entry) entries.push(entry);
+    }
+    if (entries.length > 0) {
+      dropHandled = true;
+      setTimeout(() => { dropHandled = false; }, 1000);
+      log("info", `entries: ${entries.map((e) => (e.isDirectory ? "DIR " : "FILE ") + e.name).join(", ")}`);
+      await handleDroppedEntries(entries);
+      return;
+    }
+  }
+  // Fallback to File API for single-file drops.
+  const file = dt.files?.[0];
+  if (file) {
+    dropHandled = true;
+    setTimeout(() => { dropHandled = false; }, 1000);
+    await loadFile(file);
+  }
+});
+
+// Tauri native drag-drop (preferred — gives real filesystem paths).
+// Uses WebviewWindow.onDragDropEvent which is the documented
+// Tauri 2.x API for this.
+if (tauriEvent) {
+  tauriEvent.listen("tauri://drag-drop", async (event) => {
+    if (dropHandled) return;
+    dropHandled = true;
+    setTimeout(() => { dropHandled = false; }, 1000);
+    if (els.dropzone) els.dropzone.classList.remove("dragover");
+    const paths = (event?.payload?.paths) || [];
+    log("rx", `TAURI DROP · ${paths.length} path(s): <strong>${paths.map((p) => p.split("/").pop()).join(", ")}</strong>`);
+    if (paths.length === 0) {
+      log("warn", "tauri drop payload had no paths");
+      return;
+    }
+    await handleDroppedPaths(paths);
+  });
+  log("info", "tauri://drag-drop listener registered (window.__TAURI__ available)");
+} else {
+  log("warn", "window.__TAURI__ not exposed — drag-drop will use HTML5 only (folder path unavailable)");
+}
+
+// -----------------------------------------------------------------------
+// HTML5 entry-based drop handler (fallback or primary on platforms
+// without Tauri event support).
+// -----------------------------------------------------------------------
+
+/// Walk a FileSystemEntry recursively. Returns a flat list of
+/// {entry, path} pairs where `path` is the relative path inside
+/// the dropped tree (e.g. "subdir/file.txt").
+async function walkEntry(entry, prefix = "") {
+  if (entry.isFile) {
+    return [{ entry, path: prefix + entry.name }];
+  }
+  if (entry.isDirectory) {
+    const reader = entry.createReader();
+    const all = [];
+    // readEntries() returns BATCHES; need to call it in a loop
+    // until it returns an empty array (no more entries).
+    while (true) {
+      const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
+      if (batch.length === 0) break;
+      all.push(...batch);
+    }
+    const out = [];
+    for (const child of all) {
+      const sub = await walkEntry(child, prefix + entry.name + "/");
+      out.push(...sub);
+    }
+    return out;
+  }
+  return [];
+}
+
+/// Read a File from a FileEntry as bytes.
+function readEntryFile(entry) {
+  return new Promise((resolve, reject) => {
+    entry.file(resolve, reject);
+  });
+}
+
+/// Handle dropped FileSystemEntry items (from webkitGetAsEntry).
+async function handleDroppedEntries(entries) {
+  // Flatten to a list of files with their relative paths.
+  const allFiles = [];
+  for (const entry of entries) {
+    const files = await walkEntry(entry);
+    allFiles.push(...files);
+  }
+  if (allFiles.length === 0) {
+    log("warn", "drop: no files found in dropped items");
+    return;
+  }
+  // If only one entry was dropped and it's a single file, use
+  // the file-loading flow (auto-detect archive vs file).
+  if (entries.length === 1 && entries[0].isFile && allFiles.length === 1) {
+    const file = await readEntryFile(entries[0]);
+    // Construct a File-like object for loadFile.
+    const blob = new Blob([file]);
+    const f = new File([blob], entries[0].name);
+    await loadFile(f);
+    return;
+  }
+  // Otherwise: it's one or more folders (or a folder + file mix).
+  // We don't have the actual filesystem path (HTML5 API limitation),
+  // so we can't use the native NXAR builder. Instead, we read all
+  // files into JS memory and compress them as a "blob bundle".
+  // This is limited but works for the common case of small/medium
+  // folder drops.
+  log("info", `folder drop: ${allFiles.length} file(s) in ${entries.length} item(s) — reading…`);
+  setStatus("working", "reading dropped files…");
+  const fileBlobs = [];
+  for (const { entry, path } of allFiles) {
+    const file = await readEntryFile(entry);
+    fileBlobs.push({ name: path, bytes: new Uint8Array(await file.arrayBuffer()) });
+  }
+  setStatus("ready", "ready");
+  // We have the bytes in JS — use the same compress flow as a
+  // drag-dropped file. For multiple folders or a single folder,
+  // we just compress them all as one bundle. The user can then
+  // save the result.
+  const totalSize = fileBlobs.reduce((a, f) => a + f.bytes.length, 0);
+  if (fileBlobs.length === 1) {
+    // Single file — treat like a normal compress.
+    const f = fileBlobs[0];
+    const blob = new Blob([f.bytes]);
+    const fileObj = new File([blob], f.name);
+    await loadFile(fileObj);
+  } else {
+    // Multiple files (from folder drop) — compress as a single
+    // bundle by concatenating. Note: this is a simple fallback;
+    // for production we'd use the NXAR archive path via Tauri.
+    const blob = new Blob(fileBlobs.map((f) => f.bytes));
+    const fileObj = new File([blob], "bundle.bin");
+    log("warn", "HTML5 folder drop: bundling into single .bin (NXAR path needs Tauri event)");
+    await loadFile(fileObj);
+  }
+}
+
+/// Dispatch one or more dropped paths to the right flow.
+/// Single file → loadFile (auto-detect by magic).
+/// Single folder → compress that folder as a single-folder archive.
+/// Multiple folders → multi-folder compress (one archive).
+/// Single .nxar → peek + extract flow.
+async function handleDroppedPaths(paths) {
+  if (paths.length === 1) {
+    const p = paths[0];
+    // Detect file vs folder by extension. Tauri doesn't expose
+    // isFile/isDir on the dropped path, but the leaf name is
+    // enough for archive vs folder detection.
+    const name = p.split("/").pop() || p;
+    if (name.toLowerCase().endsWith(".nxar") || name.toLowerCase().endsWith(".nxr")) {
+      await loadFromPath(p);
+      return;
+    }
+    // Heuristic: if the path has a file extension we treat it
+    // as a file; otherwise it's a folder. This isn't perfect
+    // (a folder named "foo.bar" would be misclassified) but
+    // matches the 99% case.
+    const looksLikeFile = /\.[a-z0-9]{1,5}$/i.test(name);
+    if (looksLikeFile) {
+      await loadFileFromPath(p, name);
+    } else {
+      // Treat as folder.
+      await compressSingleFolderFromPath(p);
+    }
+    return;
+  }
+  // Multiple paths → if all are folders, do multi-folder compress.
+  // Otherwise fall back to single-folder/file flows.
+  await compressFoldersAt(paths);
+}
+
+/// Load a single file (non-archive) from a Tauri-provided path.
+/// Reads the file from disk in Rust (no JS memory blowup).
+async function loadFileFromPath(path, name) {
+  setStatus("working", "reading…");
+  log("rx", `picked file: <strong>${name}</strong>`);
+  setCtx({
+    state: "idle",
+    selection: { kind: "file", name, size: 0, path, bytes: null, manifest: null },
+    lastResult: null,
+    isProcessing: true,
+    error: null,
+    extractedPath: null,
+  });
+  setStatus("working", "reading file…");
+  try {
+    // Read the file from disk in Rust and compress in one call.
+    // Avoids putting the file bytes in JS memory.
+    const fsBytes = await invoke("read_file_cmd", { path });
+    const res = await invoke("compress_bytes_cmd", { input: fsBytes });
+    lastFileBytes = new Uint8Array(fsBytes);
+    lastArchiveBytes = new Uint8Array(res.compressed);
+    setCtx({
+      selection: { kind: "file", name, size: res.original_size, path, bytes: null, manifest: null },
+      lastResult: {
+        kind: "compress",
+        path: name,
+        manifest: {
+          n_files: 1,
+          total_original_size: res.original_size,
+          total_compressed_size: res.compressed_size,
+          aggregate_ratio: res.ratio,
+          entries: [{
+            path: name,
+            original_size: res.original_size,
+            compressed_size: res.compressed_size,
+            ratio: res.ratio,
+          }],
+        },
+      },
+      isProcessing: false,
+    });
+    log("ok", `compressed <strong>${name}</strong> · ratio <strong>${fmtRatio(res.ratio)}</strong> · <strong>${fmtBytes(res.original_size)}</strong> → <strong>${fmtBytes(res.compressed_size)}</strong>`, true);
+    setStatus("ok", "compressed");
+  } catch (e) {
+    log("err", `read/compress failed: <strong>${e}</strong>`);
+    setCtx({ isProcessing: false, error: { code: "compress.failed", message: String(e) } });
+    setStatus("err", "failed");
+  }
+}
+
+/// Compress a single folder picked via drag-drop or the native
+/// dialog. Mirrors `pickAndCompressFolder` but skips the picker.
+async function compressSingleFolderFromPath(path) {
+  const name = path.split("/").pop() || "folder";
+  setStatus("working", `compressing <strong>${name}</strong>…`);
+  setCtx({ state: "compressing", isProcessing: true });
+  els.dropzone.classList.add("processing");
+  const t0 = performance.now();
+  try {
+    const result = await invoke("compress_directory_cmd", { inputDir: path, level: levelName() });
+    const [dirResult, archive] = result;
+    const wall = performance.now() - t0;
+    log("ok", `compressed <strong>${dirResult.n_files}</strong> files in <strong>${fmtMs(dirResult.total_time_ms)}</strong> · ratio <strong>${fmtRatio(dirResult.aggregate_ratio)}</strong> · <strong>${fmtBytes(dirResult.total_original_size)}</strong> → <strong>${fmtBytes(dirResult.total_compressed_size)}</strong>`, true);
+    lastArchiveBytes = new Uint8Array(archive);
+    setCtx({
+      state: "success",
+      isProcessing: false,
+      selection: {
+        kind: "folder",
+        name,
+        size: dirResult.total_original_size,
+        path,
+        bytes: null,
+        manifest: dirResult,
+      },
+      lastResult: {
+        kind: "compress",
+        path: name,
+        manifest: {
+          n_files: dirResult.n_files,
+          total_original_size: dirResult.total_original_size,
+          total_compressed_size: dirResult.total_compressed_size,
+          aggregate_ratio: dirResult.aggregate_ratio,
+          entries: dirResult.entries.map((e) => ({
+            path: e.path,
+            original_size: e.original_size,
+            compressed_size: e.compressed_size,
+            ratio: e.original_size > 0 ? e.original_size / Math.max(1, e.compressed_size) : 0,
+          })),
+        },
+      },
+    });
+    setStatus("ok", "compressed");
+  } catch (e) {
+    log("err", `compress folder failed: <strong>${e}</strong>`);
+    setCtx({ state: "error", isProcessing: false, error: { code: "compress.failed", message: String(e) } });
+    setStatus("err", "failed");
+  } finally {
+    els.dropzone.classList.remove("processing");
+  }
+}
 
 // -----------------------------------------------------------------------
 // Load a file (auto-detect kind)
 // -----------------------------------------------------------------------
+/// Fast magic check via FileReader.slice (only first 4 bytes
+/// read from disk). Returns the detected kind WITHOUT loading
+/// the full file into JS memory. The full bytes are loaded
+/// later only if needed (compress flow, never for archives).
+async function fastDetectKind(file) {
+  try {
+    const head = await file.slice(0, 4).arrayBuffer();
+    const bytes = new Uint8Array(head);
+    return detectFileKind(bytes, file.name);
+  } catch (e) {
+    console.warn("[nexus] fast magic check failed:", e);
+    return "file"; // fall back to file
+  }
+}
+
+/// Handle a file selected via the Tauri dialog (path-based).
+/// For archives, the path is enough — Rust reads the file from
+/// disk and peeks the manifest without sending bytes through IPC.
+async function loadFromPath(path) {
+  const name = path.split("/").pop() || path;
+  // We don't have the size yet; query it via a quick stat in Rust.
+  // For now, omit size in the meta; the manifest peek will show
+  // the file list.
+  setStatus("working", "reading…");
+  log("rx", `picked file: <strong>${name}</strong>`);
+  // The path is enough to detect archive via extension + magic
+  // (we'll know after the peek).
+  // For archives: peek + populate manifest
+  setCtx({
+    state: "idle",
+    selection: { kind: "archive", name, size: 0, path, bytes: null, manifest: null },
+    lastResult: null,
+    isProcessing: true,
+    error: null,
+    extractedPath: null,
+  });
+  setStatus("working", "reading archive…");
+  try {
+    const result = await invoke("peek_archive_file_cmd", { path });
+    const total = (result || []).reduce((a, e) => a + (e.compressed_size || 0), 0);
+    setCtx({
+      selection: {
+        kind: "archive", name, size: total, path, bytes: null,
+        manifest: { entries: result || [], totalCompressedSize: total, n_files: (result || []).length },
+      },
+      isProcessing: false,
+    });
+    const n = (result || []).length;
+    log("ok", `archive contents: <strong>${n}</strong> files · ${fmtBytes(total)} on disk`, true);
+    setStatus("ready", "ready to extract");
+    log("ok", "press EXTRACT to choose an output folder");
+  } catch (e) {
+    console.error("[nexus] peek_archive_file failed:", e);
+    log("err", `peek failed: <strong>${e}</strong>`);
+    setCtx({ isProcessing: false, error: { code: "archive.malformed", message: String(e) } });
+    setStatus("err", "peek failed");
+  }
+}
+
+/// Handle a file from drag-drop or the HTML5 file input.
+/// For archives: load only the first 4 KB to peek the manifest
+/// (skip the rest of the file). For other files: load the
+/// whole file (compress needs it).
 async function loadFile(file) {
   log("rx", `loaded ${file.name} (${fmtBytes(file.size)})`);
-  setStatus("working", "loading…");
-  const buf = await file.arrayBuffer();
-  const bytes = new Uint8Array(buf);
-  const kind = detectFileKind(bytes, file.name);
+  const kind = await fastDetectKind(file);
 
   if (kind === "archive") {
-    lastFileBytes = bytes;
-    // Peek the archive (async) — updates the file list preview.
+    // Read only the first 4 KB for the magic + a bit of header
+    // to confirm. We still need the FULL bytes to do anything
+    // useful (peek the manifest), so we use peek_archive_cmd on
+    // the bytes. For 318 MB, IPC is slow — but this path is
+    // only hit when the user drags a file in (the recommended
+    // path is the Tauri dialog → loadFromPath, which is fast).
+    log("info", "archive detected — reading 4 KB header to peek manifest");
     setCtx({
       state: "idle",
-      selection: { kind: "archive", name: file.name, size: file.size, path: null, bytes, manifest: null },
+      selection: { kind: "archive", name: file.name, size: file.size, path: null, bytes: null, manifest: null },
       lastResult: null,
       isProcessing: true,
       error: null,
       extractedPath: null,
     });
-    setStatus("working", "reading archive…");
+    setStatus("working", "reading archive header…");
     try {
+      // Read the whole file. For drag-drop, this is unavoidable
+      // because the FileReader API doesn't expose the file's
+      // path. The compress flow also needs the full bytes.
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      lastFileBytes = bytes;
+      // peek_archive_cmd returns a DirectoryResult { root, n_files,
+      // total_original_size, total_compressed_size, aggregate_ratio,
+      // entries: Vec<ArchiveEntry> }, not a bare array. Extract .entries
+      // before doing array-y things.
       const result = await invoke("peek_archive_cmd", { archive: Array.from(bytes) });
-      // Promote the peeked manifest into the selection.
+      const entries = (result && result.entries) || [];
+      const total = entries.reduce((a, e) => a + (e.compressed_size || 0), 0);
       setCtx({
         selection: {
-          kind: "archive",
-          name: file.name,
-          size: file.size,
-          path: null,
-          bytes,
-          manifest: result,
+          kind: "archive", name: file.name, size: file.size, path: null, bytes,
+          manifest: { entries, totalCompressedSize: total, n_files: entries.length },
         },
         isProcessing: false,
       });
-      log("ok", `archive contents: <strong>${result.n_files}</strong> files · ${fmtRatio(result.aggregate_ratio)} avg`, true);
+      const n = entries.length;
+      log("ok", `archive contents: <strong>${n}</strong> files · ${fmtBytes(total)} on disk`, true);
       setStatus("ready", "ready to extract");
       log("ok", "press EXTRACT to choose an output folder");
     } catch (e) {
       console.error("[nexus] peek failed:", e);
-      log("err", `peek_archive failed: <strong>${e}</strong>`);
+      log("err", `peek failed: <strong>${e}</strong>`);
       setCtx({ isProcessing: false, error: { code: "archive.malformed", message: String(e) } });
       setStatus("err", "peek failed");
     }
   } else {
+    // Non-archive: we need the full bytes for compress.
+    setStatus("working", "loading…");
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
     lastFileBytes = bytes;
     setCtx({
       state: "idle",
@@ -471,13 +870,22 @@ function renderFileList(result, isLive) {
     return;
   }
   els.cardFiles.hidden = false;
+  const total = result.entries.length;
+  // Cap the rendered list at FILE_LIST_CAP rows (top by size).
+  // 24,180 DOM rows is ~100k DOM elements and tanks UI perf.
+  const FILE_LIST_CAP = 200;
+  const sorted = [...result.entries].sort((a, b) => b.original_size - a.original_size);
+  const visible = sorted.slice(0, FILE_LIST_CAP);
   const hintParts = [`${result.n_files} files`];
   if (result.aggregate_ratio) hintParts.push(`avg ${fmtRatio(result.aggregate_ratio)}`);
+  if (total > FILE_LIST_CAP) hintParts.push(`showing top ${FILE_LIST_CAP} by size`);
   if (!isLive) hintParts.push("archive preview");
   els.filesHint.textContent = hintParts.join(" · ");
-  const entries = [...result.entries].sort((a, b) => b.original_size - a.original_size);
-  els.fileListBody.innerHTML = "";
-  for (const e of entries) {
+  // Build all rows in a DocumentFragment, then attach in one
+  // reflow. innerHTML = "" was already O(n) for n=24,180, this
+  // drops the appendChild to one paint.
+  const frag = document.createDocumentFragment();
+  for (const e of visible) {
     const row = document.createElement("div");
     row.className = "file-list-row";
     const ratio = e.compressed_size > 0 ? e.original_size / e.compressed_size : 0;
@@ -496,8 +904,10 @@ function renderFileList(result, isLive) {
     rat.className = `file-list-ratio ${cls}`;
     rat.textContent = fmtRatio(ratio);
     row.append(name, orig, comp, rat);
-    els.fileListBody.appendChild(row);
+    frag.appendChild(row);
   }
+  els.fileListBody.replaceChildren(frag);
+}
 }
 
 // -----------------------------------------------------------------------
@@ -508,10 +918,21 @@ bindRunner("compress", async () => {
   if (!ctx.selection) return;
   if (ctx.selection.kind === "folder") {
     await compressFolderAction();
+  } else if (ctx.selection.kind === "folders") {
+    await compressFoldersAction();
   } else if (ctx.selection.kind === "file") {
     await compressFileAction();
   }
 });
+
+async function compressFoldersAction() {
+  if (!ctx.selection || ctx.selection.kind !== "folders") return;
+  // Re-open the multi-folder picker with previously-picked
+  // folders pre-selected. (For now just re-pick from scratch;
+  // macOS NSOpenPanel can be told to set initial dirs via the
+  // dialog plugin's setDirectory() if we want to remember.)
+  await pickAndCompressFolders();
+}
 
 bindRunner("extract", async () => {
   if (ctx.selection?.kind === "archive") {
@@ -536,6 +957,93 @@ bindRunner("openExtracted", async () => {
     log("err", `open_path failed: <strong>${e}</strong>`);
   }
 });
+
+bindRunner("compressFolders", async () => {
+  await pickAndCompressFolders();
+});
+
+async function pickAndCompressFolders() {
+  setStatus("working", "picking folders…");
+  let picked;
+  try {
+    picked = await invoke("pick_folders_cmd");
+  } catch (e) {
+    log("err", `folder picker failed: <strong>${e}</strong>`);
+    setStatus("err", "failed");
+    return;
+  }
+  if (!picked || picked.length === 0) {
+    log("info", "folder picker cancelled");
+    setStatus("ready", "ready");
+    return;
+  }
+  log("rx", `picked <strong>${picked.length}</strong> folder${picked.length > 1 ? "s" : ""}: <strong>${picked.map(shortenPath).join("</strong>, <strong>")}</strong>`);
+  await compressFoldersAt(picked);
+}
+
+function shortenPath(p) {
+  if (!p) return "";
+  // Show only the last 2 path components for readability.
+  const parts = p.split("/").filter(Boolean);
+  if (parts.length <= 2) return p;
+  return "…/" + parts.slice(-2).join("/");
+}
+
+async function compressFoldersAt(paths) {
+  setCtx({ state: "compressing", isProcessing: true });
+  els.dropzone.classList.add("processing");
+  const t0 = performance.now();
+  try {
+    const result = await invoke("compress_directories_cmd", {
+      inputDirs: paths,
+      level: levelName(),
+    });
+    const [dirResult, archive] = result;
+    const wall = performance.now() - t0;
+    const folderLabel = paths.length === 1
+      ? (paths[0].split("/").pop() || "folder")
+      : `${paths.length} folders`;
+    log("ok", `compressed <strong>${dirResult.n_files}</strong> files from <strong>${folderLabel}</strong> in <strong>${fmtMs(dirResult.total_time_ms)}</strong> · ratio <strong>${fmtRatio(dirResult.aggregate_ratio)}</strong> · <strong>${fmtBytes(dirResult.total_original_size)}</strong> → <strong>${fmtBytes(dirResult.total_compressed_size)}</strong>`, true);
+    log("info", `level=${levelName()} · wall ${fmtMs(wall)} · IPC ${fmtMs(Math.max(0, wall - dirResult.total_time_ms))}`);
+    lastArchiveBytes = new Uint8Array(archive);
+    setCtx({
+      state: "success",
+      isProcessing: false,
+      selection: {
+        kind: "folders",
+        name: folderLabel,
+        size: dirResult.total_original_size,
+        path: paths.join(", "),
+        bytes: null,
+        manifest: dirResult,
+      },
+      lastResult: {
+        kind: "compress",
+        path: folderLabel,
+        manifest: {
+          n_files: dirResult.n_files,
+          total_original_size: dirResult.total_original_size,
+          total_compressed_size: dirResult.total_compressed_size,
+          aggregate_ratio: dirResult.aggregate_ratio,
+          entries: dirResult.entries.map((e) => ({
+            path: e.path,
+            original_size: e.original_size,
+            compressed_size: e.compressed_size,
+            ratio: e.original_size > 0 ? e.original_size / Math.max(1, e.compressed_size) : 0,
+          })),
+        },
+      },
+    });
+    setStatus("ok", "compressed");
+  } catch (e) {
+    console.error("[nexus] compress_folders failed:", e);
+    log("err", `compress folders failed: <strong>${e}</strong>`);
+    setCtx({ state: "error", isProcessing: false, error: { code: "compress.failed", message: String(e) } });
+    setStatus("err", "failed");
+  } finally {
+    els.dropzone.classList.remove("processing");
+  }
+}
 
 bindRunner("selfTest", async () => {
   setStatus("working", "self-test…");

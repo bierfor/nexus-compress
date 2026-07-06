@@ -273,6 +273,22 @@ impl Dictionary {
         max_len: usize,
         min_freq: u32,
     ) -> (Self, TrainStats) {
+        Self::train_from_corpus_capped(corpora, max_bytes, min_len, max_len, min_freq, usize::MAX)
+    }
+
+    /// Like `train_from_corpus` but with a hard cap on the number of
+    /// entries kept. The greedy selection is already sorted by score
+    /// (descending), so `max_entries` simply truncates after the top-N
+    /// picks. Useful when the trained dict must fit a fixed-size
+    /// bitmask in the codec (FULL_DICT_ENTRIES).
+    pub fn train_from_corpus_capped(
+        corpora: &[&[u8]],
+        max_bytes: usize,
+        min_len: usize,
+        max_len: usize,
+        min_freq: u32,
+        max_entries: usize,
+    ) -> (Self, TrainStats) {
         use std::collections::HashMap;
 
         // Phase 1: count frequencies.
@@ -311,6 +327,9 @@ impl Dictionary {
         let mut dict = Self::new();
         let mut total_size: usize = 0;
         for (token, _score) in scored {
+            if dict.len() >= max_entries {
+                break;
+            }
             if total_size + token.len() > max_bytes {
                 continue;
             }

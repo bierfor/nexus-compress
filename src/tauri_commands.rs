@@ -102,6 +102,32 @@ pub async fn self_test_cmd() -> Result<SelfTestResult, String> {
 // Directory commands (NXAR archive)
 // -----------------------------------------------------------------------
 
+/// Open the OS file picker. Returns the absolute path the user
+/// chose, or `None` if they cancelled. The dialog is filtered
+/// to .nxar archives (the only archive type we extract).
+#[tauri::command]
+pub async fn pick_file_cmd(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri::Manager;
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_focus();
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<Option<FilePath>>();
+    app.dialog()
+        .file()
+        .add_filter("NexusRAR archive", &["nxar", "nxr"])
+        .add_filter("All files", &["*"])
+        .pick_file(move |path: Option<FilePath>| {
+            let _ = tx.send(path);
+        });
+    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
+        .await
+        .map_err(|e| format!("dialog join failed: {}", e))?;
+    Ok(picked.and_then(|fp| fp.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
+}
+
 /// Open the OS folder picker. Returns the absolute path the user
 /// chose, or `None` if they cancelled.
 ///
@@ -169,6 +195,88 @@ pub async fn compress_directory_cmd(
     })
     .await
     .map_err(|e| format!("internal: spawn_blocking join failed: {}", e))?
+}
+
+/// Compress multiple directories into a single NXAR archive.
+/// Each root's files are stored under a top-level folder named
+/// after the root's leaf (e.g. `/a/x.txt` and `/b/y.txt` become
+/// `a/x.txt` and `b/y.txt` in the archive). Returns aggregate
+/// stats + the archive bytes.
+#[tauri::command]
+pub async fn compress_directories_cmd(
+    input_dirs: Vec<String>,
+    level: String,
+) -> Result<(api::DirectoryResult, Vec<u8>), String> {
+    let level = CompressionLevel::from_str(&level)
+        .map_err(|e| format!("invalid_level: {}", e))?;
+    let paths: Vec<std::path::PathBuf> = input_dirs.into_iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+        to_ipc(api::compress_directories(&path_refs, level).map(|(r, a)| (r, a.to_vec())))
+    })
+    .await
+    .map_err(|e| format!("internal: spawn_blocking join failed: {}", e))?
+}
+
+/// Read a file's bytes from disk. Used by the drag-drop file
+/// flow to load a single dropped file into Rust memory (not JS)
+/// so we don't blow up the JS heap with a 318 MB Uint8Array.
+/// Returns the raw bytes (NOT base64 — Tauri serializes Vec<u8>
+/// as a plain JS array, which is fast).
+#[tauri::command]
+pub async fn read_file_cmd(path: String) -> Result<Vec<u8>, String> {
+    let p = std::path::PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::read(&p).map_err(|e| format!("read_file failed for {}: {}", p.display(), e))
+    })
+    .await
+    .map_err(|e| format!("internal: spawn_blocking join failed: {}", e))?
+}
+
+/// Open the OS folder picker in multi-select mode. Returns the
+/// absolute paths the user chose (one per picked folder), or
+/// `None` if they cancelled. On macOS the NSOpenPanel is
+/// configured to allow multiple folder selection.
+#[tauri::command]
+pub async fn pick_folders_cmd(app: tauri::AppHandle) -> Result<Option<Vec<String>>, String> {
+    use tauri::Manager;
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+
+    // Bring the main window to the foreground so the NSOpenPanel
+    // appears on top. Without this on macOS the dialog can open
+    // invisibly behind another app and the user thinks the
+    // button does nothing.
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_focus();
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<Option<Vec<FilePath>>>();
+    app.dialog()
+        .file()
+        .pick_folders(move |paths: Option<Vec<FilePath>>| {
+            let _ = tx.send(paths);
+        });
+
+    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
+        .await
+        .map_err(|e| format!("dialog join failed: {}", e))?;
+
+    let path_strs = match picked {
+        None => None,
+        Some(paths) => {
+            let mut out = Vec::with_capacity(paths.len());
+            for fp in paths {
+                match fp.into_path() {
+                    Ok(p) => out.push(p.to_string_lossy().into_owned()),
+                    Err(e) => return Err(format!("FilePath -> PathBuf failed: {}", e)),
+                }
+            }
+            Some(out)
+        }
+    };
+    Ok(path_strs)
 }
 
 /// Decompress an NXAR archive into `output_dir`.

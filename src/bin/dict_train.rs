@@ -30,6 +30,7 @@ use std::time::Instant;
 
 struct Args {
     max_size: usize,
+    max_entries: usize,
     min_len: usize,
     max_len: usize,
     min_freq: u32,
@@ -40,6 +41,7 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut max_size = 32 * 1024usize;
+    let mut max_entries = usize::MAX;
     let mut min_len = 3usize;
     let mut max_len = 8usize;
     let mut min_freq = 4u32;
@@ -53,6 +55,10 @@ fn parse_args() -> Result<Args, String> {
             "--max-size" => {
                 max_size = iter.next().ok_or("--max-size requires a value")?
                     .parse().map_err(|_| "--max-size must be a positive integer")?;
+            }
+            "--max-entries" => {
+                max_entries = iter.next().ok_or("--max-entries requires a value")?
+                    .parse().map_err(|_| "--max-entries must be a positive integer")?;
             }
             "--min-len" => {
                 min_len = iter.next().ok_or("--min-len requires a value")?
@@ -97,6 +103,7 @@ fn parse_args() -> Result<Args, String> {
 
     Ok(Args {
         max_size,
+        max_entries,
         min_len,
         max_len,
         min_freq,
@@ -114,6 +121,7 @@ fn print_help() {
     eprintln!();
     eprintln!("OPTIONS:");
     eprintln!("    --max-size N    Target dict size in bytes (default: 32768 = 32 KB)");
+    eprintln!("    --max-entries N Hard cap on number of entries (default: unlimited)");
     eprintln!("    --min-len N     Minimum token length (default: 3)");
     eprintln!("    --max-len N     Maximum token length (default: 8)");
     eprintln!("    --min-freq N    Minimum token frequency (default: 4)");
@@ -138,8 +146,8 @@ fn main() {
 
     if !args.quiet {
         eprintln!(
-            "dict_train: max_size={} min_len={} max_len={} min_freq={} output={}",
-            args.max_size, args.min_len, args.max_len, args.min_freq,
+            "dict_train: max_size={} max_entries={} min_len={} max_len={} min_freq={} output={}",
+            args.max_size, args.max_entries, args.min_len, args.max_len, args.min_freq,
             args.output.display()
         );
     }
@@ -176,12 +184,13 @@ fn main() {
 
     // Train.
     let train_start = Instant::now();
-    let (dict, stats) = Dictionary::train_from_corpus(
+    let (dict, stats) = Dictionary::train_from_corpus_capped(
         &corpora_refs,
         args.max_size,
         args.min_len,
         args.max_len,
         args.min_freq,
+        args.max_entries,
     );
     let train_elapsed = train_start.elapsed();
     let serial = dict.to_bytes();

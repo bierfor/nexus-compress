@@ -813,4 +813,34 @@ mod tests {
         assert_eq!(d.len(), data.len(), "decoded length mismatch");
         assert_eq!(d, data, "large-dedup roundtrip mismatch (sprint 2.9 bug)");
     }
+
+    /// Bigger regression test: 6000+ CDC blocks with hundreds of
+    /// duplicates. Reproduces the v2.9 panic that hit the user
+    /// on a real .nxar with 2654 blocks.
+    #[test]
+    fn roundtrip_6000_blocks_with_dups() {
+        // 64 distinct 4 KB blocks repeated many times. Total size
+        // ~ 64 * 4 KB * 200 = 51 MB, producing ~13100 CDC blocks.
+        // The dedup will mark all but the first 64 of each run
+        // as duplicates.
+        let mut data = Vec::new();
+        let blocks: Vec<Vec<u8>> = (0..64)
+            .map(|i| {
+                let mut b = vec![0u8; 4 * 1024];
+                for (j, slot) in b.iter_mut().enumerate() {
+                    *slot = ((i * 31 + j) % 256) as u8;
+                }
+                b
+            })
+            .collect();
+        for _ in 0..200 {
+            for b in &blocks {
+                data.extend_from_slice(b);
+            }
+        }
+        let c = compress(&data);
+        let d = decompress(&c);
+        assert_eq!(d.len(), data.len(), "decoded length mismatch");
+        assert_eq!(d, data, "6000-block dedup roundtrip mismatch");
+    }
 }

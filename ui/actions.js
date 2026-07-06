@@ -116,9 +116,22 @@ export const ACTIONS = {
     isHero: true,
     visible: (ctx) =>
       ctx.selection !== null &&
-      (ctx.selection.kind === "file" || ctx.selection.kind === "folder") &&
+      (ctx.selection.kind === "file" || ctx.selection.kind === "folder" || ctx.selection.kind === "folders") &&
       !ctx.isProcessing,
     enabled: (ctx) => ctx.selection !== null && !ctx.isProcessing,
+  },
+  compressFolders: {
+    id: "compressFolders",
+    label: "compress folders…",
+    heroLabel: "compress multiple folders",
+    glyph: "▦",
+    variant: "primary",
+    order: 9,
+    isHero: false,
+    // Always visible: it's the entry point for picking
+    // multiple folders at once, even before any selection.
+    visible: () => true,
+    enabled: (ctx) => !ctx.isProcessing,
   },
   extract: {
     id: "extract",

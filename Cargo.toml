@@ -27,8 +27,8 @@ name = "nexus"
 path = "src/main.rs"
 
 [[bin]]
-name = "corpus_suite"
-path = "src/bin/corpus_suite.rs"
+name = "bench_suite"
+path = "src/bin/bench_suite.rs"
 
 [[bin]]
 name = "nexus-rar"

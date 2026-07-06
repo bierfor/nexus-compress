@@ -4,10 +4,11 @@
 //!   - NexusCompress v4: size, ratio, compress ms, decompress ms, roundtrip OK
 //!   - gzip -9           : size, ratio, compress ms, decompress ms
 //!   - zstd -19          : size, ratio, compress ms, decompress ms
+//!   - 7z (LZMA2 -mx=9)  : size, ratio, compress ms, decompress ms
 //!
-//! Output: a markdown table printed to stdout + a final gap-to-zstd summary.
+//! Output: a markdown table printed to stdout + a final gap-to-7z summary.
 //!
-//! Run with: `cargo run --release --bin corpus_suite`
+//! Run with: `cargo run --release --bin bench_suite`
 
 use std::io::Write;
 use std::path::Path;
@@ -32,6 +33,10 @@ struct Row {
     zstd_compress_ms: f64,
     zstd_decompress_ms: f64,
     zstd_ok: bool,
+    sevenz_size: usize,
+    sevenz_compress_ms: f64,
+    sevenz_decompress_ms: f64,
+    sevenz_ok: bool,
 }
 
 fn timed<F: FnOnce() -> R, R>(f: F) -> (R, f64) {
@@ -48,7 +53,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    eprintln!("[corpus_suite] NexusCompress v4 vs gzip -9 vs zstd -19\n");
+    eprintln!("[bench_suite] NexusCompress v4 vs gzip -9 vs zstd -19 vs 7z (LZMA2 -mx=9)\n");
     eprintln!("Running benchmarks... (this may take a few seconds)\n");
 
     // Collect per-file results. Skip files without an extension or
@@ -163,6 +168,42 @@ fn main() {
         };
         let _ = std::fs::remove_file(&zstd_path);
 
+        // 7z (LZMA2, max compression). Falls back to 7za or 7zr
+        // if `7z` isn't on PATH. The archive is created as
+        // `<file>.7z` next to the input, then deleted.
+        let sevenz_path = path.with_extension("7z");
+        let sevenz_bin = if Command::new("7z").arg("--help").output().is_ok() {
+            "7z"
+        } else if Command::new("7za").arg("--help").output().is_ok() {
+            "7za"
+        } else if Command::new("7zr").arg("--help").output().is_ok() {
+            "7zr"
+        } else {
+            ""
+        };
+        let (sevenz_size, sevenz_c_ms, sevenz_d_ms, sevenz_ok) = if sevenz_bin.is_empty() {
+            eprintln!(" (7z skipped: no binary on PATH)");
+            (0, 0.0, 0.0, false)
+        } else {
+            let t0 = Instant::now();
+            let _ = Command::new(sevenz_bin)
+                .args(&["a", "-tgzip", "-mx=9", "-bb0", "-bso0"])
+                .arg(&sevenz_path)
+                .arg(&path)
+                .output();
+            let c_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let sz = std::fs::metadata(&sevenz_path).map(|m| m.len() as usize).unwrap_or(0);
+            let t0 = Instant::now();
+            let out = Command::new(sevenz_bin)
+                .args(&["e", "-y", "-bb0", "-bso0", "-so"])
+                .arg(&sevenz_path)
+                .output();
+            let d_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let ok = out.as_ref().map(|o| o.stdout == data).unwrap_or(false);
+            let _ = std::fs::remove_file(&sevenz_path);
+            (sz, c_ms, d_ms, ok)
+        };
+
         eprintln!(
             " nexus={:.2}x ({} B, {:.1}ms / {:.1}ms){}",
             data.len() as f64 / compressed.len().max(1) as f64,
@@ -186,40 +227,49 @@ fn main() {
             zstd_compress_ms: zstd_c_ms,
             zstd_decompress_ms: zstd_d_ms,
             zstd_ok,
+            sevenz_size,
+            sevenz_compress_ms: sevenz_c_ms,
+            sevenz_decompress_ms: sevenz_d_ms,
+            sevenz_ok,
         });
     }
 
     // Markdown table.
     println!("\n# NexusCompress v4 benchmark — honest comparison");
     println!("\n## Compression ratio (data size / compressed size)");
-    println!("\n| File | Size | NexusCompress v4 | gzip -9 | zstd -19 | Nexus / zstd |");
-    println!("|---|---:|---:|---:|---:|---:|");
+    println!("\n| File | Size | NexusCompress v4 | gzip -9 | zstd -19 | 7z -mx=9 (LZMA2) | Nexus / 7z |");
+    println!("|---|---:|---:|---:|---:|---:|---:|");
     for r in &rows {
         let n_ratio = r.size as f64 / r.nexus_size.max(1) as f64;
         let g_ratio = r.size as f64 / r.gzip_size.max(1) as f64;
         let z_ratio = r.size as f64 / r.zstd_size.max(1) as f64;
-        let gap = if z_ratio > 0.0 { n_ratio / z_ratio } else { 0.0 };
+        let lz_ratio = if r.sevenz_size > 0 { r.size as f64 / r.sevenz_size as f64 } else { 0.0 };
+        let gap = if lz_ratio > 0.0 { n_ratio / lz_ratio } else { 0.0 };
+        let lz_cell = if r.sevenz_size > 0 { format!("{:.2}x ({} B)", lz_ratio, r.sevenz_size) } else { "n/a".to_string() };
         println!(
-            "| {} | {} B | **{:.2}x** ({} B) | {:.2}x ({} B) | {:.2}x ({} B) | {:.2}x |",
+            "| {} | {} B | **{:.2}x** ({} B) | {:.2}x ({} B) | {:.2}x ({} B) | {} | {:.2}x |",
             r.file, r.size, n_ratio, r.nexus_size,
             g_ratio, r.gzip_size,
             z_ratio, r.zstd_size,
+            lz_cell,
             gap,
         );
     }
 
     println!("\n## Compress time (ms, single-threaded)");
-    println!("\n| File | NexusCompress v4 | gzip -9 | zstd -19 |");
-    println!("|---|---:|---:|---:|");
+    println!("\n| File | NexusCompress v4 | gzip -9 | zstd -19 | 7z -mx=9 |");
+    println!("|---|---:|---:|---:|---:|");
     for r in &rows {
-        println!("| {} | {:.1} | {:.1} | {:.1} |", r.file, r.nexus_compress_ms, r.gzip_compress_ms, r.zstd_compress_ms);
+        let lz = if r.sevenz_size > 0 { format!("{:.1}", r.sevenz_compress_ms) } else { "n/a".to_string() };
+        println!("| {} | {:.1} | {:.1} | {:.1} | {} |", r.file, r.nexus_compress_ms, r.gzip_compress_ms, r.zstd_compress_ms, lz);
     }
 
     println!("\n## Decompress time (ms, single-threaded)");
-    println!("\n| File | NexusCompress v4 | gzip -9 | zstd -19 |");
-    println!("|---|---:|---:|---:|");
+    println!("\n| File | NexusCompress v4 | gzip -9 | zstd -19 | 7z |");
+    println!("|---|---:|---:|---:|---:|");
     for r in &rows {
-        println!("| {} | {:.1} | {:.1} | {:.1} |", r.file, r.nexus_decompress_ms, r.gzip_decompress_ms, r.zstd_decompress_ms);
+        let lz = if r.sevenz_size > 0 { format!("{:.1}", r.sevenz_decompress_ms) } else { "n/a".to_string() };
+        println!("| {} | {:.1} | {:.1} | {:.1} | {} |", r.file, r.nexus_decompress_ms, r.gzip_decompress_ms, r.zstd_decompress_ms, lz);
     }
 
     println!("\n## Roundtrip verification");
@@ -228,6 +278,7 @@ fn main() {
         if !r.nexus_ok { println!("  ❌ NexusCompress {}: MISMATCH", r.file); all_ok = false; }
         if !r.gzip_ok { println!("  ❌ gzip {}: MISMATCH", r.file); all_ok = false; }
         if !r.zstd_ok { println!("  ❌ zstd {}: MISMATCH", r.file); all_ok = false; }
+        if r.sevenz_size > 0 && !r.sevenz_ok { println!("  ❌ 7z {}: MISMATCH", r.file); all_ok = false; }
     }
     if all_ok {
         println!("  ✅ All compressors roundtrip OK on all corpus files.");
@@ -238,9 +289,11 @@ fn main() {
     let total_nexus: usize = rows.iter().map(|r| r.nexus_size).sum();
     let total_gzip: usize = rows.iter().map(|r| r.gzip_size).sum();
     let total_zstd: usize = rows.iter().map(|r| r.zstd_size).sum();
+    let total_sevenz: usize = rows.iter().map(|r| r.sevenz_size).sum();
     let total_nexus_ms: f64 = rows.iter().map(|r| r.nexus_compress_ms).sum();
     let total_gzip_ms: f64 = rows.iter().map(|r| r.gzip_compress_ms).sum();
     let total_zstd_ms: f64 = rows.iter().map(|r| r.zstd_compress_ms).sum();
+    let total_sevenz_ms: f64 = rows.iter().map(|r| r.sevenz_compress_ms).sum();
 
     println!("\n## Aggregate (sum across all files)");
     println!("\n| Tool | Total Compressed | Aggregate Ratio | Compress ms |");
@@ -249,8 +302,12 @@ fn main() {
         ("NexusCompress v4", total_nexus, total_nexus_ms),
         ("gzip -9", total_gzip, total_gzip_ms),
         ("zstd -19", total_zstd, total_zstd_ms),
+        ("7z -mx=9 (LZMA2)", total_sevenz, total_sevenz_ms),
     ] {
         let ratio = total_size as f64 / total.max(1) as f64;
-        println!("| {} | {} B | {:.2}x | {:.1} |", name, total, ratio, ms);
+        let total_str = if total > 0 { format!("{} B", total) } else { "n/a".to_string() };
+        let ratio_str = if total > 0 { format!("{:.2}x", ratio) } else { "n/a".to_string() };
+        let ms_str = if total > 0 { format!("{:.1}", ms) } else { "n/a".to_string() };
+        println!("| {} | {} | {} | {} |", name, total_str, ratio_str, ms_str);
     }
 }

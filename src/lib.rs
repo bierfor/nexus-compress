@@ -13,10 +13,8 @@
 
 pub mod cdc;
 pub mod classifier;
-pub mod cm;
 pub mod codec;
 pub mod cost;
-pub mod cost_probe;
 pub mod dedup;
 pub mod dict_codec;
 pub mod dictionary;

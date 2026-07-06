@@ -113,6 +113,11 @@ pub fn read_file(path: &Path) -> io::Result<Vec<u8>> {
 /// under it is compressed independently with the v4 engine; the
 /// per-file `.nxr` streams are concatenated under the NXAR
 /// header. Returns aggregate stats and the archive bytes.
+///
+/// The archive entries use paths relative to `root` (e.g. a
+/// file `root/sub/a.txt` is stored as `sub/a.txt`). This is
+/// the standard single-folder behavior; `compress_directories`
+/// uses leaf-name prefixes for multi-folder archives.
 pub fn compress_directory(root: &Path) -> Result<(DirectoryResult, Vec<u8>), String> {
     let files = walk(root).map_err(|e| format!("walk failed: {}", e))?;
     if files.is_empty() {
@@ -126,9 +131,6 @@ pub fn compress_directory(root: &Path) -> Result<(DirectoryResult, Vec<u8>), Str
     let mut total_compressed: u64 = 0;
 
     for abs in &files {
-        // Compute path relative to root, with '/' separators
-        // (NXAR uses a single canonical separator for cross-platform
-        // archives).
         let rel = abs
             .strip_prefix(root)
             .unwrap_or(abs)
@@ -139,8 +141,6 @@ pub fn compress_directory(root: &Path) -> Result<(DirectoryResult, Vec<u8>), Str
         let bytes = match read_file(abs) {
             Ok(b) => b,
             Err(_e) => {
-                // Skip unreadable files but record 0 bytes so the
-                // user sees them in the entry list.
                 entries.push(ArchiveEntry {
                     path: rel,
                     original_size: 0,
@@ -167,7 +167,6 @@ pub fn compress_directory(root: &Path) -> Result<(DirectoryResult, Vec<u8>), Str
         payloads.push(compressed);
     }
 
-    // Serialize the NXAR container.
     let archive = serialize_nxar(&entries, &payloads)?;
     let total_time = total_start.elapsed().as_secs_f64() * 1000.0;
     let aggregate_ratio = if total_compressed == 0 {
@@ -177,6 +176,150 @@ pub fn compress_directory(root: &Path) -> Result<(DirectoryResult, Vec<u8>), Str
     };
     let result = DirectoryResult {
         root: root.to_string_lossy().into_owned(),
+        n_files: entries.len() as u64,
+        total_original_size: total_original,
+        total_compressed_size: total_compressed,
+        aggregate_ratio,
+        total_time_ms: total_time,
+        entries,
+    };
+    Ok((result, archive))
+}
+
+/// Compress multiple directories into a single NXAR archive.
+///
+/// Each root directory's files are stored under a top-level folder
+/// named after the root's leaf name. For example, if the user
+/// picks `/path/to/a` and `/path/to/b`, the archive will contain
+/// entries like `a/inner/file.txt` and `b/other.txt`. This matches
+/// the standard zip/tar convention for multi-folder archives.
+///
+/// If two roots share the same leaf name (e.g. `/x/foo` and
+/// `/y/foo`), the second one's files are stored under `foo__1/`
+/// to avoid collision. (This is rare in practice but cheap to
+/// handle.)
+///
+/// An empty input is an error. If any individual root is empty
+/// (no regular files), it's skipped silently.
+pub fn compress_directories<'a, I>(roots: I) -> Result<(DirectoryResult, Vec<u8>), String>
+where
+    I: IntoIterator<Item = &'a Path>,
+{
+    let roots: Vec<&Path> = roots.into_iter().collect();
+    if roots.is_empty() {
+        return Err("no directories provided".into());
+    }
+
+    // Detect leaf-name collisions and disambiguate with __N suffix.
+    let mut used_names: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut labels: Vec<String> = Vec::with_capacity(roots.len());
+    for root in &roots {
+        let leaf = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "folder".to_string());
+        let label = match used_names.get(&leaf).copied() {
+            None => {
+                used_names.insert(leaf.clone(), 0);
+                leaf
+            }
+            Some(_) => {
+                let n = used_names.get(&leaf).copied().unwrap() + 1;
+                used_names.insert(leaf.clone(), n);
+                format!("{}__{}", leaf, n)
+            }
+        };
+        labels.push(label);
+    }
+
+    let total_start = Instant::now();
+    let mut entries: Vec<ArchiveEntry> = Vec::new();
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    let mut total_original: u64 = 0;
+    let mut total_compressed: u64 = 0;
+    let mut first_root_str: Option<String> = None;
+
+    for (root, label) in roots.iter().zip(labels.iter()) {
+        if first_root_str.is_none() {
+            first_root_str = Some(root.to_string_lossy().into_owned());
+        }
+        let files = match walk(root) {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(format!("walk failed for {}: {}", root.display(), e));
+            }
+        };
+        // Skip empty directories silently (no entry in the archive).
+        if files.is_empty() {
+            continue;
+        }
+
+        for abs in &files {
+            // Path inside the archive: <label>/<relative-to-root>
+            // (uses '/' separator regardless of host OS).
+            let rel = abs
+                .strip_prefix(root)
+                .unwrap_or(abs)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            let archive_path = format!("{}/{}", label, rel);
+
+            let bytes = match read_file(abs) {
+                Ok(b) => b,
+                Err(_e) => {
+                    entries.push(ArchiveEntry {
+                        path: archive_path,
+                        original_size: 0,
+                        compressed_size: 0,
+                        compress_time_ms: 0.0,
+                    });
+                    payloads.push(Vec::new());
+                    continue;
+                }
+            };
+            let original_size = bytes.len() as u64;
+            let t0 = Instant::now();
+            let compressed = compress(&bytes);
+            let dt = t0.elapsed().as_secs_f64() * 1000.0;
+            let compressed_size = compressed.len() as u64;
+            total_original += original_size;
+            total_compressed += compressed_size;
+            entries.push(ArchiveEntry {
+                path: archive_path,
+                original_size,
+                compressed_size,
+                compress_time_ms: dt,
+            });
+            payloads.push(compressed);
+        }
+    }
+
+    if entries.is_empty() {
+        return Err("all directories are empty (no regular files)".into());
+    }
+
+    let archive = serialize_nxar(&entries, &payloads)?;
+    let total_time = total_start.elapsed().as_secs_f64() * 1000.0;
+    let aggregate_ratio = if total_compressed == 0 {
+        0.0
+    } else {
+        total_original as f64 / total_compressed as f64
+    };
+    // The "root" field shows the primary directory (or a
+    // comma-separated list when there are multiple).
+    let root_str = if roots.len() == 1 {
+        first_root_str.unwrap_or_default()
+    } else {
+        roots
+            .iter()
+            .map(|r| r.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let result = DirectoryResult {
+        root: root_str,
         n_files: entries.len() as u64,
         total_original_size: total_original,
         total_compressed_size: total_compressed,
@@ -380,7 +523,7 @@ pub fn peek_and_extract_file(
 }
 
 /// Deserialize NXAR bytes into (entries, payloads).
-fn deserialize_nxar(archive: &[u8]) -> Result<(Vec<ArchiveEntry>, Vec<Vec<u8>>), String> {
+pub fn deserialize_nxar(archive: &[u8]) -> Result<(Vec<ArchiveEntry>, Vec<Vec<u8>>), String> {
     if archive.len() < 12 {
         return Err("archive too short".into());
     }
@@ -546,5 +689,81 @@ mod tests {
         let r = deserialize_nxar(bogus);
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("magic"));
+    }
+
+    #[test]
+    fn roundtrip_multi_folder() {
+        // Build two temp directories with different leaf names,
+        // compress them together, and verify both root labels
+        // appear in the archive and the files roundtrip.
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let p1_a = dir1.path().join("a.txt");
+        let p1_b = dir1.path().join("sub").join("b.txt");
+        let p2_a = dir2.path().join("c.txt");
+        std::fs::create_dir_all(p1_b.parent().unwrap()).unwrap();
+        std::fs::write(&p1_a, b"first dir file A").unwrap();
+        std::fs::write(&p1_b, b"first dir file B in sub").unwrap();
+        std::fs::write(&p2_a, b"second dir file").unwrap();
+
+        let (result, archive) = compress_directories([dir1.path(), dir2.path()]).unwrap();
+        // The first tempdir is something like /tmp/.tmpABC; the
+        // leaf name is randomly generated. We check that the
+        // paths start with the leaf names of the two tempdirs.
+        let leaf1 = dir1.path().file_name().unwrap().to_string_lossy().into_owned();
+        let leaf2 = dir2.path().file_name().unwrap().to_string_lossy().into_owned();
+        let paths: Vec<&str> = result.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.iter().any(|p| p.starts_with(&leaf1) && p.ends_with("a.txt")),
+            "missing leaf1/a.txt in {:?}", paths);
+        assert!(paths.iter().any(|p| p.starts_with(&leaf1) && p.ends_with("sub/b.txt")),
+            "missing leaf1/sub/b.txt in {:?}", paths);
+        assert!(paths.iter().any(|p| p.starts_with(&leaf2) && p.ends_with("c.txt")),
+            "missing leaf2/c.txt in {:?}", paths);
+        assert_eq!(result.n_files, 3);
+
+        // Extract and verify content matches.
+        let out_dir = tempfile::tempdir().unwrap();
+        let extracted = decompress_directory(&archive, out_dir.path()).unwrap();
+        assert_eq!(extracted.n_files, 3);
+        for e in &extracted.entries {
+            let recovered = std::fs::read(out_dir.path().join(&e.path)).unwrap();
+            // Compare with the original at the matching source path.
+            // We re-derive the source path from the archive path.
+            let (leaf, rel) = e.path.split_once('/').unwrap();
+            let src = if leaf == leaf1 {
+                if rel == "a.txt" { p1_a.clone() }
+                else if rel == "sub/b.txt" { p1_b.clone() }
+                else { panic!("unexpected rel {}", rel); }
+            } else if leaf == leaf2 {
+                assert_eq!(rel, "c.txt");
+                p2_a.clone()
+            } else {
+                panic!("unknown leaf {}", leaf);
+            };
+            let orig = std::fs::read(&src).unwrap();
+            assert_eq!(recovered, orig, "mismatch for {}", e.path);
+        }
+    }
+
+    #[test]
+    fn roundtrip_multi_folder_handles_collision() {
+        // Two roots with the same leaf name "data" but different
+        // parent dirs. The first gets the bare name, the second
+        // is disambiguated as "data__1".
+        let base1 = tempfile::tempdir().unwrap();
+        let base2 = tempfile::tempdir().unwrap();
+        let a = base1.path().join("data");
+        let b = base2.path().join("data");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        std::fs::write(a.join("a.txt"), b"a").unwrap();
+        std::fs::write(b.join("b.txt"), b"b").unwrap();
+
+        let (result, _archive) = compress_directories([a.as_path(), b.as_path()]).unwrap();
+        let paths: Vec<&str> = result.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.iter().any(|p| p.starts_with("data/") && p.ends_with("a.txt")),
+            "missing data/a.txt in {:?}", paths);
+        assert!(paths.iter().any(|p| p.starts_with("data__1/") && p.ends_with("b.txt")),
+            "missing data__1/b.txt in {:?}", paths);
     }
 }

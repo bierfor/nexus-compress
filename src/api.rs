@@ -402,6 +402,56 @@ pub fn compress_directory(
         .map_err(|e| ApiError::new("directory.io", e))
 }
 
+/// Compress multiple directories into a single NXAR archive.
+///
+/// Each root directory's files are stored under a top-level
+/// folder named after the root's leaf name. For example, if
+/// the user picks `/path/to/a` and `/path/to/b`, the archive
+/// contains entries like `a/inner/file.txt` and `b/other.txt`.
+///
+/// If any path in `input_dirs` doesn't exist or isn't a
+/// directory, the whole call fails. An empty list is also
+/// an error.
+///
+/// # Errors
+///
+/// - `code: "directory.not_found"` if any path doesn't exist
+///   or isn't a directory.
+/// - `code: "directory.empty"` if no regular files are found
+///   across all directories.
+/// - `code: "directory.io"` for filesystem errors.
+pub fn compress_directories(
+    input_dirs: &[&Path],
+    level: CompressionLevel,
+) -> ApiResult<(DirectoryResult, Vec<u8>)> {
+    if input_dirs.is_empty() {
+        return Err(ApiError::new(
+            "directory.empty",
+            "no directories provided",
+        ));
+    }
+    for d in input_dirs {
+        if !d.is_dir() {
+            return Err(ApiError::new(
+                "directory.not_found",
+                format!("path is not a directory: {}", d.display()),
+            ));
+        }
+    }
+    crate::nxar::compress_directories(input_dirs.iter().copied())
+        .map(|(mut result, archive)| {
+            let _ = level;
+            result.total_compressed_size = result.entries.iter().map(|e| e.compressed_size).sum();
+            result.aggregate_ratio = if result.total_compressed_size == 0 {
+                0.0
+            } else {
+                result.total_original_size as f64 / result.total_compressed_size as f64
+            };
+            (result, archive)
+        })
+        .map_err(|e| ApiError::new("directory.io", e))
+}
+
 /// Decompress an NXAR archive into `output_dir`.
 ///
 /// Each entry's relative path is created under `output_dir` with
