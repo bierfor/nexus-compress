@@ -286,33 +286,19 @@ fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
     }
 
     // 3. Build frequency tables and rANS-encode each stream.
-    let lit_table = build_table_with_precision(&literals, 12);
-    let len_table = build_table_with_precision(&lengths, 12);
-    let dist_lo_table = build_table_with_precision(&dist_lows, 12);
-    let dist_hi_table = build_table_with_precision(&dist_highs, 12);
-
-    // Convert Vec<u8> streams to Vec<u32> for rans_v4.
-    let lit_u32: Vec<u32> = literals.iter().map(|&x| x as u32).collect();
-    let len_u32: Vec<u32> = lengths.iter().map(|&x| x as u32).collect();
-    let dist_lo_u32: Vec<u32> = dist_lows.iter().map(|&x| x as u32).collect();
-    let dist_hi_u32: Vec<u32> = dist_highs.iter().map(|&x| x as u32).collect();
-
-    let lit_stream = rans_encode(&lit_u32, &lit_table);
-    let len_stream = rans_encode(&len_u32, &len_table);
-    let dist_lo_stream = rans_encode(&dist_lo_u32, &dist_lo_table);
-    let dist_hi_stream = rans_encode(&dist_hi_u32, &dist_hi_table);
-
-    let lit_table_bytes = encode_table(&lit_table);
-    // Dense encoding for all tables. v3 dense has ~260 bytes per table × 4
-    // tables ≈ 1KB overhead per block — significant on small blocks
-    // (e.g., code.rs blocks are 2-4KB compressed). Sparse encoding was
-    // tried but it conflicts with rANS's "every symbol has freq≥1"
-    // invariant: from_counts forces freq=1 for unused symbols, so no
-    // symbol is truly "absent" in the table. We'd need a different
-    // rANS variant to allow freq=0; that's a v4 task.
-    let len_table_bytes = encode_table(&len_table);
-    let dist_lo_table_bytes = encode_table(&dist_lo_table);
-    let dist_hi_table_bytes = encode_table(&dist_hi_table);
+    //
+    //    Sprint 2.7: the 4 base v3 streams now use SPARSE encoding
+    //    (32-byte bitmask + densified rANS table). Previously each
+    //    table was a dense 256-entry rANS table (~1027 bytes) with
+    //    "ghost" entries for symbols that never appeared in the
+    //    block. Sparse encoding drops the table to ~50-200 bytes
+    //    per stream, saving ~800-900 bytes per stream × 4 streams
+    //    = ~3-4 KB per block. This is a generalization of the dict
+    //    sparse encoding from sprint 2.6.
+    let (lit_table_section, lit_stream) = crate::rans_v4::sparse_rans_encode_u8(&literals, 12);
+    let (len_table_section, len_stream) = crate::rans_v4::sparse_rans_encode_u8(&lengths, 12);
+    let (dist_lo_table_section, dist_lo_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_lows, 12);
+    let (dist_hi_table_section, dist_hi_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_highs, 12);
 
     // 4. Op-flags stream (one byte per op: 0 = literal, 1 = match).
     let mut ops_bytes = Vec::with_capacity(ops.len() + 4);
@@ -334,38 +320,42 @@ fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
     //      [u32 dist_lo_table_len][u32 dist_lo_stream_len]
     //      [u32 dist_hi_table_len][u32 dist_hi_stream_len]
     //      [u32 ops_len]
-    //      [lit_table][lit_stream]
-    //      [len_table][len_stream]
-    //      [dist_lo_table][dist_lo_stream]
-    //      [dist_hi_table][dist_hi_stream]
+    //      [lit_table_section][lit_stream]
+    //      [len_table_section][len_stream]
+    //      [dist_lo_table_section][dist_lo_stream]
+    //      [dist_hi_table_section][dist_hi_stream]
     //      [ops_bytes]
+    //
+    //    Each table_section is [32 bytes bitmask][densified rANS table].
+    //    The densified rANS table uses the SAME encode_table format
+    //    as the dense table — only n_symbols changes.
     let mut out = Vec::with_capacity(
-        8 * 8 + lit_table_bytes.len()
+        8 * 8 + lit_table_section.len()
             + lit_stream.len()
-            + len_table_bytes.len()
+            + len_table_section.len()
             + len_stream.len()
-            + dist_lo_table_bytes.len()
+            + dist_lo_table_section.len()
             + dist_lo_stream.len()
-            + dist_hi_table_bytes.len()
+            + dist_hi_table_section.len()
             + dist_hi_stream.len()
             + ops_bytes.len(),
     );
-    push_u32(&mut out, lit_table_bytes.len() as u32);
+    push_u32(&mut out, lit_table_section.len() as u32);
     push_u32(&mut out, lit_stream.len() as u32);
-    push_u32(&mut out, len_table_bytes.len() as u32);
+    push_u32(&mut out, len_table_section.len() as u32);
     push_u32(&mut out, len_stream.len() as u32);
-    push_u32(&mut out, dist_lo_table_bytes.len() as u32);
+    push_u32(&mut out, dist_lo_table_section.len() as u32);
     push_u32(&mut out, dist_lo_stream.len() as u32);
-    push_u32(&mut out, dist_hi_table_bytes.len() as u32);
+    push_u32(&mut out, dist_hi_table_section.len() as u32);
     push_u32(&mut out, dist_hi_stream.len() as u32);
     push_u32(&mut out, ops_bytes.len() as u32);
-    out.extend_from_slice(&lit_table_bytes);
+    out.extend_from_slice(&lit_table_section);
     out.extend_from_slice(&lit_stream);
-    out.extend_from_slice(&len_table_bytes);
+    out.extend_from_slice(&len_table_section);
     out.extend_from_slice(&len_stream);
-    out.extend_from_slice(&dist_lo_table_bytes);
+    out.extend_from_slice(&dist_lo_table_section);
     out.extend_from_slice(&dist_lo_stream);
-    out.extend_from_slice(&dist_hi_table_bytes);
+    out.extend_from_slice(&dist_hi_table_section);
     out.extend_from_slice(&dist_hi_stream);
     out.extend_from_slice(&ops_bytes);
 
@@ -603,12 +593,12 @@ fn decode_block_v3(payload: &[u8], cache: &mut Vec<Vec<u8>>, was_rle: bool) -> V
 
     let ops_bytes = &payload[off..off + ops_len];
 
-    // Decode the rANS streams
-    let lit_table = decode_table(lit_table_bytes);
-    let len_table = decode_table(len_table_bytes);
-    let dist_lo_table = decode_table(dist_lo_table_bytes);
-    let dist_hi_table = decode_table(dist_hi_table_bytes);
-
+    // Decode the rANS streams.
+    //
+    //    Sprint 2.7: each table_section starts with a 32-byte bitmask
+    //    followed by the densified rANS table. `sparse_rans_decode_u8`
+    //    reads the bitmask, remaps dense indices to original u8 values,
+    //    and returns the original stream.
     let n_ops = u32::from_le_bytes(ops_bytes[0..4].try_into().unwrap()) as usize;
     let flags: Vec<u8> = ops_bytes[4..4 + n_ops].to_vec();
 
@@ -616,14 +606,14 @@ fn decode_block_v3(payload: &[u8], cache: &mut Vec<Vec<u8>>, was_rle: bool) -> V
     let n_lits = flags.iter().filter(|&&f| f == 0).count();
     let n_matches = n_ops - n_lits;
 
-    let lit_values = rans_decode(lit_stream, &lit_table, n_lits);
-    let len_values = rans_decode(len_stream, &len_table, n_matches);
-    let dist_lo_values = rans_decode(dist_lo_stream, &dist_lo_table, n_matches);
-    let dist_hi_values = rans_decode(dist_hi_stream, &dist_hi_table, n_matches);
+    let lit_values = crate::rans_v4::sparse_rans_decode_u8(lit_table_bytes, lit_stream, n_lits);
+    let len_values = crate::rans_v4::sparse_rans_decode_u8(len_table_bytes, len_stream, n_matches);
+    let dist_lo_values = crate::rans_v4::sparse_rans_decode_u8(dist_lo_table_bytes, dist_lo_stream, n_matches);
+    let dist_hi_values = crate::rans_v4::sparse_rans_decode_u8(dist_hi_table_bytes, dist_hi_stream, n_matches);
 
     // Reconstruct ops by interleaving per the flags
     let mut ops: Vec<Op> = Vec::with_capacity(n_ops);
-    let mut lit_iter = lit_values.into_iter().map(|v| v as u8);
+    let mut lit_iter = lit_values.into_iter();
     let mut len_iter = len_values.into_iter();
     let mut dlo_iter = dist_lo_values.into_iter();
     let mut dhi_iter = dist_hi_values.into_iter();

@@ -300,32 +300,25 @@ pub fn encode_v45_multistream(data: &[u8]) -> Option<Vec<u8>> {
         }
     }
 
-    // 4. Build frequency tables.
-    let lit_table = build_table_with_precision(&literals, 12);
-    let len_table = build_table_with_precision(&lengths, 12);
-    let dist_lo_table = build_table_with_precision(&dist_lows, 12);
-    let dist_hi_table = build_table_with_precision(&dist_highs, 12);
+    // 4. Build frequency tables. v4.7: the 4 base streams now use
+    //    SPARSE encoding (32-byte bitmask + densified rANS table) —
+    //    same principle as the dict-ids stream (v4.6) generalized
+    //    to all u8 streams. This drops the per-table overhead from
+    //    ~1027 bytes to ~50-200 bytes per stream.
+    let (lit_table_section, lit_stream) = crate::rans_v4::sparse_rans_encode_u8(&literals, 12);
+    let (len_table_section, len_stream) = crate::rans_v4::sparse_rans_encode_u8(&lengths, 12);
+    let (dist_lo_table_section, dist_lo_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_lows, 12);
+    let (dist_hi_table_section, dist_hi_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_highs, 12);
     // Sparse dict-ids table (v4.6): the alphabet is collapsed from
     // 256 to just the set bits in the bitmask. For most blocks this
     // shrinks the table from ~1027 bytes to ~50-200 bytes.
     let (dict_bitmask, _dict_remap, dict_dense_ids) = sparse_dict_encode(&dict_ids);
     let dict_table = build_sparse_dict_table(&dict_dense_ids, _dict_remap.len());
-
-    // 5. rANS-encode.
-    let lit_stream = rans_encode(&as_u32(&literals), &lit_table);
-    let len_stream = rans_encode(&as_u32(&lengths), &len_table);
-    let dist_lo_stream = rans_encode(&as_u32(&dist_lows), &dist_lo_table);
-    let dist_hi_stream = rans_encode(&as_u32(&dist_highs), &dist_hi_table);
     let dict_stream = rans_encode(&dict_dense_ids, &dict_table);
 
-    // 6. Table bytes. The dict table section is now:
-    //   [32 bytes bitmask][encode_table(dense table)]
-    // The decoder reads the bitmask first, then the rANS table for
-    // the alphabet size it implies.
-    let lit_table_bytes = encode_table(&lit_table);
-    let len_table_bytes = encode_table(&len_table);
-    let dist_lo_table_bytes = encode_table(&dist_lo_table);
-    let dist_hi_table_bytes = encode_table(&dist_hi_table);
+    // 6. Table bytes. Each base-stream section is now:
+    //   [32 bytes bitmask][densified rANS table]
+    // The dict section is the same shape: [bitmask][densified rANS table].
     let mut dict_table_bytes = Vec::with_capacity(DICT_BITMASK_BYTES + 64);
     dict_table_bytes.extend_from_slice(&dict_bitmask);
     dict_table_bytes.extend_from_slice(&encode_table(&dict_table));
@@ -347,13 +340,13 @@ pub fn encode_v45_multistream(data: &[u8]) -> Option<Vec<u8>> {
     //      [tables][streams][op_flags]
     let mut out = Vec::with_capacity(
         1 + 11 * 4
-            + lit_table_bytes.len()
+            + lit_table_section.len()
             + lit_stream.len()
-            + len_table_bytes.len()
+            + len_table_section.len()
             + len_stream.len()
-            + dist_lo_table_bytes.len()
+            + dist_lo_table_section.len()
             + dist_lo_stream.len()
-            + dist_hi_table_bytes.len()
+            + dist_hi_table_section.len()
             + dist_hi_stream.len()
             + dict_table_bytes.len()
             + dict_stream.len()
@@ -361,24 +354,24 @@ pub fn encode_v45_multistream(data: &[u8]) -> Option<Vec<u8>> {
     );
     out.push(dict_select);
     push_u32(&mut out, ops.len() as u32); // n_ops
-    push_u32(&mut out, lit_table_bytes.len() as u32);
+    push_u32(&mut out, lit_table_section.len() as u32);
     push_u32(&mut out, lit_stream.len() as u32);
-    push_u32(&mut out, len_table_bytes.len() as u32);
+    push_u32(&mut out, len_table_section.len() as u32);
     push_u32(&mut out, len_stream.len() as u32);
-    push_u32(&mut out, dist_lo_table_bytes.len() as u32);
+    push_u32(&mut out, dist_lo_table_section.len() as u32);
     push_u32(&mut out, dist_lo_stream.len() as u32);
-    push_u32(&mut out, dist_hi_table_bytes.len() as u32);
+    push_u32(&mut out, dist_hi_table_section.len() as u32);
     push_u32(&mut out, dist_hi_stream.len() as u32);
     push_u32(&mut out, dict_table_bytes.len() as u32);
     push_u32(&mut out, dict_stream.len() as u32);
     push_u32(&mut out, op_flags_bytes.len() as u32);
-    out.extend_from_slice(&lit_table_bytes);
+    out.extend_from_slice(&lit_table_section);
     out.extend_from_slice(&lit_stream);
-    out.extend_from_slice(&len_table_bytes);
+    out.extend_from_slice(&len_table_section);
     out.extend_from_slice(&len_stream);
-    out.extend_from_slice(&dist_lo_table_bytes);
+    out.extend_from_slice(&dist_lo_table_section);
     out.extend_from_slice(&dist_lo_stream);
-    out.extend_from_slice(&dist_hi_table_bytes);
+    out.extend_from_slice(&dist_hi_table_section);
     out.extend_from_slice(&dist_hi_stream);
     out.extend_from_slice(&dict_table_bytes);
     out.extend_from_slice(&dict_stream);
@@ -456,22 +449,20 @@ pub fn decode_v45_multistream(payload: &[u8]) -> Vec<u8> {
     let dict_remap = sparse_dict_decode_remap(&dict_bitmask);
     let op_flags_bytes = &payload[off..off + op_flags_len];
 
-    // Decode the rANS tables.
-    let lit_table = decode_table(lit_table_bytes);
-    let len_table = decode_table(len_table_bytes);
-    let dist_lo_table = decode_table(dist_lo_table_bytes);
-    let dist_hi_table = decode_table(dist_hi_table_bytes);
+    // Decode the rANS streams. v4.7: the 4 base streams use the
+    // sparse format (32-byte bitmask + densified rANS table). The
+    // shared `sparse_rans_decode_u8` helper handles all four.
     // (dict table already decoded above with the bitmask.)
 
     // Count how many of each op type there are by scanning op_flags.
     // We use n_ops to avoid reading phantom bits in the last byte.
     let (n_lits, n_matches, n_dict_refs) = count_ops(op_flags_bytes, n_ops);
 
-    // Decode the rANS streams.
-    let lit_values = rans_decode(lit_stream, &lit_table, n_lits);
-    let len_values = rans_decode(len_stream, &len_table, n_matches);
-    let dist_lo_values = rans_decode(dist_lo_stream, &dist_lo_table, n_matches);
-    let dist_hi_values = rans_decode(dist_hi_stream, &dist_hi_table, n_matches);
+    // Decode the 4 base streams via sparse_rans_decode_u8.
+    let lit_values = crate::rans_v4::sparse_rans_decode_u8(lit_table_bytes, lit_stream, n_lits);
+    let len_values = crate::rans_v4::sparse_rans_decode_u8(len_table_bytes, len_stream, n_matches);
+    let dist_lo_values = crate::rans_v4::sparse_rans_decode_u8(dist_lo_table_bytes, dist_lo_stream, n_matches);
+    let dist_hi_values = crate::rans_v4::sparse_rans_decode_u8(dist_hi_table_bytes, dist_hi_stream, n_matches);
     // The dict stream encodes dense indices (0..N-1). We need to
     // remap each dense index to the original dict id via the bitmask.
     let dict_dense_values = rans_decode(dict_stream, &dict_table, n_dict_refs);

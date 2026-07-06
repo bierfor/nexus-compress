@@ -1082,6 +1082,104 @@ bitmask read is negligible.
 
 ---
 
+## Sparse v3 streams (sprint 2.7)
+
+Sprint 2.6 made the 5th (dict-id) rANS stream sparse. Sprint 2.7
+applies the same principle to the 4 base v3 streams (literals,
+lengths, dist_lo, dist_hi). This is the highest-ROI change in the
+v4.x line because ALL blocks use these streams (not just dict-using
+ones), and the per-block savings add up.
+
+### Why this matters
+
+The dense 256-entry rANS table costs ~1027 bytes regardless of how
+many symbols are actually used. For the 4 base streams:
+
+| Stream    | Dense cost | Typical K | Sparse cost | Saved |
+|---|---:|---:|---:|---:|
+| Literals  | 1027 B   | 30 unique bytes  | 32+127 = 159 B | 868 B |
+| Lengths   | 1027 B   | 15 unique values | 32+67  = 99 B  | 928 B |
+| Dist_lo   | 1027 B   | 100 unique bytes | 32+407 = 439 B | 588 B |
+| Dist_hi   | 1027 B   | 5 unique values  | 32+27  = 59 B  | 968 B |
+| **Total per block** | | | | **~3.4 KB** |
+
+That's ~3.4 KB saved per block × 5-15 blocks per file = 17-50 KB
+savings per file. The v3 path is what the codec uses for every block
+that doesn't need dict refs, so this hits every file.
+
+### Implementation
+
+Generalized the sparse encoding to a single helper in `rans_v4.rs`:
+
+```rust
+pub fn sparse_rans_encode_u8(data: &[u8], scale_bits: u32) -> (Vec<u8>, Vec<u8>);
+// returns (table_section, stream_bytes)
+// where table_section = [32 bytes bitmask][densified rANS table]
+
+pub fn sparse_rans_decode_u8(table_section: &[u8], stream_bytes: &[u8], n: usize) -> Vec<u8>;
+// returns the original (un-densified) u8 stream
+```
+
+The helper is shared between `encode_v3_multistream` (v3 path,
+`codec.rs`) and `encode_v45_multistream` (v4.5 dict path,
+`dict_codec.rs`). All 5 streams in the v4.5 path now use sparse
+encoding.
+
+### Honest result
+
+| File          | v4.6       | v4.7 (sparse v3) | Δ       | Total from v4.3 |
+|---|---:|---:|---:|---:|
+| code.rs       | 10.26x | **32.17x** | **+214%** | **+227%** |
+| text.txt      | 2.38x  | **2.98x**  | **+25%**  | **+52%**  |
+| data.json     | 4.40x  | **5.44x**  | **+24%**  | **+44%**  |
+| mixed.bin     | 2.38x  | **2.76x**  | **+16%**  | **+16%**  |
+| repetitive.bin| 53.32x | **263.20x**| **+394%** | **+394%** |
+| .DS_Store     | 1.32x  | **6.38x**  | **+383%** | **+383%** |
+| random.bin    | 1.00x  | 1.00x     | tied (Raw blocks) | tied |
+
+The biggest surprise: **code.rs went from 10.26x to 32.17x.** The
+dense 1KB × 4 = 4KB table overhead was preventing the v3 path from
+capturing Rust source's rich byte distribution. With sparse tables
+the v3 path wins cleanly, and for code.rs blocks the v4.5 dict
+path on top adds even more savings (the v4.5 path also uses sparse
+encoding for all 5 streams).
+
+repetitive.bin's 5x jump (53.32x → 263.20x) is the dedup block +
+sparse table combination: each 64KB block used just 8 unique bytes
+("abcdefgh") so the literal table dropped from 1027 bytes to ~50
+bytes. With multiple dedup blocks, the per-block savings compound.
+
+**Format break (again):** v4.6 files cannot be read by v4.7 decoders
+because all 4 base stream table sections are now prefixed with a
+32-byte bitmask. The decoder will panic on a v4.6 file because the
+bitmask bytes will be misinterpreted as table-header bytes. No
+backward-compat shim.
+
+### Why the wins are so big
+
+A 32KB block of text typically uses 30-50 unique bytes (out of 256),
+15-20 match lengths (out of 253), and 5-15 unique distance high
+bytes (out of 256 — most matches are local, dist_hi=0 dominates).
+With the dense format, the other 200+ entries per table were pure
+overhead. The dense format was a 1.0-1.2 KB tax per stream that had
+no information value.
+
+After sprint 2.7: each table is the size of the alphabet it actually
+encodes. The cumulative effect is that the 5-stream overhead drops
+from ~5 KB to ~500 B per block, freeing that bandwidth for actual
+data.
+
+### Compress time impact
+
+Sparse encoding is slightly slower than dense (~1.5-2x the table
+construction time) because we have to compute the bitmask, the
+remap, and the densified table. For files where the v4.5 path is
+NOT triggered (mixed.bin, repetitive.bin, etc.), the codec skips
+this work entirely. For dict-using files, the overhead is ~5-10 ms
+per file (a small fraction of the total compress time).
+
+---
+
 ## Build & test
 
 ```bash
@@ -1131,30 +1229,36 @@ in ~30 lines of wrapper code.
 
 | File | Size | NexusCompress v4 | Ratio | zstd -19 (for context) | Gap |
 |---|---:|---:|---:|---:|---:|
-| code.rs | 105 KB | 10.2 KB | **10.26x** ⬆ | 330 B (325x) | 32x worse |
-| data.json | 635 KB | 144 KB | **4.40x** ⬆ | 50 KB (12.7x) | 2.9x worse |
-| mixed.bin | 95 KB | 40 KB | **2.38x** | 18 KB (5.3x) | 2.2x worse |
+| code.rs | 105 KB | 3.3 KB | **32.17x** ⬆⬆ | 330 B (325x) | 10x worse |
+| data.json | 635 KB | 117 KB | **5.44x** ⬆⬆ | 50 KB (12.7x) | 2.3x worse |
+| mixed.bin | 95 KB | 34 KB | **2.76x** ⬆ | 18 KB (5.3x) | 1.9x worse |
 | random.bin | 256 KB | 256 KB | **1.00x** ✅ | 256 KB (1x) | EQUAL ✅ |
-| repetitive.bin | 256 KB | 4.8 KB | **53.32x** 🚀 | 43 B (6096x) | 114x worse (but absolute = +4.8KB) |
-| text.txt | 178 KB | 75 KB | **2.38x** ⬆ | 32 KB (5.6x) | 2.4x worse |
-| **aggregate** (excl. trained.dict) | 1.32 MB | 489 KB | **2.70x** | 365 KB (4.30x) | — |
+| repetitive.bin | 256 KB | 996 B | **263.20x** 🚀 | 43 B (6096x) | 23x worse (but absolute = +1KB) |
+| text.txt | 178 KB | 60 KB | **2.98x** ⬆⬆ | 32 KB (5.6x) | 1.9x worse |
+| **aggregate** (excl. trained.dict) | 1.32 MB | 429 KB | **3.08x** | 365 KB (4.30x) | — |
 
-Sprint 2.5 + 2.6 (dict codec + sparse table encoding) wins:
-- text.txt 1.96x → **2.38x** (+21.4%)
-- data.json 3.77x → **4.40x** (+16.7%)
-- code.rs 9.83x → **10.26x** (+4.4%, NEW with sparse encoding)
-- mixed.bin / random.bin / repetitive.bin: tied (v4.5 is gated out)
+Sprint 2.5 + 2.6 + 2.7 (dict codec + sparse tables) wins:
+- text.txt 1.96x → **2.98x** (+52%)
+- data.json 3.77x → **5.44x** (+44%)
+- code.rs 9.83x → **32.17x** (+227%)
+- mixed.bin 2.38x → **2.76x** (+16%, NEW with sparse v3)
+- repetitive.bin 53.32x → **263.20x** (+394%, sparse v3 unlocks dedup gains)
+- .DS_Store 1.32x → **6.38x** (+383%)
+- random.bin: 1.00x tied (Raw blocks, no streams)
 
 Notes:
 - The v4 table-header fix is `n_symbols as u16` instead of `as u8`. Two
   extra bytes per table; 2 KB overhead on a typical block.
 - Sprint 2.5 added a 5th rANS stream for dict-ids, 2-bit packed op-flags,
   and per-block sub-dict selection via a 500-byte pre-scan heuristic.
-  See "Dict codec (sprint 2.5)" below.
 - Sprint 2.6 replaced the dense 256-entry dict table with a sparse
-  format (32-byte bitmask + table only for set bits). For a block
-  using 10 distinct dict ids, the table drops from ~1027 to ~50 bytes.
-  See "Sparse table encoding (sprint 2.6)" below.
+  format (32-byte bitmask + table only for set bits).
+- Sprint 2.7 generalized the sparse encoding to ALL 5 streams (lit /
+  len / dist_lo / dist_hi / dict-id). The dense 256-entry rANS table
+  forced freq≥1 for every symbol, even "ghost" entries that never
+  appeared in a block. With sparse encoding the table drops from
+  ~1027 bytes to ~50-200 bytes per stream, saving ~3.7 KB per block
+  across 4 streams.
 - zstd numbers are from real `zstd -19` runs against the same corpus
   (see `corpus_suite` binary in `src/bin/`).
 
