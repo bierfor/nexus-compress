@@ -813,16 +813,13 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-/* Action buttons in the result card */
-.result-actions {
+/* Action buttons in the result card (rendered by the action system) */
+.result-actions-result {
   display: flex;
   gap: 8px;
   margin-top: auto;
   padding-top: 4px;
-}
-
-.result-actions .btn {
-  flex: 1;
+  flex-wrap: wrap;
 }
 
 /* ─── LOGS (collapsed) ──────────────────────────────────────────── */
@@ -910,14 +907,15 @@ button {
   font-weight: 600;
 }
 
-/* ─── ACTION BAR (the big primary CTA) ──────────────────────────── */
+/* ─── ACTION BAR (the dynamic CTA + secondary chips) ──────────── */
 .action-bar {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: 1fr auto auto;
   align-items: center;
   gap: 16px;
   padding: 8px 8px 4px;
   border-top: 1px solid var(--border);
+  min-height: 60px;
 }
 
 .action-bar-meta {
@@ -926,6 +924,10 @@ button {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   text-align: left;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .action-bar-status {
@@ -935,31 +937,165 @@ button {
   letter-spacing: 0.5px;
   text-align: right;
   color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.action-bar-buttons {
+.action-bar-hero {
   display: flex;
-  gap: 8px;
+  align-items: center;
   justify-content: center;
+  /* Fixed width so swapping heroes doesn't reflow the page. */
+  min-width: 240px;
 }
 
-.btn-huge {
-  padding: 16px 56px !important;
-  font-size: 15px !important;
-  letter-spacing: 1.5px !important;
+.action-bar-toolbar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 200px;
+}
+
+/* ─── ACTION BUTTONS (data-driven) ────────────────────────────── */
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border: 1px solid var(--border-hot);
   border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  /* Smooth transitions for variant / hover / entering / leaving. */
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.1s ease,
+    opacity 0.18s ease;
+}
+
+.action-btn:hover:not(.action-disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+.action-btn:active {
+  transform: translateY(1px);
+}
+
+.action-btn.action-pulse {
+  animation: action-pulse 0.2s ease-out;
+}
+
+@keyframes action-pulse {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(0.96); }
+  100% { transform: scale(1); }
+}
+
+/* Hero (the big primary) — fixed dimensions so swapping
+ * compress <-> extract doesn't reflow surrounding UI. */
+.action-slot-hero {
+  padding: 14px 36px !important;
+  font-size: 14px !important;
+  letter-spacing: 1.5px !important;
+  font-weight: 700;
+  /* Slightly wider when the label is longer ("extract archive"). */
+  min-width: 200px;
+  justify-content: center;
   position: relative;
   overflow: hidden;
 }
 
-.btn-huge-glyph {
-  margin-right: 10px;
-  font-size: 18px;
-  vertical-align: middle;
+.action-slot-hero .action-glyph {
+  font-size: 16px;
 }
 
-.btn-huge-label {
-  vertical-align: middle;
+/* Variants */
+.action-variant-primary {
+  background: var(--accent);
+  color: var(--bg-0);
+  border-color: var(--accent);
+}
+.action-variant-primary:hover:not(.action-disabled) {
+  background: var(--accent);
+  color: var(--bg-0);
+  box-shadow: 0 0 24px var(--accent-glow);
+  filter: brightness(1.1);
+}
+
+.action-variant-extract {
+  background: var(--magenta);
+  color: var(--bg-0);
+  border-color: var(--magenta);
+}
+.action-variant-extract:hover:not(.action-disabled) {
+  background: var(--magenta);
+  color: var(--bg-0);
+  box-shadow: 0 0 24px rgba(255, 0, 170, 0.35);
+  filter: brightness(1.1);
+}
+
+.action-variant-success {
+  background: var(--success);
+  color: var(--bg-0);
+  border-color: var(--success);
+}
+.action-variant-success:hover:not(.action-disabled) {
+  background: var(--success);
+  color: var(--bg-0);
+  box-shadow: 0 0 24px rgba(0, 255, 157, 0.3);
+  filter: brightness(1.1);
+}
+
+.action-variant-ghost {
+  background: transparent;
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+.action-variant-ghost:hover:not(.action-disabled) {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+/* Disabled state */
+.action-disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  filter: saturate(0.4);
+}
+
+/* Entrance / exit animations */
+.action-entering {
+  animation: action-enter 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes action-enter {
+  from { opacity: 0; transform: translateY(6px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.action-leaving {
+  animation: action-leave 0.18s ease-in forwards;
+  pointer-events: none;
+}
+
+@keyframes action-leave {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(0.94); }
 }
 
 /* ─── Generic button styles ─────────────────────────────────────── */

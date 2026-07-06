@@ -193,31 +193,8 @@
                 </div>
               </div>
 
-              <!-- Compress-mode actions (after a successful compress) -->
-              <div class="result-actions" id="compress-actions">
-                <button class="btn btn-primary" id="btn-save-archive">
-                  save .nxr archive
-                </button>
-                <button class="btn btn-ghost" id="btn-another">
-                  compress another
-                </button>
-                <button class="btn btn-ghost" id="btn-self-test">
-                  self-test
-                </button>
-              </div>
-
-              <!-- Decompress-mode actions (after a successful extract) -->
-              <div class="result-actions" id="extract-actions" hidden>
-                <button class="btn btn-primary" id="btn-open-extracted">
-                  open in finder
-                </button>
-                <button class="btn btn-ghost" id="btn-archive-save">
-                  save .nxr archive
-                </button>
-                <button class="btn btn-ghost" id="btn-extract-another">
-                  extract another
-                </button>
-              </div>
+              <!-- Actions are rendered dynamically by the action system -->
+              <div class="result-actions-result" id="result-actions-result"></div>
             </div>
           </div>
 
@@ -233,18 +210,16 @@
       </main>
 
       <!-- ════════════════════════════════════════════════════════════════
-           ACTION BAR · the big primary action
+           ACTION BAR · dynamic, declarative
+           The hero button + secondary actions are rendered by the
+           action system (ui/actions.js) based on the ActionContext.
            ════════════════════════════════════════════════════════════════ -->
       <footer class="action-bar">
         <div class="action-bar-meta" id="action-meta">
-          <span class="muted">drop a folder or file to begin</span>
+          <span class="muted">drop a folder, file, or .nxar archive to begin</span>
         </div>
-        <div class="action-bar-buttons">
-          <button class="btn btn-huge btn-primary" id="btn-compress" disabled>
-            <span class="btn-huge-glyph">▣</span>
-            <span class="btn-huge-label">compress</span>
-          </button>
-        </div>
+        <div class="action-bar-hero" id="action-hero"></div>
+        <div class="action-bar-toolbar" id="action-toolbar"></div>
         <div class="action-bar-status" id="action-status">
           <span class="muted">idle</span>
         </div>
