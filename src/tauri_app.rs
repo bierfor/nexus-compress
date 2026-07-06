@@ -45,6 +45,8 @@ fn main() {
             tauri_commands::pick_directory_cmd,
             tauri_commands::compress_directory_cmd,
             tauri_commands::decompress_directory_cmd,
+            tauri_commands::peek_archive_cmd,
+            tauri_commands::open_path_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusRAR Tauri app");

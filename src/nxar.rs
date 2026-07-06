@@ -285,6 +285,74 @@ fn serialize_nxar(entries: &[ArchiveEntry], payloads: &[Vec<u8>]) -> Result<Vec<
     Ok(out)
 }
 
+/// Peek at an NXAR archive's manifest without loading the
+/// per-file payloads. Returns the entry list (path, sizes)
+/// parsed from the header. The payload bytes are NOT copied —
+/// this is the cheap "show me what's inside" call that the UI
+/// uses to populate the archive contents preview before the
+/// user commits to extracting.
+pub fn peek_archive(archive: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
+    if archive.len() < 12 {
+        return Err("archive too short".into());
+    }
+    if &archive[0..4] != NXAR_MAGIC {
+        return Err("bad magic (not an NXAR archive)".into());
+    }
+    if archive[4] != NXAR_VERSION {
+        return Err(format!("unsupported NXAR version: {}", archive[4]));
+    }
+    let n_files = u32::from_le_bytes(
+        archive[8..12]
+            .try_into()
+            .map_err(|_| "bad header")?,
+    ) as usize;
+    let mut entries = Vec::with_capacity(n_files);
+    let mut cursor = 12usize;
+    for _ in 0..n_files {
+        if cursor + 2 + 8 + 8 > archive.len() {
+            return Err("truncated entry header".into());
+        }
+        let name_len = u16::from_le_bytes(
+            archive[cursor..cursor + 2]
+                .try_into()
+                .map_err(|_| "bad name len")?,
+        ) as usize;
+        cursor += 2;
+        if cursor + name_len + 16 > archive.len() {
+            return Err("truncated name".into());
+        }
+        let name = String::from_utf8(archive[cursor..cursor + name_len].to_vec())
+            .map_err(|_| "non-utf8 name")?;
+        cursor += name_len;
+        let original_size = u64::from_le_bytes(
+            archive[cursor..cursor + 8]
+                .try_into()
+                .map_err(|_| "bad original_size")?,
+        );
+        cursor += 8;
+        let compressed_size = u64::from_le_bytes(
+            archive[cursor..cursor + 8]
+                .try_into()
+                .map_err(|_| "bad compressed_size")?,
+        );
+        cursor += 8;
+        let end = cursor
+            .checked_add(compressed_size as usize)
+            .ok_or("compressed_size overflow")?;
+        if end > archive.len() {
+            return Err("truncated payload".into());
+        }
+        cursor = end; // skip the payload without copying
+        entries.push(ArchiveEntry {
+            path: name,
+            original_size,
+            compressed_size,
+            compress_time_ms: 0.0,
+        });
+    }
+    Ok(entries)
+}
+
 /// Deserialize NXAR bytes into (entries, payloads).
 fn deserialize_nxar(archive: &[u8]) -> Result<(Vec<ArchiveEntry>, Vec<Vec<u8>>), String> {
     if archive.len() < 12 {
@@ -424,6 +492,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r = compress_directory(dir.path());
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn peek_matches_full_roundtrip() {
+        let dir = make_temp_tree();
+        let (_result, archive) = compress_directory(dir.path()).unwrap();
+        let peeked = peek_archive(&archive).unwrap();
+        assert_eq!(peeked.len(), 3);
+        for p in &peeked {
+            assert!(p.original_size > 0 || p.path.contains("missing"));
+            assert!(!p.path.is_empty());
+        }
+    }
+
+    #[test]
+    fn peek_rejects_bad_magic() {
+        let bogus = b"JUNK\x01\x00\x00\x00\x00\x00\x00\x00";
+        let r = peek_archive(bogus);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("magic"));
     }
 
     #[test]

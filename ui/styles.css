@@ -1004,6 +1004,21 @@ button {
   filter: brightness(1.1);
 }
 
+/* The "EXTRACT" variant — magenta accent for archive-decompress mode. */
+.btn-extract {
+  background: var(--magenta);
+  color: var(--bg-0);
+  border-color: var(--magenta);
+  font-weight: 700;
+}
+
+.btn-extract:hover:not(:disabled) {
+  background: var(--magenta);
+  color: var(--bg-0);
+  box-shadow: 0 0 24px rgba(255, 0, 170, 0.3);
+  filter: brightness(1.1);
+}
+
 .btn-ghost {
   background: transparent;
   color: var(--text-dim);

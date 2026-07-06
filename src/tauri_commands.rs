@@ -184,3 +184,20 @@ pub async fn decompress_directory_cmd(
     .await
     .map_err(|e| format!("internal: spawn_blocking join failed: {}", e))?
 }
+
+/// Peek at an NXAR archive's manifest. Returns the file list
+/// (paths + sizes) without loading or extracting any payload.
+/// Used by the UI to populate the archive contents preview.
+#[tauri::command]
+pub async fn peek_archive_cmd(archive: Vec<u8>) -> Result<api::DirectoryResult, String> {
+    // No spawn_blocking needed — peek is O(n) over the header,
+    // which is small (a few KB even for 10k entries).
+    to_ipc(api::peek_archive(&archive))
+}
+
+/// Open a path in the OS file manager (Finder / Explorer /
+/// xdg-open). Used by the UI's "open extracted folder" button.
+#[tauri::command]
+pub async fn open_path_cmd(path: String) -> Result<(), String> {
+    to_ipc(api::open_path(&path))
+}

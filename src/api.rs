@@ -427,6 +427,61 @@ pub fn decompress_directory(archive: &[u8], output_dir: &Path) -> ApiResult<Dire
     })
 }
 
+/// Peek at an NXAR archive's manifest without loading per-file
+/// payloads. Used by the UI to populate the "archive contents"
+/// preview before the user commits to extracting.
+///
+/// Returns a `DirectoryResult`-shaped value with the entry list
+/// (path, original_size, compressed_size). The
+/// `total_original_size` and `aggregate_ratio` are populated
+/// from the entry sizes.
+pub fn peek_archive(archive: &[u8]) -> ApiResult<crate::nxar::DirectoryResult> {
+    let entries = crate::nxar::peek_archive(archive)
+        .map_err(|e| ApiError::new("archive.malformed", e))?;
+    let n_files = entries.len() as u64;
+    let total_original: u64 = entries.iter().map(|e| e.original_size).sum();
+    let total_compressed: u64 = entries.iter().map(|e| e.compressed_size).sum();
+    let aggregate_ratio = if total_compressed == 0 {
+        0.0
+    } else {
+        total_original as f64 / total_compressed as f64
+    };
+    Ok(crate::nxar::DirectoryResult {
+        root: "<archive>".to_string(),
+        n_files,
+        total_original_size: total_original,
+        total_compressed_size: total_compressed,
+        aggregate_ratio,
+        total_time_ms: 0.0,
+        entries,
+    })
+}
+
+/// Open a path in the OS file manager (Finder on macOS, Explorer
+/// on Windows, xdg-open on Linux). Used by the UI's
+/// "open extracted folder" button.
+///
+/// Returns Ok(()) if the OS command spawned successfully;
+/// the actual app launch is fire-and-forget.
+pub fn open_path(path: &str) -> ApiResult<()> {
+    use std::process::Command;
+    let result = if cfg!(target_os = "macos") {
+        Command::new("open").arg(path).spawn()
+    } else if cfg!(target_os = "windows") {
+        Command::new("explorer").arg(path).spawn()
+    } else {
+        // Linux / BSD — xdg-open is the de-facto standard.
+        Command::new("xdg-open").arg(path).spawn()
+    };
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => Err(ApiError::new(
+            "open_path.failed",
+            format!("could not open {}: {}", path, e),
+        )),
+    }
+}
+
 // -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------

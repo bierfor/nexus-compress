@@ -152,8 +152,8 @@
             <!-- Result state (filled after compress) -->
             <div class="result-filled" id="result-filled" hidden>
               <div class="result-header">
-                <span class="result-eyebrow">compression complete</span>
-                <span class="result-check">✓</span>
+                <span class="result-eyebrow" id="result-eyebrow">compression complete</span>
+                <span class="result-check" id="result-check">✓</span>
               </div>
 
               <div class="result-bar">
@@ -163,12 +163,12 @@
 
               <div class="result-stats">
                 <div class="result-stat">
-                  <div class="result-stat-label">original</div>
+                  <div class="result-stat-label" id="result-orig-label">original</div>
                   <div class="result-stat-value" id="result-orig">—</div>
                 </div>
-                <div class="result-stat result-stat-arrow">→</div>
+                <div class="result-stat result-stat-arrow" id="result-arrow">→</div>
                 <div class="result-stat">
-                  <div class="result-stat-label">compressed</div>
+                  <div class="result-stat-label" id="result-comp-label">compressed</div>
                   <div class="result-stat-value" id="result-comp">—</div>
                 </div>
               </div>
@@ -184,16 +184,17 @@
                   <div class="result-metric-value" id="result-ratio">—</div>
                 </div>
                 <div class="result-metric">
-                  <div class="result-metric-label">time</div>
+                  <div class="result-metric-label" id="result-time-label">time</div>
                   <div class="result-metric-value" id="result-time">—</div>
                 </div>
                 <div class="result-metric">
-                  <div class="result-metric-label">files</div>
+                  <div class="result-metric-label" id="result-files-label">files</div>
                   <div class="result-metric-value" id="result-files">—</div>
                 </div>
               </div>
 
-              <div class="result-actions">
+              <!-- Compress-mode actions (after a successful compress) -->
+              <div class="result-actions" id="compress-actions">
                 <button class="btn btn-primary" id="btn-save-archive">
                   save .nxr archive
                 </button>
@@ -202,6 +203,19 @@
                 </button>
                 <button class="btn btn-ghost" id="btn-self-test">
                   self-test
+                </button>
+              </div>
+
+              <!-- Decompress-mode actions (after a successful extract) -->
+              <div class="result-actions" id="extract-actions" hidden>
+                <button class="btn btn-primary" id="btn-open-extracted">
+                  open in finder
+                </button>
+                <button class="btn btn-ghost" id="btn-archive-save">
+                  save .nxr archive
+                </button>
+                <button class="btn btn-ghost" id="btn-extract-another">
+                  extract another
                 </button>
               </div>
             </div>
