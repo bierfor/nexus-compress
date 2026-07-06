@@ -1,11 +1,13 @@
-// NexusRAR — UI controller.
+// NexusRAR — UI controller v2.
 //
-// Talks to the Rust backend via Tauri IPC. In Tauri 2.x the global
-// `window.__TAURI__` is only present when `app.withGlobalTauri` is
-// set in tauri.conf.json — we don't enable that, so we call the
-// low-level `window.__TAURI_INTERNALS__.invoke` directly. Same
-// signature as the high-level `invoke` from `@tauri-apps/api/core`.
-// No bundler, no framework. Plain ES2022 modules.
+// Hierarchy:
+//   1. drop zone (centre of attention)
+//   2. result dashboard (big visual reward)
+//   3. settings (collapsed advanced)
+//   4. logs (collapsed by default)
+//
+// Talks to Rust via `window.__TAURI_INTERNALS__.invoke` (Tauri 2.x
+// without the @tauri-apps/api npm package).
 
 const invoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
 
@@ -16,70 +18,82 @@ const $ = (id) => document.getElementById(id);
 
 const els = {
   statusPill: $("status-pill"),
-  statusDot: $("status-dot"),
   statusText: $("status-text"),
 
   dropzone: $("dropzone"),
   fileInput: $("file-input"),
-  dropSecondary: $("dropzone-secondary"),
-  sourceMeta: $("source-meta"),
+  dropzoneMeta: $("dropzone-meta"),
+
+  btnBrowseFile: $("btn-browse-file"),
+  btnPickFolder: $("btn-pick-folder"),
 
   levelSlider: $("level-slider"),
-  levelDesc: $("level-desc"),
-  levelTicks: document.querySelectorAll(".tick"),
+  settingMode: $("setting-mode"),
+  settingHint: $("setting-hint"),
+  sliderMarks: document.querySelectorAll(".slider-marks span"),
 
-  btnCompress: $("btn-compress"),
-  btnDecompress: $("btn-decompress"),
-  btnSelfTest: $("btn-self-test"),
-  btnPickFolder: $("btn-pick-folder"),
-  btnSaveArchive: $("btn-save-archive"),
-  btnExtractArchive: $("btn-extract-archive"),
+  cardFiles: $("card-files"),
+  fileListBody: $("file-list-body"),
+  filesHint: $("files-hint"),
 
-  resultStrip: $("result-strip"),
+  cardResult: $("card-result"),
+  resultEmpty: $("result-empty"),
+  resultFilled: $("result-filled"),
+  barOriginal: $("bar-original"),
+  barCompressed: $("bar-compressed"),
   resultOrig: $("result-orig"),
   resultComp: $("result-comp"),
+  resultSavedVal: $("result-saved-val"),
+  resultSavedPct: $("result-saved-pct"),
   resultRatio: $("result-ratio"),
   resultTime: $("result-time"),
+  resultFiles: $("result-files"),
 
-  fileList: $("file-list"),
-  fileListBody: $("file-list-body"),
-  saveRow: $("save-row"),
+  btnCompress: $("btn-compress"),
+  btnSaveArchive: $("btn-save-archive"),
+  btnAnother: $("btn-another"),
+  btnSelfTest: $("btn-self-test"),
 
+  actionMeta: $("action-meta"),
+  actionStatus: $("action-status"),
+
+  cardLogs: $("card-logs"),
   console: $("console"),
-  telemetryMeta: $("telemetry-meta"),
-  features: $("features"),
+  logsHint: $("logs-hint"),
 };
 
 // -----------------------------------------------------------------------
 // State
 // -----------------------------------------------------------------------
-let lastFile = null; // { name, bytes: Uint8Array }
-let lastOutput = null; // { name, bytes: Uint8Array, isCompressed: bool }
-let lastDirResult = null; // DirectoryResult from a compress_directory call
-let lastArchive = null; // NXAR archive bytes from compress_directory
-let lastDirPath = null; // { name, path } — source folder for lastDirResult
+let lastFile = null; // { name, bytes: Uint8Array } — single file
+let lastOutput = null; // { name, bytes, isCompressed: bool }
+let lastDirResult = null; // DirectoryResult from compress_directory
+let lastArchive = null; // NXAR archive bytes
+let lastDirPath = null; // folder path of last dir compress
 
 // -----------------------------------------------------------------------
-// Status pill
+// Status pill (4 states: idle, working, ok, err)
 // -----------------------------------------------------------------------
+const STATUS_ICONS = {
+  idle: "○",
+  ready: "●",
+  working: "◐",
+  ok: "●",
+  err: "✕",
+};
 function setStatus(state, text) {
-  els.statusPill.classList.remove("ok", "warn", "err", "working");
-  if (state) els.statusPill.classList.add(state);
+  els.statusPill.dataset.state = state;
   els.statusText.textContent = text;
+  const icon = STATUS_ICONS[state] || "●";
+  els.statusText.textContent = `${icon}  ${text}`;
 }
 
 // -----------------------------------------------------------------------
-// Console (telemetry feed)
+// Console / logs
 // -----------------------------------------------------------------------
 const TAG_STYLES = {
-  info: "info",
-  ok: "ok",
-  warn: "warn",
-  err: "err",
-  rx: "rx",  // incoming (load)
-  tx: "tx",  // outgoing (compress/decompress)
+  info: "info", ok: "ok", warn: "warn", err: "err", rx: "rx", tx: "tx",
 };
-
 function log(tag, msg, html = false) {
   const ts = new Date().toLocaleTimeString("en-GB", { hour12: false }) +
     "." + String(Date.now() % 1000).padStart(3, "0");
@@ -98,10 +112,15 @@ function log(tag, msg, html = false) {
   line.append(tsEl, tagEl, msgEl);
   els.console.appendChild(line);
   els.console.scrollTop = els.console.scrollHeight;
-}
 
-function clearConsole() {
-  els.console.innerHTML = "";
+  // Update the hint in the collapsed summary.
+  const count = els.console.children.length;
+  els.logsHint.textContent = count === 0 ? "— empty —" : `${count} line${count === 1 ? "" : "s"}`;
+
+  // Auto-open logs on errors so the user sees what went wrong.
+  if (tag === "err" && !els.cardLogs.open) {
+    els.cardLogs.open = true;
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -113,64 +132,86 @@ function fmtBytes(n) {
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
-
 function fmtMs(ms) {
   if (ms < 1) return `${(ms * 1000).toFixed(0)} µs`;
   if (ms < 100) return `${ms.toFixed(1)} ms`;
-  return `${Math.round(ms)} ms`;
+  if (ms < 60000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(2)} s`;
 }
-
 function fmtRatio(r) {
   if (r <= 0) return "—";
   if (r < 1.01) return "1.00×";
   return `${r.toFixed(2)}×`;
 }
-
-// -----------------------------------------------------------------------
-// Result strip
-// -----------------------------------------------------------------------
-function showResult(orig, comp, ratio, ms) {
-  els.resultOrig.textContent = fmtBytes(orig);
-  els.resultComp.textContent = fmtBytes(comp);
-  els.resultRatio.textContent = fmtRatio(ratio);
-  els.resultTime.textContent = fmtMs(ms);
-  els.resultStrip.hidden = false;
+function fmtPct(p) {
+  if (p < 0) return "—";
+  return `${(p * 100).toFixed(1)}%`;
 }
 
-function hideResult() {
-  els.resultStrip.hidden = true;
+// Ratio color class
+function ratioClass(r) {
+  if (r >= 3.0) return "ratio-great"; // great: green
+  if (r >= 2.0) return "ratio-good";  // good: cyan/blue
+  if (r >= 1.0) return "ratio-meh";   // meh: yellow
+  return "ratio-poor";                  // poor: red
 }
 
 // -----------------------------------------------------------------------
-// Compression level slider
+// Compression level slider (semantic: 0=speed, 100=ratio)
 // -----------------------------------------------------------------------
-els.levelSlider.addEventListener("input", () => {
-  const v = Number(els.levelSlider.value);
-  for (const t of els.levelTicks) {
-    t.classList.toggle("active", Number(t.dataset.level) === v);
+const LEVEL_PRESETS = [
+  { value: 0,  name: "fast",     hint: "lazy LZ77 + 5-stream rANS · fastest, ~3× typical" },
+  { value: 50, name: "balanced", hint: "lazy + 4-stream rANS · mid speed, ~3.5× ratio" },
+  { value: 100,name: "maximum",  hint: "optimal DP + 4-stream · 8.8× slower, ~0% gain (experimental)" },
+];
+
+function applyLevel(value) {
+  // Snap to nearest preset, but allow arbitrary values for "Custom".
+  const v = Number(value);
+  let preset = LEVEL_PRESETS[0];
+  let minDist = Infinity;
+  for (const p of LEVEL_PRESETS) {
+    const d = Math.abs(p.value - v);
+    if (d < minDist) {
+      minDist = d;
+      preset = p;
+    }
   }
-  if (v === 0) {
-    els.levelDesc.textContent = "fast · lazy LZ77 + 5-stream rANS";
+  if (minDist <= 8) {
+    // Snap to preset.
+    els.settingMode.textContent = preset.name;
+    els.settingHint.textContent = preset.hint;
+    els.levelSlider.value = preset.value;
   } else {
-    els.levelDesc.textContent =
-      "premium · experimental optimal DP (8.8× slower, ~0% gain)";
+    els.settingMode.textContent = "custom";
+    els.settingHint.textContent = `slider at ${v}% · between presets`;
   }
-});
+  // Highlight the closest mark.
+  for (const m of els.sliderMarks) {
+    const markVal = Number(m.dataset.mark);
+    m.classList.toggle("active", Math.abs(markVal - v) <= 12);
+  }
+}
+
+els.levelSlider.addEventListener("input", (e) => applyLevel(e.target.value));
+applyLevel(els.levelSlider.value);
+
+function levelName() {
+  const v = Number(els.levelSlider.value);
+  if (v <= 12) return "fast";
+  if (v <= 62) return "balanced";
+  if (v >= 88) return "maximum";
+  return "custom";
+}
 
 // -----------------------------------------------------------------------
-// Dropzone
+// Drop zone
 // -----------------------------------------------------------------------
 function openFilePicker() {
-  // `display: none` file inputs refuse the `.click()` call on some
-  // WebKit versions. The CSS now positions the input off-screen
-  // with `opacity: 0` instead, which keeps the native OS picker
-  // functional. If the click still fails (e.g. Tauri security
-  // policy), surface the error in the telemetry console.
   try {
     els.fileInput.click();
   } catch (e) {
     log("err", `file picker failed: ${e}`);
-    log("warn", "check the Tauri security CSP / capabilities for the dialog plugin");
   }
 }
 
@@ -181,15 +222,24 @@ els.dropzone.addEventListener("keydown", (e) => {
     openFilePicker();
   }
 });
-
 els.fileInput.addEventListener("change", () => {
   if (els.fileInput.files.length === 0) return;
-  // Use the first file for v1. Folder support could enumerate but
-  // the IPC payload would balloon.
-  const f = els.fileInput.files[0];
-  loadFile(f);
+  loadFile(els.fileInput.files[0]);
 });
 
+// OS dialog buttons inside the dropzone (the link-btns)
+els.btnBrowseFile.addEventListener("click", (e) => {
+  e.stopPropagation();
+  openFilePicker();
+});
+els.btnPickFolder.addEventListener("click", (e) => {
+  e.stopPropagation();
+  pickAndCompressFolder();
+});
+
+// HTML5 drag-drop feedback (Tauri 2.x intercepts OS drops
+// before they reach the webview, so the handlers here are
+// only for the dragover visual state).
 ["dragenter", "dragover"].forEach((ev) =>
   els.dropzone.addEventListener(ev, (e) => {
     e.preventDefault();
@@ -204,212 +254,329 @@ els.fileInput.addEventListener("change", () => {
     els.dropzone.classList.remove("dragover");
   }),
 );
-els.dropzone.addEventListener("drop", (e) => {
-  // Tauri 2.x intercepts OS file drops before they reach the
-  // webview's HTML5 `drop` event. The file picker (click on
-  // dropzone) is the v1 path. Real OS drag-drop requires the
-  // `tauri-plugin-fs` + `tauri-plugin-dialog` packages — see
-  // README "Trade-offs / not-yet". The HTML5 drop handler is
-  // here only to clean up the `.dragover` CSS class.
-  e.preventDefault();
-  els.dropzone.classList.remove("dragover");
-});
 
+// -----------------------------------------------------------------------
+// Load a single file (from the file picker)
+// -----------------------------------------------------------------------
 async function loadFile(file) {
   log("rx", `loaded ${file.name} (${fmtBytes(file.size)})`);
   setStatus("working", "loading…");
   const buf = await file.arrayBuffer();
-  lastFile = {
-    name: file.name,
-    bytes: new Uint8Array(buf),
-  };
+  lastFile = { name: file.name, bytes: new Uint8Array(buf) };
   lastOutput = null;
-  els.dropSecondary.textContent = `${file.name} · ${fmtBytes(file.size)}`;
-  els.sourceMeta.textContent = file.name;
-  els.btnCompress.disabled = false;
-  els.btnDecompress.disabled = false;
-  updateDecompressButton();
-  hideResult();
-  setStatus("ok", "ready");
-  log("ok", "file ready · click COMPRESS to run the engine");
+  lastDirResult = null;
+  lastArchive = null;
+  updateCompressButton();
+  updateResultForSingleFile();
+  els.cardFiles.hidden = true;
+  els.dropzoneMeta.textContent = `${file.name} · ${fmtBytes(file.size)}`;
+  els.actionMeta.innerHTML = `<strong>${file.name}</strong> · ${fmtBytes(file.size)}`;
+  setStatus("ready", "ready");
+  log("ok", "file ready · press COMPRESS to run the engine");
 }
 
-/// Update the decompress button label based on what the click
-/// would actually do. After a successful compress, the label
-/// switches to "verify roundtrip" so the user knows the button
-/// will decompress the just-produced compressed output.
-function updateDecompressButton() {
-  if (lastOutput && lastOutput.isCompressed) {
-    els.btnDecompress.textContent = "verify roundtrip";
-    els.btnDecompress.title =
-      "decompress the last compressed output and confirm it roundtrips to the original";
+// -----------------------------------------------------------------------
+// Update the BIG COMPRESS button label & meta
+// -----------------------------------------------------------------------
+function updateCompressButton() {
+  const hasFile = lastFile !== null;
+  const hasFolder = lastDirResult !== null;
+  const ready = hasFile || hasFolder;
+  els.btnCompress.disabled = !ready;
+  if (hasFolder) {
+    els.btnCompress.querySelector(".btn-huge-label").textContent = "compress folder";
+  } else if (hasFile) {
+    els.btnCompress.querySelector(".btn-huge-label").textContent = "compress file";
   } else {
-    els.btnDecompress.textContent = "decompress";
-    els.btnDecompress.title = "decompress the loaded file (must be a NexusCompress stream)";
+    els.btnCompress.querySelector(".btn-huge-label").textContent = "compress";
   }
 }
 
 // -----------------------------------------------------------------------
-// Compress
+// Single-file result display
+// -----------------------------------------------------------------------
+function updateResultForSingleFile() {
+  if (!lastFile) {
+    showResultEmpty();
+    return;
+  }
+  els.resultEmpty.hidden = true;
+  els.resultFilled.hidden = false;
+  els.resultOrig.textContent = fmtBytes(lastFile.bytes.length);
+  els.resultComp.textContent = "—";
+  els.resultSavedVal.textContent = "—";
+  els.resultSavedPct.textContent = "—%";
+  els.resultRatio.textContent = "—";
+  els.resultTime.textContent = "—";
+  els.resultFiles.textContent = "1";
+  // Bars reflect the as-yet-uncompressed state.
+  els.barOriginal.style.width = "100%";
+  els.barCompressed.style.width = "100%";
+}
+
+function showResultEmpty() {
+  els.resultEmpty.hidden = false;
+  els.resultFilled.hidden = true;
+  els.cardFiles.hidden = true;
+}
+
+// -----------------------------------------------------------------------
+// Big result dashboard (after compress)
+// -----------------------------------------------------------------------
+function showResult(origSize, compSize, ratio, timeMs, nFiles = 1) {
+  els.resultEmpty.hidden = true;
+  els.resultFilled.hidden = false;
+
+  els.resultOrig.textContent = fmtBytes(origSize);
+  els.resultComp.textContent = fmtBytes(compSize);
+  els.resultRatio.textContent = fmtRatio(ratio);
+  els.resultTime.textContent = fmtMs(timeMs);
+  els.resultFiles.textContent = String(nFiles);
+
+  const saved = Math.max(0, origSize - compSize);
+  const savedPct = origSize > 0 ? saved / origSize : 0;
+  els.resultSavedVal.textContent = fmtBytes(saved);
+  els.resultSavedPct.textContent = fmtPct(savedPct);
+
+  // The visual bar: original is full width, compressed is ratio-shared.
+  const widthPct = origSize > 0 ? Math.max(2, (compSize / origSize) * 100) : 0;
+  // Animate to the new width on the next frame.
+  requestAnimationFrame(() => {
+    els.barCompressed.style.width = `${widthPct}%`;
+  });
+}
+
+// -----------------------------------------------------------------------
+// File list with color-coded ratios
+// -----------------------------------------------------------------------
+function renderFileList(result) {
+  if (!result || !result.entries || result.entries.length === 0) {
+    els.cardFiles.hidden = true;
+    return;
+  }
+  els.cardFiles.hidden = false;
+  els.filesHint.textContent = `${result.n_files} files · avg ${fmtRatio(result.aggregate_ratio)}`;
+  const entries = [...result.entries].sort(
+    (a, b) => b.original_size - a.original_size,
+  );
+  els.fileListBody.innerHTML = "";
+  for (const e of entries) {
+    const row = document.createElement("div");
+    row.className = "file-list-row";
+    const ratio = e.compressed_size > 0 ? e.original_size / e.compressed_size : 0;
+    const cls = ratioClass(ratio);
+    const name = document.createElement("span");
+    name.className = "file-name";
+    name.textContent = e.path;
+    name.title = e.path;
+    const orig = document.createElement("span");
+    orig.className = "file-list-size";
+    orig.textContent = fmtBytes(e.original_size);
+    const comp = document.createElement("span");
+    comp.className = "file-list-size";
+    comp.textContent = fmtBytes(e.compressed_size);
+    const rat = document.createElement("span");
+    rat.className = `file-list-ratio ${cls}`;
+    rat.textContent = fmtRatio(ratio);
+    row.append(name, orig, comp, rat);
+    els.fileListBody.appendChild(row);
+  }
+}
+
+// -----------------------------------------------------------------------
+// Compress (single file)
 // -----------------------------------------------------------------------
 els.btnCompress.addEventListener("click", async () => {
+  if (!lastFile && !lastDirResult) return;
+  if (lastDirResult && lastArchive) {
+    // Re-show the last folder result without recompressing.
+    showResult(
+      lastDirResult.total_original_size,
+      lastDirResult.total_compressed_size,
+      lastDirResult.aggregate_ratio,
+      lastDirResult.total_time_ms,
+      lastDirResult.n_files,
+    );
+    return;
+  }
   if (!lastFile) return;
-  const level = Number(els.levelSlider.value) === 0 ? "fast" : "premium";
-  setStatus("working", `compressing (${level})…`);
-  els.dropzone.classList.add("processing");
-  hideResult();
-  log("tx", `compress ${lastFile.name} · level=${level}`);
 
+  setStatus("working", "compressing…");
+  els.dropzone.classList.add("processing");
+  hideResultFilled();
+
+  const level = levelName();
   const t0 = performance.now();
   try {
     const input = Array.from(lastFile.bytes);
-    const res = level === "fast"
-      ? await invoke("compress_bytes_cmd", { input })
-      : await invoke("compress_bytes_with_level_cmd", { input, level });
+    const res = await invoke("compress_bytes_cmd", { input });
+    const wall = performance.now() - t0;
 
-    const t1 = performance.now();
-    const wall = t1 - t0;
     showResult(
       res.original_size,
       res.compressed_size,
       res.ratio,
       res.compress_time_ms,
+      1,
     );
     log(
       "ok",
-      `compressed in <strong>${fmtMs(res.compress_time_ms)}</strong> ` +
-        `· ratio <strong>${fmtRatio(res.ratio)}</strong> ` +
-        `· <strong>${fmtBytes(res.original_size)}</strong> → <strong>${fmtBytes(res.compressed_size)}</strong>`,
+      `compressed in <strong>${fmtMs(res.compress_time_ms)}</strong> · ` +
+        `ratio <strong>${fmtRatio(res.ratio)}</strong> · ` +
+        `<strong>${fmtBytes(res.original_size)}</strong> → <strong>${fmtBytes(res.compressed_size)}</strong>`,
       true,
     );
     log(
       "info",
-      `wall ${fmtMs(wall)} · ` +
-        `engine ${fmtMs(res.compress_time_ms)} · ` +
-        `IPC overhead ${fmtMs(Math.max(0, wall - res.compress_time_ms))}`,
+      `level=${level} · wall ${fmtMs(wall)} · ` +
+        `IPC ${fmtMs(Math.max(0, wall - res.compress_time_ms))}`,
     );
     lastOutput = {
       name: lastFile.name + ".nxr",
       bytes: new Uint8Array(res.compressed),
       isCompressed: true,
     };
-    updateDecompressButton();
-    els.telemetryMeta.textContent = "ok · " + fmtRatio(res.ratio);
+    els.actionStatus.innerHTML = `<strong style="color:var(--success)">done</strong> · ${fmtRatio(res.ratio)}`;
     setStatus("ok", "compressed");
   } catch (e) {
-    log("err", `compress failed: ${e}`);
+    console.error("[nexus] compress_bytes_cmd failed:", e);
+    log("err", `compress failed: <strong>${e}</strong>`);
     setStatus("err", "failed");
   } finally {
     els.dropzone.classList.remove("processing");
   }
 });
 
-// -----------------------------------------------------------------------
-// Decompress
-// -----------------------------------------------------------------------
-//
-// Smart button: if the last operation was a successful COMPRESS
-// (so `lastOutput` holds a compressed stream), decompress THAT
-// — this is the "verify roundtrip" path the user expects after
-// clicking compress. If no compressed output exists, fall back
-// to decompressing `lastFile` (the file loaded via picker /
-// drop), which is the "I have a .nxr file and want to recover
-// the original" path.
-
-function pickDecompressTarget() {
-  if (lastOutput && lastOutput.isCompressed) {
-    return { source: lastOutput, reason: "roundtrip-verify" };
-  }
-  if (lastFile) {
-    return { source: lastFile, reason: "input-file" };
-  }
-  return null;
+function hideResultFilled() {
+  els.resultFilled.hidden = true;
+  els.resultEmpty.hidden = false;
 }
 
-els.btnDecompress.addEventListener("click", async () => {
-  const target = pickDecompressTarget();
-  if (!target) return;
-  const { source, reason } = target;
-  setStatus("working", "decompressing…");
-  els.dropzone.classList.add("processing");
-  hideResult();
-  log(
-    "tx",
-    `decompress ${source.name}` +
-      (reason === "roundtrip-verify" ? " · (roundtrip verify)" : ""),
-  );
+// -----------------------------------------------------------------------
+// Compress folder
+// -----------------------------------------------------------------------
+async function pickAndCompressFolder() {
+  log("tx", "open folder picker…");
+  setStatus("working", "picking folder…");
+  let picked;
+  try {
+    picked = await invoke("pick_directory_cmd");
+  } catch (e) {
+    log("err", `folder picker failed: <strong>${e}</strong>`);
+    log("info", "check capabilities/default.json for dialog:default");
+    setStatus("err", "picker failed");
+    return;
+  }
+  if (!picked) {
+    log("info", "folder picker cancelled");
+    setStatus("ready", "ready");
+    return;
+  }
+  log("rx", `picked: <strong>${picked}</strong>`);
 
+  setStatus("working", "compressing folder…");
+  els.dropzone.classList.add("processing");
+  hideResultFilled();
+  els.cardFiles.hidden = true;
+
+  const level = levelName();
   const t0 = performance.now();
   try {
-    const input = Array.from(source.bytes);
-    const res = await invoke("decompress_bytes_cmd", { input });
+    const result = await invoke("compress_directory_cmd", {
+      inputDir: picked,
+      level,
+    });
+    const [dirResult, archive] = result;
+    const wall = performance.now() - t0;
 
-    const t1 = performance.now();
-    const wall = t1 - t0;
     showResult(
-      res.size,
-      source.bytes.length,
-      source.bytes.length > 0 ? source.bytes.length / res.size : 0,
-      res.decompress_time_ms,
+      dirResult.total_original_size,
+      dirResult.total_compressed_size,
+      dirResult.aggregate_ratio,
+      dirResult.total_time_ms,
+      dirResult.n_files,
     );
     log(
       "ok",
-      `decompressed in <strong>${fmtMs(res.decompress_time_ms)}</strong> ` +
-        `· <strong>${fmtBytes(source.bytes.length)}</strong> → <strong>${fmtBytes(res.size)}</strong>`,
+      `compressed <strong>${dirResult.n_files}</strong> files in ` +
+        `<strong>${fmtMs(dirResult.total_time_ms)}</strong> · ` +
+        `ratio <strong>${fmtRatio(dirResult.aggregate_ratio)}</strong> · ` +
+        `<strong>${fmtBytes(dirResult.total_original_size)}</strong> → ` +
+        `<strong>${fmtBytes(dirResult.total_compressed_size)}</strong>`,
       true,
     );
     log(
       "info",
-      `wall ${fmtMs(wall)} · ` +
-        `engine ${fmtMs(res.decompress_time_ms)} · ` +
-        `IPC overhead ${fmtMs(Math.max(0, wall - res.decompress_time_ms))}`,
+      `level=${level} · wall ${fmtMs(wall)} · ` +
+        `IPC ${fmtMs(Math.max(0, wall - dirResult.total_time_ms))}`,
     );
-    // Promote the recovered bytes to lastOutput so the user can
-    // chain operations without losing the result.
-    lastOutput = {
-      name: source.name.replace(/\.nxr$/i, ""),
-      bytes: new Uint8Array(res.data),
-      isCompressed: false,
-    };
-
-    // Bonus: when this was a roundtrip verify, confirm the
-    // recovered bytes are byte-identical to the original
-    // (when we have one).
-    if (reason === "roundtrip-verify" && lastFile) {
-      const recovered = lastOutput.bytes;
-      const original = lastFile.bytes;
-      const sameLen = recovered.length === original.length;
-      let sameContent = sameLen;
-      if (sameLen) {
-        for (let i = 0; i < original.length; i++) {
-          if (recovered[i] !== original[i]) {
-            sameContent = false;
-            break;
-          }
-        }
-      }
-      if (sameContent) {
-        log(
-          "ok",
-          `roundtrip OK · <strong>${fmtBytes(original.length)}</strong> recovered byte-identical from <strong>${fmtBytes(source.bytes.length)}</strong> compressed`,
-          true,
-        );
-      } else {
-        log(
-          "err",
-          `roundtrip MISMATCH · expected ${original.length} B, got ${recovered.length} B`,
-        );
-      }
-    }
-
-    els.telemetryMeta.textContent = "ok · decompressed";
-    setStatus("ok", "decompressed");
+    lastDirResult = dirResult;
+    lastArchive = new Uint8Array(archive);
+    lastDirPath = picked;
+    renderFileList(dirResult);
+    els.dropzoneMeta.textContent =
+      `${picked.split("/").pop()} · ${dirResult.n_files} files · ${fmtBytes(dirResult.total_original_size)}`;
+    els.actionMeta.innerHTML =
+      `<strong>${picked.split("/").pop()}</strong> · ${dirResult.n_files} files · ${fmtBytes(dirResult.total_original_size)}`;
+    els.actionStatus.innerHTML =
+      `<strong style="color:var(--success)">done</strong> · ${fmtRatio(dirResult.aggregate_ratio)}`;
+    updateCompressButton();
+    setStatus("ok", "compressed");
   } catch (e) {
-    log("err", `decompress failed: ${e}`);
-    setStatus("err", "failed");
+    console.error("[nexus] compress_directory_cmd failed:", e);
+    log("err", `folder compress failed: <strong>${e}</strong>`);
+    setStatus("err", "folder failed");
   } finally {
     els.dropzone.classList.remove("processing");
   }
+}
+
+// -----------------------------------------------------------------------
+// Save archive (browser download, lands in Downloads folder)
+// -----------------------------------------------------------------------
+els.btnSaveArchive.addEventListener("click", async () => {
+  let bytes, name;
+  if (lastArchive && lastDirPath) {
+    bytes = lastArchive;
+    name = (lastDirPath.split("/").pop() || "folder") + ".nxar";
+  } else if (lastOutput && lastOutput.isCompressed) {
+    bytes = lastOutput.bytes;
+    name = lastOutput.name;
+  } else {
+    log("warn", "no archive to save — compress something first");
+    return;
+  }
+  const blob = new Blob([bytes], { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  log("ok", `saved <strong>${name}</strong> · <strong>${fmtBytes(bytes.length)}</strong>`, true);
+  log("info", "landed in your browser's Downloads folder");
+  setStatus("ok", "saved");
+});
+
+// -----------------------------------------------------------------------
+// "Compress another" — clear the state and return to empty
+// -----------------------------------------------------------------------
+els.btnAnother.addEventListener("click", () => {
+  lastFile = null;
+  lastOutput = null;
+  lastDirResult = null;
+  lastArchive = null;
+  lastDirPath = null;
+  showResultEmpty();
+  els.cardFiles.hidden = true;
+  els.dropzoneMeta.textContent = "supports folders · .nxr archives · any file type";
+  els.actionMeta.innerHTML = `<span class="muted">drop a folder or file to begin</span>`;
+  els.actionStatus.innerHTML = `<span class="muted">idle</span>`;
+  updateCompressButton();
+  setStatus("ready", "ready");
+  log("info", "ready for the next one");
 });
 
 // -----------------------------------------------------------------------
@@ -439,214 +606,24 @@ els.btnSelfTest.addEventListener("click", async () => {
 });
 
 // -----------------------------------------------------------------------
-// Engine info (called on startup to populate features footer)
+// Engine info on boot
 // -----------------------------------------------------------------------
 async function loadEngineInfo() {
   try {
     const info = await invoke("engine_info_cmd");
-    log("info", `engine v${info.version} · format v${info.format_version} · ${info.dict_entries} dict entries`);
-    const flags = [
-      ["entropy-gate", info.has_entropy_gate],
-      ["local-subdict", info.has_local_subdict],
-      ["sparse-v3", info.has_sparse_v3],
-    ];
-    els.features.innerHTML = "<span>// engine</span>";
-    for (const [name, on] of flags) {
-      const el = document.createElement("span");
-      el.className = "feat" + (on ? " on" : "");
-      el.textContent = name + (on ? " ✓" : " ✗");
-      els.features.appendChild(el);
-    }
-    setStatus("ok", "engine ready");
+    log(
+      "info",
+      `engine v${info.version} · format v${info.format_version} · ${info.dict_entries} dict entries`,
+    );
+    setStatus("ready", "ready");
   } catch (e) {
     log("err", `engine_info failed: ${e}`);
     setStatus("err", "engine offline");
   }
 }
 
-// -----------------------------------------------------------------------
-// Folder mode (NXAR archive)
-// -----------------------------------------------------------------------
-
-/// Show the file list for a directory compression result.
-function renderFileList(result) {
-  if (!result || !result.entries || result.entries.length === 0) {
-    els.fileList.hidden = true;
-    return;
-  }
-  els.fileList.hidden = false;
-  // Sort: largest files first so the user sees the biggest wins.
-  const entries = [...result.entries].sort(
-    (a, b) => b.original_size - a.original_size,
-  );
-  els.fileListBody.innerHTML = "";
-  for (const e of entries) {
-    const row = document.createElement("div");
-    row.className = "file-list-row";
-    const ratio =
-      e.compressed_size > 0 ? e.original_size / e.compressed_size : 0;
-    const name = document.createElement("span");
-    name.className = "file-name";
-    name.textContent = e.path;
-    name.title = e.path;
-    const orig = document.createElement("span");
-    orig.className = "file-list-size";
-    orig.textContent = fmtBytes(e.original_size);
-    const comp = document.createElement("span");
-    comp.className = "file-list-size";
-    comp.textContent = fmtBytes(e.compressed_size);
-    const rat = document.createElement("span");
-    rat.className = "file-list-ratio";
-    rat.textContent = fmtRatio(ratio);
-    row.append(name, orig, comp, rat);
-    els.fileListBody.appendChild(row);
-  }
-}
-
-/// Compress a folder picked via the OS dialog.
-els.btnPickFolder.addEventListener("click", async () => {
-  log("tx", "open folder picker…");
-  setStatus("working", "picking folder…");
-  let picked;
-  try {
-    picked = await invoke("pick_directory_cmd");
-    console.log("[nexus] pick_directory_cmd returned:", picked);
-  } catch (e) {
-    console.error("[nexus] pick_directory_cmd failed:", e);
-    log("err", `folder picker failed: <strong>${e}</strong>`);
-    log("info", "Tauri permission? check capabilities/default.json for dialog:default");
-    setStatus("err", "picker failed");
-    return;
-  }
-  if (picked === null || picked === undefined || picked === "") {
-    log("info", "folder picker cancelled (or returned empty)");
-    setStatus("ok", "ready");
-    return;
-  }
-  log("rx", `picked: <strong>${picked}</strong>`);
-
-  // Compress the folder.
-  setStatus("working", "compressing folder…");
-  els.dropzone.classList.add("processing");
-  hideResult();
-  els.fileList.hidden = true;
-  els.saveRow.hidden = true;
-
-  const level = Number(els.levelSlider.value) === 0 ? "fast" : "premium";
-  const t0 = performance.now();
-  try {
-    log("info", `calling compress_directory_cmd(inputDir="${picked}", level="${level}")`);
-    const result = await invoke("compress_directory_cmd", {
-      inputDir: picked,
-      level,
-    });
-    // Tauri serializes tuples as arrays; the Rust side returns
-    // (DirectoryResult, Vec<u8>) so `result` is `[result, archive]`.
-    const [dirResult, archive] = result;
-    const wall = performance.now() - t0;
-    showResult(
-      dirResult.total_original_size,
-      dirResult.total_compressed_size,
-      dirResult.aggregate_ratio,
-      dirResult.total_time_ms,
-    );
-    log(
-      "ok",
-      `compressed <strong>${dirResult.n_files}</strong> files in <strong>${fmtMs(dirResult.total_time_ms)}</strong> ` +
-        `· ratio <strong>${fmtRatio(dirResult.aggregate_ratio)}</strong> ` +
-        `· <strong>${fmtBytes(dirResult.total_original_size)}</strong> → <strong>${fmtBytes(dirResult.total_compressed_size)}</strong>`,
-      true,
-    );
-    log(
-      "info",
-      `wall ${fmtMs(wall)} · engine ${fmtMs(dirResult.total_time_ms)} · ` +
-        `IPC overhead ${fmtMs(Math.max(0, wall - dirResult.total_time_ms))}`,
-    );
-    lastDirResult = dirResult;
-    lastArchive = new Uint8Array(archive);
-    lastDirPath = picked;
-    els.dropSecondary.textContent = `${picked.split("/").pop()} · ${dirResult.n_files} files`;
-    els.sourceMeta.textContent = `${dirResult.n_files} files`;
-    renderFileList(dirResult);
-    els.saveRow.hidden = false;
-    els.telemetryMeta.textContent = "ok · " + fmtRatio(dirResult.aggregate_ratio);
-    setStatus("ok", "folder compressed");
-  } catch (e) {
-    console.error("[nexus] compress_directory_cmd failed:", e);
-    log("err", `folder compress failed: <strong>${e}</strong>`);
-    if (typeof e === "string" && e.includes("not_found")) {
-      log("warn", "the path may not exist or isn't a directory — try another folder");
-    } else if (typeof e === "string" && e.includes("empty")) {
-      log("warn", "the directory has no regular files — add some files and retry");
-    } else if (typeof e === "string" && e.includes("io")) {
-      log("warn", "filesystem error — check the folder permissions");
-    }
-    setStatus("err", "folder failed");
-  } finally {
-    els.dropzone.classList.remove("processing");
-  }
-});
-
-/// Save the last compressed archive to disk via the OS save dialog.
-els.btnSaveArchive.addEventListener("click", async () => {
-  if (!lastArchive || !lastDirPath) {
-    log("warn", "no archive to save — compress a folder first");
-    return;
-  }
-  // We can't call the dialog plugin from JS without going through
-  // a Tauri command. For v1, use the simpler approach: download
-  // the archive via a synthetic <a download> link. This works in
-  // Tauri's webview and saves to the user's Downloads folder.
-  const baseName =
-    (lastDirPath.split("/").pop() || "folder") + ".nxar";
-  const blob = new Blob([lastArchive], { type: "application/octet-stream" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = baseName;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-  log("ok", `saved <strong>${baseName}</strong> · <strong>${fmtBytes(lastArchive.length)}</strong>`, true);
-  log("info", "saved to your browser's Downloads folder");
-  setStatus("ok", "archive saved");
-});
-
-/// Extract an archive: open the .nxr via the file picker, then
-/// ask for an output directory, then call decompress_directory.
-els.btnExtractArchive.addEventListener("click", async () => {
-  if (!lastFile) {
-    log("warn", "load an .nxr archive first (use the dropzone)");
-    return;
-  }
-  // For v1: extract into a sibling folder named
-  // `<archive>.extracted/` next to the original. A full output
-  // directory picker is a follow-up (needs the dialog plugin's
-  // pick_folder, which is already wired in Rust).
-  const outDir = lastFile.name.replace(/\.nxr$/i, "") + ".extracted";
-  log("tx", `extract archive → ${outDir}`);
-  setStatus("working", "extracting…");
-  try {
-    const input = Array.from(lastFile.bytes);
-    const result = await invoke("decompress_directory_cmd", {
-      archive: input,
-      outputDir: outDir,
-    });
-    log(
-      "ok",
-      `extracted <strong>${result.n_files}</strong> files to <strong>${outDir}</strong> in <strong>${fmtMs(result.total_time_ms)}</strong>`,
-      true,
-    );
-    setStatus("ok", "extracted");
-  } catch (e) {
-    log("err", `extract failed: ${e}`);
-    setStatus("err", "extract failed");
-  }
-});
-
 window.addEventListener("DOMContentLoaded", () => {
   log("info", "NexusRAR booting…");
-  updateDecompressButton();
+  updateCompressButton();
   loadEngineInfo();
 });

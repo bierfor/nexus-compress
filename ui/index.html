@@ -9,148 +9,231 @@
   </head>
   <body>
     <div class="app">
-      <!-- Top bar: logo + status pill -->
+      <!-- ════════════════════════════════════════════════════════════════
+           TOP BAR · brand + status pill
+           ════════════════════════════════════════════════════════════════ -->
       <header class="topbar">
         <div class="brand">
           <span class="logo-glyph">▣</span>
           <span class="brand-name">NexusRAR</span>
-          <span class="brand-sub">v0.1.0 · hybrid compressor</span>
+          <span class="brand-sub">v0.1.0</span>
         </div>
-        <div class="status-pill" id="status-pill">
-          <span class="status-dot" id="status-dot"></span>
-          <span class="status-text" id="status-text">starting…</span>
+        <div class="status-pill" id="status-pill" data-state="idle">
+          <span class="status-dot"></span>
+          <span class="status-text" id="status-text">ready</span>
         </div>
       </header>
 
-      <!-- Main grid: dropzone (left) + telemetry (right) -->
-      <main class="grid">
-        <!-- LEFT: dropzone + controls -->
-        <section class="panel panel-dropzone">
-          <div class="panel-header">
-            <span class="panel-title">// source</span>
-            <span class="panel-hint" id="source-meta">no file</span>
-          </div>
+      <!-- ════════════════════════════════════════════════════════════════
+           MAIN · 2 columns: [drop+settings] | [result+logs]
+           ════════════════════════════════════════════════════════════════ -->
+      <main class="main-grid">
+        <!-- ────────────────────────────────────────────────────────────
+             LEFT COLUMN · the input (drop zone + settings + files)
+             ──────────────────────────────────────────────────────────── -->
+        <section class="col col-input">
 
+          <!-- DROP ZONE — the centrepiece, big and inviting -->
           <div
             class="dropzone"
             id="dropzone"
             tabindex="0"
             role="button"
-            aria-label="drop file here or click to browse"
+            aria-label="drop folder here or click to browse"
           >
             <div class="dropzone-inner">
-              <div class="dropzone-icon">⤓</div>
-              <div class="dropzone-text">
-                <div class="dropzone-primary">
-                  drop file or folder<br /><span class="muted">or click to browse</span>
-                </div>
-                <div class="dropzone-secondary" id="dropzone-secondary">
-                  ready
-                </div>
+              <div class="dropzone-glyph">⤓</div>
+              <div class="dropzone-headline">drop your folder</div>
+              <div class="dropzone-sub">
+                <span class="muted">or</span>
+                <button type="button" class="link-btn" id="btn-browse-file">
+                  browse a file
+                </button>
+                <span class="muted">·</span>
+                <button type="button" class="link-btn" id="btn-pick-folder">
+                  pick a folder
+                </button>
+              </div>
+              <div class="dropzone-meta" id="dropzone-meta">
+                supports folders · .nxr archives · any file type
               </div>
             </div>
-            <input
-              type="file"
-              id="file-input"
-              class="file-input"
-              multiple
-              webkitdirectory
-            />
+            <input type="file" id="file-input" class="file-input" />
           </div>
 
-          <div class="controls">
-            <label class="control-label">
-              <span>compression level</span>
-              <span class="muted" id="level-desc">fast · lazy LZ77 + 5-stream rANS</span>
-            </label>
-            <div class="slider-wrap">
-              <input
-                type="range"
-                id="level-slider"
-                class="level-slider"
-                min="0"
-                max="1"
-                step="1"
-                value="0"
-              />
-              <div class="slider-ticks">
-                <span class="tick active" data-level="0">fast</span>
-                <span class="tick" data-level="1">premium</span>
+          <!-- SETTINGS CARD · compression level + advanced toggles -->
+          <div class="card card-settings">
+            <div class="setting-block">
+              <div class="setting-row">
+                <span class="setting-label">compression</span>
+                <span class="setting-value" id="setting-mode">fast</span>
+              </div>
+              <div class="slider-wrap">
+                <input
+                  type="range"
+                  id="level-slider"
+                  class="level-slider"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value="20"
+                />
+                <div class="slider-axis">
+                  <span class="slider-end">speed</span>
+                  <span class="slider-tick" style="left: 25%"></span>
+                  <span class="slider-tick" style="left: 50%"></span>
+                  <span class="slider-tick" style="left: 75%"></span>
+                  <span class="slider-end slider-end-right">ratio</span>
+                </div>
+                <div class="slider-marks">
+                  <span data-mark="0">fast</span>
+                  <span data-mark="50">balanced</span>
+                  <span data-mark="100">maximum</span>
+                </div>
+              </div>
+              <div class="setting-hint" id="setting-hint">
+                lazy LZ77 + 5-stream rANS · fastest, ~3× typical ratio
               </div>
             </div>
 
-            <div class="action-row">
-              <button class="btn btn-primary" id="btn-compress" disabled>
-                compress
-              </button>
-              <button class="btn" id="btn-decompress" disabled>
-                decompress
-              </button>
-              <button class="btn btn-ghost" id="btn-pick-folder">
-                pick folder
-              </button>
+            <details class="advanced">
+              <summary>
+                <span class="caret">▸</span> advanced
+                <span class="advanced-tag">v4.8</span>
+              </summary>
+              <div class="advanced-body">
+                <div class="toggle-row">
+                  <span class="toggle-label">entropy gatekeeper</span>
+                  <span class="toggle-pill" data-on="true">on</span>
+                </div>
+                <div class="toggle-row">
+                  <span class="toggle-label">local sub-dict</span>
+                  <span class="toggle-pill" data-on="true">on</span>
+                </div>
+                <div class="toggle-row">
+                  <span class="toggle-label">sparse v3 streams</span>
+                  <span class="toggle-pill" data-on="true">on</span>
+                </div>
+                <div class="toggle-row">
+                  <span class="toggle-label">trained dictionary</span>
+                  <span class="toggle-pill" data-on="true">5348 entries</span>
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <!-- FILE LIST · only shown after a folder compress -->
+          <div class="card card-files" id="card-files" hidden>
+            <div class="card-header">
+              <span class="card-title">file analysis</span>
+              <span class="card-hint" id="files-hint">—</span>
             </div>
-            <div class="action-row">
-              <button class="btn btn-ghost" id="btn-self-test">
-                self-test
-              </button>
+            <div class="file-list" id="file-list">
+              <div class="file-list-body" id="file-list-body"></div>
             </div>
           </div>
         </section>
 
-        <!-- RIGHT: telemetry + result -->
-        <section class="panel panel-telemetry">
-          <div class="panel-header">
-            <span class="panel-title">// telemetry</span>
-            <span class="panel-hint" id="telemetry-meta">idle</span>
+        <!-- ────────────────────────────────────────────────────────────
+             RIGHT COLUMN · the output (result dashboard + logs)
+             ──────────────────────────────────────────────────────────── -->
+        <section class="col col-output">
+          <!-- RESULT DASHBOARD · the big visual reward -->
+          <div class="card card-result" id="card-result">
+            <!-- Empty state -->
+            <div class="result-empty" id="result-empty">
+              <div class="result-empty-glyph">▣</div>
+              <div class="result-empty-headline">no compression yet</div>
+              <div class="result-empty-sub muted">
+                drop a folder or pick one to see the savings
+              </div>
+            </div>
+
+            <!-- Result state (filled after compress) -->
+            <div class="result-filled" id="result-filled" hidden>
+              <div class="result-header">
+                <span class="result-eyebrow">compression complete</span>
+                <span class="result-check">✓</span>
+              </div>
+
+              <div class="result-bar">
+                <div class="result-bar-original" id="bar-original"></div>
+                <div class="result-bar-compressed" id="bar-compressed"></div>
+              </div>
+
+              <div class="result-stats">
+                <div class="result-stat">
+                  <div class="result-stat-label">original</div>
+                  <div class="result-stat-value" id="result-orig">—</div>
+                </div>
+                <div class="result-stat result-stat-arrow">→</div>
+                <div class="result-stat">
+                  <div class="result-stat-label">compressed</div>
+                  <div class="result-stat-value" id="result-comp">—</div>
+                </div>
+              </div>
+
+              <div class="result-saved" id="result-saved">
+                saved <strong id="result-saved-val">—</strong>
+                <span class="result-saved-pct" id="result-saved-pct">—%</span>
+              </div>
+
+              <div class="result-metrics">
+                <div class="result-metric">
+                  <div class="result-metric-label">ratio</div>
+                  <div class="result-metric-value" id="result-ratio">—</div>
+                </div>
+                <div class="result-metric">
+                  <div class="result-metric-label">time</div>
+                  <div class="result-metric-value" id="result-time">—</div>
+                </div>
+                <div class="result-metric">
+                  <div class="result-metric-label">files</div>
+                  <div class="result-metric-value" id="result-files">—</div>
+                </div>
+              </div>
+
+              <div class="result-actions">
+                <button class="btn btn-primary" id="btn-save-archive">
+                  save .nxr archive
+                </button>
+                <button class="btn btn-ghost" id="btn-another">
+                  compress another
+                </button>
+                <button class="btn btn-ghost" id="btn-self-test">
+                  self-test
+                </button>
+              </div>
+            </div>
           </div>
 
-          <div class="result-strip" id="result-strip" hidden>
-            <div class="result-cell">
-              <div class="result-label">original</div>
-              <div class="result-value" id="result-orig">—</div>
-            </div>
-            <div class="result-cell">
-              <div class="result-label">compressed</div>
-              <div class="result-value" id="result-comp">—</div>
-            </div>
-            <div class="result-cell result-ratio">
-              <div class="result-label">ratio</div>
-              <div class="result-value" id="result-ratio">—</div>
-            </div>
-            <div class="result-cell">
-              <div class="result-label">time</div>
-              <div class="result-value" id="result-time">—</div>
-            </div>
-          </div>
-
-          <div class="file-list" id="file-list" hidden>
-            <div class="file-list-header">
-              <span>file</span>
-              <span class="file-list-size">original</span>
-              <span class="file-list-size">compressed</span>
-              <span class="file-list-size">ratio</span>
-            </div>
-            <div class="file-list-body" id="file-list-body"></div>
-          </div>
-
-          <div class="console" id="console" aria-live="polite"></div>
-
-          <div class="action-row action-row-save" id="save-row" hidden>
-            <button class="btn btn-primary" id="btn-save-archive">
-              save .nxr archive
-            </button>
-            <button class="btn btn-ghost" id="btn-extract-archive">
-              extract archive to…
-            </button>
-          </div>
+          <!-- LOGS · collapsed by default; expand when something fails -->
+          <details class="card card-logs" id="card-logs">
+            <summary>
+              <span class="caret">▸</span> logs
+              <span class="logs-hint" id="logs-hint">— empty —</span>
+            </summary>
+            <div class="console" id="console" aria-live="polite"></div>
+          </details>
         </section>
       </main>
 
-      <!-- Bottom: engine features strip -->
-      <footer class="features" id="features">
-        <span class="muted">// engine</span>
-        <span class="muted">starting…</span>
+      <!-- ════════════════════════════════════════════════════════════════
+           ACTION BAR · the big primary action
+           ════════════════════════════════════════════════════════════════ -->
+      <footer class="action-bar">
+        <div class="action-bar-meta" id="action-meta">
+          <span class="muted">drop a folder or file to begin</span>
+        </div>
+        <div class="action-bar-buttons">
+          <button class="btn btn-huge btn-primary" id="btn-compress" disabled>
+            <span class="btn-huge-glyph">▣</span>
+            <span class="btn-huge-label">compress</span>
+          </button>
+        </div>
+        <div class="action-bar-status" id="action-status">
+          <span class="muted">idle</span>
+        </div>
       </footer>
     </div>
 
