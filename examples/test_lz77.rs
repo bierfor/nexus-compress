@@ -7,6 +7,7 @@ fn main() {
     
     let mut n_lits = 0;
     let mut n_matches = 0;
+    let mut n_dict_refs = 0;
     let mut total_match_len = 0u64;
     for op in &ops {
         match op {
@@ -15,10 +16,14 @@ fn main() {
                 n_matches += 1;
                 total_match_len += *len as u64;
             }
+            nexus_compress::lz77::Op::DictRef { len, .. } => {
+                n_dict_refs += 1;
+                total_match_len += *len as u64;
+            }
         }
     }
-    println!("n_ops={} n_lits={} n_matches={} avg_match_len={}",
-        ops.len(), n_lits, n_matches,
+    println!("n_ops={} n_lits={} n_matches={} n_dict_refs={} avg_match_len={}",
+        ops.len(), n_lits, n_matches, n_dict_refs,
         if n_matches > 0 { total_match_len / n_matches as u64 } else { 0 });
     
     // Decode

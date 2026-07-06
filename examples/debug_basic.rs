@@ -12,6 +12,7 @@ fn main() {
         match op {
             nexus_compress::lz77::Op::Lit(b) => println!("  [{}] Lit 0x{:02x} ({:?})", i, b, *b as char),
             nexus_compress::lz77::Op::Match { dist, len } => println!("  [{}] Match dist={} len={}", i, dist, len),
+            nexus_compress::lz77::Op::DictRef { id, len } => println!("  [{}] DictRef id={} len={}", i, id, len),
         }
     }
 

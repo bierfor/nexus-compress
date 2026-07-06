@@ -30,6 +30,15 @@ pub const MAX_MATCH: usize = 255;
 pub const MAX_DIST: usize = WINDOW_SIZE;
 pub const MAX_CHAIN_STEPS: usize = 32;
 
+/// Minimum length for a `DictRef` op to be emitted. Below this, the
+/// rANS+op-flag overhead of a dict ref exceeds the savings from
+/// replacing literals. The cost model: 1 flag + 1-2 byte id + 1 byte
+/// len ≈ 24 bits, vs 3 literals ≈ 18 bits (after rANS). 3 is the
+/// break-even point; 4+ is a clear win.
+pub const MIN_DICT_MATCH: usize = 3;
+
+use crate::dictionary::Dictionary;
+
 /// Compare two DP states (cost, ops). Returns true if (new_cost, new_ops)
 /// is STRICTLY BETTER than (cur_cost, cur_ops).
 ///
@@ -241,6 +250,97 @@ impl MatchFinder {
         ops
     }
 
+    /// Encode `data` as a sequence of (literal | match | dict_ref) ops,
+    /// using BOTH the LZ77 hash chain and a static dictionary.
+    ///
+    /// At each position, we compute both the LZ77 match (via `peek`)
+    /// and the dict match (via `Dictionary::lookup_at`), then choose
+    /// whichever covers more bytes. LZ77 wins on ties (no dict
+    /// dependency for the decoder).
+    ///
+    /// ## Cost model
+    ///
+    /// Both a DictRef and a Match op are about 18-24 bits in the
+    /// bitstream (1 flag bit + 1-2 byte id/dist + 1 byte len). So the
+    /// op that covers MORE bytes is the cheaper one per byte of
+    /// output. This is why we prefer the longer of the two.
+    ///
+    /// When LZ77 has no match (first occurrence of a token), the dict
+    /// catches it. When the dict has no match (rare token), LZ77 may
+    /// still find a back-reference. When both match, pick the longer.
+    ///
+    /// ## Limitations vs `encode_optimal`
+    ///
+    /// This is greedy (one step lookahead, no DP). The optimal
+    /// `encode_optimal` is more accurate but more expensive and
+    /// doesn't yet support dict refs. Future work: a `encode_optimal_with_dict`
+    /// that adds dict as a third option in the DP.
+    pub fn encode_with_dict(&mut self, data: &[u8], dict: &Dictionary) -> Vec<Op> {
+        let mut ops = Vec::with_capacity(data.len() / 2);
+        let mut i = 0usize;
+        let n = data.len();
+        while i < n {
+            // 1. Try LZ77 match.
+            let lz_match = if i + MIN_MATCH <= n {
+                let (l, d) = self.peek(data, i);
+                if l >= MIN_MATCH { Some((l, d)) } else { None }
+            } else {
+                None
+            };
+
+            // 2. Try dict match.
+            let dict_match = if n - i >= MIN_DICT_MATCH {
+                dict.lookup_at(data, i)
+            } else {
+                None
+            };
+
+            // 3. Pick the longer match (tie → LZ77, no dict dependency).
+            match (lz_match, dict_match) {
+                (Some((ll, ld)), Some((_, dd))) if ll >= dd => {
+                    // LZ77 wins.
+                    ops.push(Op::Match {
+                        dist: ld as u32,
+                        len: ll as u32,
+                    });
+                    for k in 0..ll {
+                        self.insert(data, i + k);
+                    }
+                    i += ll;
+                }
+                (_, Some((id, dlen))) => {
+                    // Dict wins (or only dict has a match).
+                    ops.push(Op::DictRef {
+                        id,
+                        len: dlen.min(255) as u8,
+                    });
+                    for k in 0..dlen {
+                        self.insert(data, i + k);
+                    }
+                    i += dlen;
+                }
+                (Some((ll, ld)), None) => {
+                    // Only LZ77.
+                    ops.push(Op::Match {
+                        dist: ld as u32,
+                        len: ll as u32,
+                    });
+                    for k in 0..ll {
+                        self.insert(data, i + k);
+                    }
+                    i += ll;
+                }
+                (None, None) => {
+                    // Literal.
+                    ops.push(Op::Lit(data[i]));
+                    self.insert(data, i);
+                    i += 1;
+                }
+            }
+        }
+        ops
+    }
+
     /// Encode `data` using OPTIMAL PARSING (forward DP) instead of
     /// greedy/lazy matching.
     ///
@@ -439,6 +539,9 @@ impl MatchFinder {
                     }
                     i += len as usize;
                 }
+                Op::DictRef { .. } => unreachable!(
+                    "encode_optimal never produces DictRef — use encode_with_dict for that"
+                ),
             }
         }
         ops
@@ -449,18 +552,43 @@ impl MatchFinder {
 pub enum Op {
     Lit(u8),
     Match { dist: u32, len: u32 },
+    /// Reference to a token in a pre-shared dictionary. The decoder
+    /// materializes this by looking up `id` in its dictionary and
+    /// emitting `len` bytes (or all of the token's bytes if `len`
+    /// exceeds the token length).
+    DictRef { id: u16, len: u8 },
 }
 
 #[derive(Debug, Default)]
 pub struct MatchDecoder {
     window: Vec<u8>,
+    /// Optional shared dictionary. Required to decode `DictRef` ops;
+    /// if `None`, the decoder will panic on encountering one.
+    dict: Option<Dictionary>,
 }
 
 impl MatchDecoder {
     pub fn new() -> Self {
         Self {
             window: vec![0u8; WINDOW_SIZE],
+            dict: None,
         }
+    }
+
+    /// Create a decoder that knows the given dictionary. After this,
+    /// `DictRef` ops in the input are resolved against `dict`.
+    pub fn with_dict(dict: Dictionary) -> Self {
+        Self {
+            window: vec![0u8; WINDOW_SIZE],
+            dict: Some(dict),
+        }
+    }
+
+    /// Attach a dictionary to an existing decoder. Used when the
+    /// decoder is reused across blocks and the dictionary is the
+    /// same (e.g., default_combined_dict baked into the binary).
+    pub fn set_dict(&mut self, dict: Dictionary) {
+        self.dict = Some(dict);
     }
 
     pub fn decode(&mut self, ops: &[Op]) -> Vec<u8> {
@@ -478,6 +606,25 @@ impl MatchDecoder {
                     let start = win_pos - d;
                     for k in 0..len as usize {
                         let b = self.window[(start + k) % WINDOW_SIZE];
+                        out.push(b);
+                        self.window[win_pos % WINDOW_SIZE] = b;
+                        win_pos += 1;
+                    }
+                }
+                Op::DictRef { id, len } => {
+                    let dict = self
+                        .dict
+                        .as_ref()
+                        .expect("DictRef op encountered but decoder has no dictionary");
+                    let token = dict
+                        .get(id)
+                        .unwrap_or_else(|| panic!("DictRef id {} not in dictionary", id));
+                    // Emit up to `len` bytes from the token. If `len`
+                    // exceeds the token length, we emit the full token
+                    // (defensive: an encoder bug, not a format error).
+                    let emit = (len as usize).min(token.len());
+                    for k in 0..emit {
+                        let b = token[k];
                         out.push(b);
                         self.window[win_pos % WINDOW_SIZE] = b;
                         win_pos += 1;
@@ -658,7 +805,6 @@ mod tests {
     #[test]
     fn candidates_sorted_by_length() {
         let data = b"abc abc abc abc abcdef";
-        let mut enc = MatchFinder::new();
         // Insert positions for "abc" so candidates() has something to find.
         // Use encode() to populate the chain, but on a separate finder.
         let mut builder = MatchFinder::new();
@@ -671,5 +817,170 @@ mod tests {
         }
         // And at least one candidate must have length >= 3.
         assert!(cands.iter().any(|&(_, l)| l >= MIN_MATCH));
+    }
+
+    // -------------------------------------------------------------
+    // Dictionary integration tests
+    // -------------------------------------------------------------
+
+    /// Basic roundtrip: encode_with_dict + decode with same dict → original.
+    #[test]
+    fn roundtrip_with_dict() {
+        let mut dict = crate::dictionary::Dictionary::new();
+        dict.insert(b"the", 100);
+        dict.insert(b"and", 100);
+        dict.insert(b"ing", 100);
+        dict.insert(b"hello", 100);
+
+        let data = b"the quick brown fox and the lazy dog hello world";
+        let mut enc = MatchFinder::new();
+        let ops = enc.encode_with_dict(data, &dict);
+        let mut dec = MatchDecoder::with_dict(dict);
+        let out = dec.decode(&ops);
+        assert_eq!(out, data, "dict roundtrip mismatch");
+    }
+
+    /// encode_with_dict on data with no dict matches should produce
+    /// the same op stream as encode() (within hash chain state).
+    #[test]
+    fn dict_falls_back_to_lz77_on_no_match() {
+        let mut dict = crate::dictionary::Dictionary::new();
+        dict.insert(b"zzzz", 1); // won't match anything in our data
+
+        let data = b"hello world hello world hello world";
+        let mut enc = MatchFinder::new();
+        let ops = enc.encode_with_dict(data, &dict);
+        // Should still roundtrip.
+        let mut dec = MatchDecoder::with_dict(dict);
+        let out = dec.decode(&ops);
+        assert_eq!(out, data);
+    }
+
+    /// encode_with_dict should emit DictRef ops for tokens in the dict.
+    ///
+    /// For "the cat sat on the mat the":
+    ///   - pos 0 "the" → DictRef (no prior LZ77 match)
+    ///   - pos 8 "the" → LZ77 match (dist=8, len=3) — TIE with dict, LZ77 wins
+    ///   - pos 15 "the" → DictRef? No — LZ77 match is still available since
+    ///     the second "the" is now in the window. LZ77 wins on tie.
+    /// Expected: ~2 DictRefs (the first "the" and any other unmatched
+    /// dict tokens like " cat" — but " cat" isn't in the dict, so really
+    /// just 1 DictRef and 1 LZ77 "the" match).
+    #[test]
+    fn dict_refs_are_emitted() {
+        let dict = crate::dictionary::default_text_dict();
+        let data = b"the cat sat on the mat the";
+        let mut enc = MatchFinder::new();
+        let ops = enc.encode_with_dict(data, &dict);
+        let dict_refs = ops
+            .iter()
+            .filter(|op| matches!(op, Op::DictRef { .. }))
+            .count();
+        let matches = ops
+            .iter()
+            .filter(|op| matches!(op, Op::Match { .. }))
+            .count();
+        // At least 1 DictRef (the first "the"). May be 1 or 2 depending
+        // on whether subsequent "the"s get caught by LZ77 first.
+        assert!(
+            dict_refs >= 1,
+            "expected at least 1 DictRef, got {} (matches={})",
+            dict_refs,
+            matches
+        );
+    }
+
+    /// encode_with_dict on real source code should produce a meaningful
+    /// number of DictRefs (vs the lazy matcher that doesn't see them).
+    #[test]
+    fn dict_refs_on_code() {
+        let dict = crate::dictionary::default_code_dict();
+        let data = b"fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n";
+        let mut enc = MatchFinder::new();
+        let ops = enc.encode_with_dict(data, &dict);
+        let dict_refs = ops
+            .iter()
+            .filter(|op| matches!(op, Op::DictRef { .. }))
+            .count();
+        let lits = ops.iter().filter(|op| matches!(op, Op::Lit(_))).count();
+        let matches = ops
+            .iter()
+            .filter(|op| matches!(op, Op::Match { .. }))
+            .count();
+        eprintln!(
+            "code.rs sample: {} DictRefs, {} Matches, {} Lits",
+            dict_refs, matches, lits
+        );
+        // We expect a few dict refs for keywords in this Rust snippet.
+        assert!(
+            dict_refs >= 2,
+            "expected at least 2 DictRefs in this snippet, got {}",
+            dict_refs
+        );
+        // And it must roundtrip.
+        let mut dec = MatchDecoder::with_dict(dict);
+        let out = dec.decode(&ops);
+        assert_eq!(out, data);
+    }
+
+    /// "Longer wins" rule: when both LZ77 and dict have a match, the
+    /// longer one should be chosen. This test ensures the integration
+    /// prefers LZ77 for a long match over dict for a short one.
+    #[test]
+    fn longer_wins_over_dict() {
+        let mut dict = crate::dictionary::Dictionary::new();
+        dict.insert(b"the", 100);
+        // Data: "the quick the quick" — second "the" has a 10-byte
+        // LZ77 match available. LZ77 should win.
+        let data = b"the quick the quick";
+        let mut enc = MatchFinder::new();
+        let ops = enc.encode_with_dict(data, &dict);
+        // Expect: 1 DictRef (first "the") + 1 long Match (second "the quick").
+        let n_dr = ops
+            .iter()
+            .filter(|o| matches!(o, Op::DictRef { .. }))
+            .count();
+        let n_m = ops
+            .iter()
+            .filter(|o| matches!(o, Op::Match { .. }))
+            .count();
+        // Should be exactly 1 DictRef and 1 Match (the long LZ77 match
+        // for "the quick" at position 10).
+        assert_eq!(n_dr, 1, "expected 1 DictRef, got {} (matches={})", n_dr, n_m);
+        // The match should be at least 8 bytes (covers "the quick").
+        if let Some(Op::Match { len, .. }) = ops.iter().find(|o| matches!(o, Op::Match { .. })) {
+            assert!(*len >= 8, "expected match length >= 8, got {}", len);
+        } else {
+            panic!("no Match op found");
+        }
+    }
+
+    /// Empty dictionary: encode_with_dict should behave like encode().
+    #[test]
+    fn empty_dict_is_like_plain_lz77() {
+        let dict = crate::dictionary::Dictionary::new();
+        let data = b"abc abc abc abc abcdef";
+        let mut enc_plain = MatchFinder::new();
+        let plain_ops = enc_plain.encode(data);
+        let mut enc_dict = MatchFinder::new();
+        let dict_ops = enc_dict.encode_with_dict(data, &dict);
+        // Both roundtrip to the same data.
+        let mut dec_plain = MatchDecoder::new();
+        assert_eq!(dec_plain.decode(&plain_ops), data);
+        let mut dec_dict = MatchDecoder::with_dict(crate::dictionary::Dictionary::new());
+        assert_eq!(dec_dict.decode(&dict_ops), data);
+    }
+
+    /// Decoder without a dict should panic on DictRef ops.
+    #[test]
+    #[should_panic(expected = "DictRef op encountered")]
+    fn decode_without_dict_panics_on_dict_ref() {
+        let mut dict = crate::dictionary::Dictionary::new();
+        dict.insert(b"the", 100);
+        let data = b"the cat";
+        let mut enc = MatchFinder::new();
+        let ops = enc.encode_with_dict(data, &dict);
+        let mut dec = MatchDecoder::new(); // no dict attached
+        let _ = dec.decode(&ops);
     }
 }

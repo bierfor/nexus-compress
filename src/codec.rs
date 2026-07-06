@@ -250,6 +250,10 @@ fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
                 dist_lows.push((*dist & 0xFF) as u8);
                 dist_highs.push(((*dist >> 8) & 0xFF) as u8);
             }
+            Op::DictRef { .. } => unreachable!(
+                "DictRef ops are only produced by encode_with_dict, which the codec \
+                 does not call yet. This is a bug."
+            ),
         }
     }
 
@@ -289,6 +293,9 @@ fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
         match op {
             Op::Lit(_) => ops_bytes.push(0),
             Op::Match { .. } => ops_bytes.push(1),
+            Op::DictRef { .. } => unreachable!(
+                "DictRef ops not handled by codec yet (see lz77.rs::encode_with_dict)"
+            ),
         }
     }
 
