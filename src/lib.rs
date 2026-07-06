@@ -20,6 +20,7 @@ pub mod format;
 pub mod lz77;
 pub mod range2;
 pub mod rans;
+pub mod subbotin;
 
 pub use codec::{compress, decompress};
 pub use format::{BlockType, NexusHeader};
