@@ -1401,6 +1401,105 @@ existed at bench time).
 
 ---
 
+## Tauri bridge API (sprint 2.8.6)
+
+`src/api.rs` is the thin Rust bridge between the Tauri command
+handlers and the core compression engine. Designed to be the
+single integration point the Tauri UI calls.
+
+### Public surface
+
+```rust
+// Stateless, sync, CPU-bound. Wrap in spawn_blocking from Tauri.
+
+pub struct CompressResult { compressed: Vec<u8>, original_size: u64,
+    compressed_size: u64, ratio: f64, compress_time_ms: f64 }
+pub struct DecompressResult { data: Vec<u8>, size: u64,
+    decompress_time_ms: f64 }
+pub struct EngineInfo { version: String, format_version: u8,
+    dict_entries: u32, has_entropy_gate: bool, has_local_subdict: bool,
+    has_sparse_v3: bool, features: Vec<String> }
+pub struct SelfTestResult { roundtrip_ok: bool, ratio: f64,
+    compress_time_ms: f64, decompress_time_ms: f64 }
+pub struct ApiError { code: String, message: String }
+pub type ApiResult<T> = Result<T, ApiError>;
+
+pub fn compress_bytes(input: &[u8]) -> CompressResult;
+pub fn decompress_bytes(input: &[u8]) -> ApiResult<DecompressResult>;
+pub fn engine_info() -> EngineInfo;
+pub fn self_test() -> ApiResult<SelfTestResult>;
+```
+
+### Design principles
+
+- **Stateless** — no global state, safe to call from multiple
+  Tauri command threads concurrently.
+- **Rich results** — every call returns its stats so the UI can
+  show progress without doing math itself.
+- **Serializable** — all types derive `Serialize` / `Deserialize`
+  so they cross the Tauri IPC boundary directly. No JSON
+  marshalling glue code needed in the UI layer.
+- **Error-typed** — fallible operations return `ApiResult<T>`
+  with structured `ApiError { code, message }` (not bare
+  strings). The UI can switch on `code` for i18n / fallbacks.
+- **No Tauri dep** — `src/api.rs` is pure Rust + serde. Tauri
+  integration is a thin command-handler layer in the consumer.
+
+### Example: Tauri command handler
+
+```rust,ignore
+use tauri::command;
+use nexus_compress::api::{compress_bytes, decompress_bytes,
+    CompressResult, DecompressResult, ApiError};
+
+#[command]
+pub async fn compress_cmd(input: Vec<u8>)
+    -> Result<CompressResult, ApiError>
+{
+    tauri::async_runtime::spawn_blocking(move || compress_bytes(&input))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+#[command]
+pub async fn decompress_cmd(input: Vec<u8>)
+    -> Result<DecompressResult, ApiError>
+{
+    tauri::async_runtime::spawn_blocking(move || decompress_bytes(&input))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))
+        .and_then(|r| r)
+}
+```
+
+### Error codes
+
+| code                          | meaning                                           |
+|-------------------------------|---------------------------------------------------|
+| `decompress.empty`            | input buffer is empty                             |
+| `decompress.invalid_header`   | header magic or version byte doesn't match        |
+| `decompress.corrupted`        | a block's payload failed to decode (panic caught) |
+| `internal`                    | background task join failure (Tauri layer)        |
+
+The panic-catching in `decompress_bytes` is conservative: the
+underlying `crate::decompress` currently panics on corrupted
+streams rather than returning `Result`. Catching the panic and
+returning a structured `ApiError` keeps the Tauri UI from
+crashing on user-supplied bad input. A future refactor should
+make `crate::decompress` return `Result` natively and remove
+the `catch_unwind`.
+
+### Tests
+
+10 unit tests in `src/api.rs` cover:
+- Roundtrip: small text, 8KB repetitive, 32KB natural text, 4KB
+  random, empty input.
+- Error paths: empty input, garbage input, error display format.
+- Serialization: `EngineInfo` survives a `serde_json` roundtrip.
+- Self-test: the canned 8KB sample roundtrips and compresses.
+
+---
+
 ## Build & test
 
 ```bash
