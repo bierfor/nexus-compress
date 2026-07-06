@@ -97,3 +97,65 @@ pub async fn self_test_cmd() -> Result<SelfTestResult, String> {
     // Also cheap (8KB), no need to spawn_blocking.
     to_ipc(api::self_test())
 }
+
+// -----------------------------------------------------------------------
+// Directory commands (NXAR archive)
+// -----------------------------------------------------------------------
+
+/// Open the OS folder picker. Returns the absolute path the user
+/// chose, or `None` if they cancelled.
+///
+/// The dialog is opened synchronously on the main thread — Tauri
+/// 2.x dialog plugin blocks the main thread for the native
+/// picker but releases immediately when the user picks or
+/// cancels.
+#[tauri::command]
+pub async fn pick_directory_cmd(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+    let (tx, rx) = std::sync::mpsc::channel::<Option<FilePath>>();
+    app.dialog()
+        .file()
+        .pick_folder(move |path: Option<FilePath>| {
+            let _ = tx.send(path);
+        });
+    let result = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
+        .await
+        .map_err(|e| format!("dialog join failed: {}", e))?;
+    // Convert FilePath -> String. On desktop FilePath is a
+    // PathBuf; on mobile it carries a URI. We only target desktop
+    // so .into_path() is fine.
+    Ok(result.and_then(|fp| fp.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// Compress a directory into an NXAR archive. The Rust side walks
+/// the directory recursively, compresses each file with the v4
+/// engine, and returns aggregate stats + the archive bytes (as a
+/// `Vec<u8>` — Tauri serializes this as a plain JS array).
+#[tauri::command]
+pub async fn compress_directory_cmd(
+    input_dir: String,
+    level: String,
+) -> Result<(api::DirectoryResult, Vec<u8>), String> {
+    let level = CompressionLevel::from_str(&level)
+        .map_err(|e| format!("invalid_level: {}", e))?;
+    let path = std::path::PathBuf::from(input_dir);
+    tauri::async_runtime::spawn_blocking(move || {
+        to_ipc(api::compress_directory(&path, level).map(|(r, a)| (r, a.to_vec())))
+    })
+    .await
+    .map_err(|e| format!("internal: spawn_blocking join failed: {}", e))?
+}
+
+/// Decompress an NXAR archive into `output_dir`.
+#[tauri::command]
+pub async fn decompress_directory_cmd(
+    archive: Vec<u8>,
+    output_dir: String,
+) -> Result<api::DirectoryResult, String> {
+    let path = std::path::PathBuf::from(output_dir);
+    tauri::async_runtime::spawn_blocking(move || {
+        to_ipc(api::decompress_directory(&archive, &path))
+    })
+    .await
+    .map_err(|e| format!("internal: spawn_blocking join failed: {}", e))?
+}

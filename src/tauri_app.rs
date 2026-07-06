@@ -35,12 +35,16 @@ mod tauri_commands;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             tauri_commands::compress_bytes_cmd,
             tauri_commands::decompress_bytes_cmd,
             tauri_commands::compress_bytes_with_level_cmd,
             tauri_commands::engine_info_cmd,
             tauri_commands::self_test_cmd,
+            tauri_commands::pick_directory_cmd,
+            tauri_commands::compress_directory_cmd,
+            tauri_commands::decompress_directory_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusRAR Tauri app");

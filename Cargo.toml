@@ -15,9 +15,12 @@ serde = { version = "1", features = ["derive"] }
 # Tauri 2.x — only required for the `nexus-rar` binary. The lib
 # doesn't depend on Tauri (see [features] below).
 tauri = { version = "2", optional = true }
+# Tauri plugins — only used by the `nexus-rar` binary.
+tauri-plugin-dialog = { version = "2", optional = true }
 
 [dev-dependencies]
 serde_json = "1"
+tempfile = "3"
 
 [[bin]]
 name = "nexus"
@@ -36,7 +39,7 @@ required-features = ["tauri-app"]
 # Enables the Tauri-based GUI (`nexus-rar` binary). Off by default so
 # the lib + CLI binaries don't pull in webview/webview2/wkwebview deps.
 default = []
-tauri-app = ["dep:tauri"]
+tauri-app = ["dep:tauri", "dep:tauri-plugin-dialog"]
 
 [build-dependencies]
 # Required for the `nexus-rar` binary. Always-on (not feature-gated)

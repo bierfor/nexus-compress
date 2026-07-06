@@ -38,7 +38,12 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::Instant;
+
+// Re-export so the Tauri commands and the UI both see the same
+// `DirectoryResult` shape (defined in `src/nxar.rs`).
+pub use crate::nxar::{ArchiveEntry, DirectoryResult};
 
 /// Compression level — controls the LZ77 strategy and which codec
 /// paths the encoder tries.
@@ -345,6 +350,81 @@ pub struct SelfTestResult {
     pub ratio: f64,
     pub compress_time_ms: f64,
     pub decompress_time_ms: f64,
+}
+
+// -----------------------------------------------------------------------
+// Directory compression (NXAR archive)
+// -----------------------------------------------------------------------
+
+/// Compress a directory into an NXAR archive.
+///
+/// `input_dir` is walked recursively (symlinks skipped). Each
+/// regular file is compressed independently with the v4 engine
+/// and concatenated under the NXAR header. Returns aggregate
+/// stats and the archive bytes.
+///
+/// # Errors
+///
+/// - `code: "directory.not_found"` if the path doesn't exist or
+///   isn't a directory.
+/// - `code: "directory.empty"` if no regular files are found.
+/// - `code: "directory.io"` for filesystem errors during walk.
+pub fn compress_directory(
+    input_dir: &Path,
+    level: CompressionLevel,
+) -> ApiResult<(DirectoryResult, Vec<u8>)> {
+    if !input_dir.is_dir() {
+        return Err(ApiError::new(
+            "directory.not_found",
+            format!(
+                "path is not a directory: {}",
+                input_dir.display()
+            ),
+        ));
+    }
+    crate::nxar::compress_directory(input_dir)
+        .map(|(mut result, archive)| {
+            // The `level` parameter is currently a no-op for
+            // directory compression: each file uses the default
+            // `crate::compress` (Fast). A future v2 could pipe
+            // the level into the per-file compression call.
+            let _ = level;
+            // Add an entry-size histogram to the result so the UI
+            // can show per-file ratios in the file list.
+            result.total_compressed_size = result.entries.iter().map(|e| e.compressed_size).sum();
+            result.aggregate_ratio = if result.total_compressed_size == 0 {
+                0.0
+            } else {
+                result.total_original_size as f64 / result.total_compressed_size as f64
+            };
+            (result, archive)
+        })
+        .map_err(|e| ApiError::new("directory.io", e))
+}
+
+/// Decompress an NXAR archive into `output_dir`.
+///
+/// Each entry's relative path is created under `output_dir` with
+/// the same directory structure. Existing files are overwritten.
+///
+/// # Errors
+///
+/// - `code: "directory.io"` for filesystem errors (mkdir, write).
+/// - `code: "archive.malformed"` if the archive header is
+///   invalid or the magic doesn't match.
+/// - `code: "archive.size_mismatch"` if a recovered file's size
+///   doesn't match the recorded size (signals corruption).
+pub fn decompress_directory(archive: &[u8], output_dir: &Path) -> ApiResult<DirectoryResult> {
+    crate::nxar::decompress_directory(archive, output_dir).map_err(|e| {
+        // Try to categorize the error for the UI.
+        if e.contains("magic") {
+            ApiError::new("archive.malformed", e)
+        } else if e.contains("size mismatch") {
+            ApiError::new("archive.size_mismatch", e)
+        } else {
+            ApiError::new("directory.io", e)
+        }
+    })
 }
 
 // -----------------------------------------------------------------------

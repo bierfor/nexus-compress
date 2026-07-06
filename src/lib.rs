@@ -22,6 +22,7 @@ pub mod dict_codec;
 pub mod dictionary;
 pub mod format;
 pub mod lz77;
+pub mod nxar;
 pub mod rans_v4;
 pub mod rle;
 

@@ -269,7 +269,18 @@ select {
 }
 
 .file-input {
-  display: none;
+  /* Off-screen but still clickable. `display: none` blocks the
+   * programmatic `.click()` call on some WebKit versions; making
+   * it visually hidden with `opacity: 0` + `pointer-events: none`
+   * keeps the OS file picker functional while keeping the
+   * dropzone's visual chrome clean. */
+  position: absolute;
+  left: -9999px;
+  top: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* -------- Controls -------- */
@@ -487,6 +498,79 @@ select {
 .console-msg strong {
   color: var(--text);
   font-weight: 600;
+}
+
+/* -------- File list (folder mode) -------- */
+.file-list {
+  margin: 0 14px 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-0);
+  display: flex;
+  flex-direction: column;
+  max-height: 30vh;
+  overflow: hidden;
+}
+
+.file-list-header {
+  display: grid;
+  grid-template-columns: 1fr 90px 90px 70px;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-mute);
+}
+
+.file-list-body {
+  flex: 1;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.file-list-row {
+  display: grid;
+  grid-template-columns: 1fr 90px 90px 70px;
+  gap: 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.file-list-row:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.file-list-row .file-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-list-size,
+.file-list-ratio {
+  text-align: right;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.file-list-ratio {
+  color: var(--accent);
+}
+
+.action-row-save {
+  margin: 0 14px 14px;
+}
+
+.action-row-save .btn {
+  flex: 1;
+  padding: 10px 14px;
 }
 
 /* -------- Footer features -------- */

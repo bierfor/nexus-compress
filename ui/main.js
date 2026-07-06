@@ -31,12 +31,19 @@ const els = {
   btnCompress: $("btn-compress"),
   btnDecompress: $("btn-decompress"),
   btnSelfTest: $("btn-self-test"),
+  btnPickFolder: $("btn-pick-folder"),
+  btnSaveArchive: $("btn-save-archive"),
+  btnExtractArchive: $("btn-extract-archive"),
 
   resultStrip: $("result-strip"),
   resultOrig: $("result-orig"),
   resultComp: $("result-comp"),
   resultRatio: $("result-ratio"),
   resultTime: $("result-time"),
+
+  fileList: $("file-list"),
+  fileListBody: $("file-list-body"),
+  saveRow: $("save-row"),
 
   console: $("console"),
   telemetryMeta: $("telemetry-meta"),
@@ -48,6 +55,9 @@ const els = {
 // -----------------------------------------------------------------------
 let lastFile = null; // { name, bytes: Uint8Array }
 let lastOutput = null; // { name, bytes: Uint8Array, isCompressed: bool }
+let lastDirResult = null; // DirectoryResult from a compress_directory call
+let lastArchive = null; // NXAR archive bytes from compress_directory
+let lastDirPath = null; // { name, path } — source folder for lastDirResult
 
 // -----------------------------------------------------------------------
 // Status pill
@@ -453,6 +463,172 @@ async function loadEngineInfo() {
     setStatus("err", "engine offline");
   }
 }
+
+// -----------------------------------------------------------------------
+// Folder mode (NXAR archive)
+// -----------------------------------------------------------------------
+
+/// Show the file list for a directory compression result.
+function renderFileList(result) {
+  if (!result || !result.entries || result.entries.length === 0) {
+    els.fileList.hidden = true;
+    return;
+  }
+  els.fileList.hidden = false;
+  // Sort: largest files first so the user sees the biggest wins.
+  const entries = [...result.entries].sort(
+    (a, b) => b.original_size - a.original_size,
+  );
+  els.fileListBody.innerHTML = "";
+  for (const e of entries) {
+    const row = document.createElement("div");
+    row.className = "file-list-row";
+    const ratio =
+      e.compressed_size > 0 ? e.original_size / e.compressed_size : 0;
+    const name = document.createElement("span");
+    name.className = "file-name";
+    name.textContent = e.path;
+    name.title = e.path;
+    const orig = document.createElement("span");
+    orig.className = "file-list-size";
+    orig.textContent = fmtBytes(e.original_size);
+    const comp = document.createElement("span");
+    comp.className = "file-list-size";
+    comp.textContent = fmtBytes(e.compressed_size);
+    const rat = document.createElement("span");
+    rat.className = "file-list-ratio";
+    rat.textContent = fmtRatio(ratio);
+    row.append(name, orig, comp, rat);
+    els.fileListBody.appendChild(row);
+  }
+}
+
+/// Compress a folder picked via the OS dialog.
+els.btnPickFolder.addEventListener("click", async () => {
+  log("tx", "open folder picker…");
+  setStatus("working", "picking folder…");
+  let picked;
+  try {
+    picked = await invoke("pick_directory_cmd");
+  } catch (e) {
+    log("err", `folder picker failed: ${e}`);
+    setStatus("err", "picker failed");
+    return;
+  }
+  if (!picked) {
+    log("info", "folder picker cancelled");
+    setStatus("ok", "ready");
+    return;
+  }
+  log("rx", `picked: ${picked}`);
+
+  // Compress the folder.
+  setStatus("working", "compressing folder…");
+  els.dropzone.classList.add("processing");
+  hideResult();
+  els.fileList.hidden = true;
+  els.saveRow.hidden = true;
+
+  const level = Number(els.levelSlider.value) === 0 ? "fast" : "premium";
+  const t0 = performance.now();
+  try {
+    const [result, archive] = await invoke("compress_directory_cmd", {
+      inputDir: picked,
+      level,
+    });
+    const wall = performance.now() - t0;
+    showResult(
+      result.total_original_size,
+      result.total_compressed_size,
+      result.aggregate_ratio,
+      result.total_time_ms,
+    );
+    log(
+      "ok",
+      `compressed <strong>${result.n_files}</strong> files in <strong>${fmtMs(result.total_time_ms)}</strong> ` +
+        `· ratio <strong>${fmtRatio(result.aggregate_ratio)}</strong> ` +
+        `· <strong>${fmtBytes(result.total_original_size)}</strong> → <strong>${fmtBytes(result.total_compressed_size)}</strong>`,
+      true,
+    );
+    log(
+      "info",
+      `wall ${fmtMs(wall)} · engine ${fmtMs(result.total_time_ms)} · ` +
+        `IPC overhead ${fmtMs(Math.max(0, wall - result.total_time_ms))}`,
+    );
+    lastDirResult = result;
+    lastArchive = new Uint8Array(archive);
+    lastDirPath = picked;
+    els.dropSecondary.textContent = `${picked.split("/").pop()} · ${result.n_files} files`;
+    els.sourceMeta.textContent = `${result.n_files} files`;
+    renderFileList(result);
+    els.saveRow.hidden = false;
+    els.telemetryMeta.textContent = "ok · " + fmtRatio(result.aggregate_ratio);
+    setStatus("ok", "folder compressed");
+  } catch (e) {
+    log("err", `folder compress failed: ${e}`);
+    setStatus("err", "folder failed");
+  } finally {
+    els.dropzone.classList.remove("processing");
+  }
+});
+
+/// Save the last compressed archive to disk via the OS save dialog.
+els.btnSaveArchive.addEventListener("click", async () => {
+  if (!lastArchive || !lastDirPath) {
+    log("warn", "no archive to save — compress a folder first");
+    return;
+  }
+  // We can't call the dialog plugin from JS without going through
+  // a Tauri command. For v1, use the simpler approach: download
+  // the archive via a synthetic <a download> link. This works in
+  // Tauri's webview and saves to the user's Downloads folder.
+  const baseName =
+    (lastDirPath.split("/").pop() || "folder") + ".nxar";
+  const blob = new Blob([lastArchive], { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = baseName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  log("ok", `saved <strong>${baseName}</strong> · <strong>${fmtBytes(lastArchive.length)}</strong>`, true);
+  log("info", "saved to your browser's Downloads folder");
+  setStatus("ok", "archive saved");
+});
+
+/// Extract an archive: open the .nxr via the file picker, then
+/// ask for an output directory, then call decompress_directory.
+els.btnExtractArchive.addEventListener("click", async () => {
+  if (!lastFile) {
+    log("warn", "load an .nxr archive first (use the dropzone)");
+    return;
+  }
+  // For v1: extract into a sibling folder named
+  // `<archive>.extracted/` next to the original. A full output
+  // directory picker is a follow-up (needs the dialog plugin's
+  // pick_folder, which is already wired in Rust).
+  const outDir = lastFile.name.replace(/\.nxr$/i, "") + ".extracted";
+  log("tx", `extract archive → ${outDir}`);
+  setStatus("working", "extracting…");
+  try {
+    const input = Array.from(lastFile.bytes);
+    const result = await invoke("decompress_directory_cmd", {
+      archive: input,
+      outputDir: outDir,
+    });
+    log(
+      "ok",
+      `extracted <strong>${result.n_files}</strong> files to <strong>${outDir}</strong> in <strong>${fmtMs(result.total_time_ms)}</strong>`,
+      true,
+    );
+    setStatus("ok", "extracted");
+  } catch (e) {
+    log("err", `extract failed: ${e}`);
+    setStatus("err", "extract failed");
+  }
+});
 
 window.addEventListener("DOMContentLoaded", () => {
   log("info", "NexusRAR booting…");
