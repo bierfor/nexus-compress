@@ -5,6 +5,9 @@ edition = "2021"
 description = "NexusCompress - hybrid compressor (LZ77 + CM + rANS)"
 license = "MIT"
 
+[dependencies]
+rans = "0.4"
+
 [[bin]]
 name = "nexus"
 path = "src/main.rs"
