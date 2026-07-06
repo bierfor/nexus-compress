@@ -90,13 +90,6 @@ pub const VERSION_V2: u8 = 2;
 /// keep the 256-symbol alphabet while gaining per-byte entropy benefit.
 pub const VERSION_V3: u8 = 3;
 
-/// Format v3.5 — v3 with **streaming rANS (chunked)**. Each rANS stream
-/// (literals, lengths, dist_lo, dist_hi) is split into chunks of
-/// ≤RANS_CHUNK_SIZE=450 symbols, encoded with a fresh state per chunk.
-/// This fixes the fundamental u32-state overflow bug in single-stream
-/// rANS that broke roundtrip for any block > ~500 bytes.
-pub const VERSION_V3_5: u8 = 4;
-
 #[derive(Debug, Clone)]
 pub struct NexusHeader {
     pub version: u8,

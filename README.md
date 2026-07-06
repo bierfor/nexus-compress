@@ -6,10 +6,18 @@
 > over competitive compression ratio.
 
 **Status:** v3 — Multi-stream rANS (independent lit/len/dist streams).
-44 tests passing. Most files gain +5-20% over v2; the multi-stream
-table overhead costs code.rs a bit (28x vs v2's 30.30x).
-Honest benchmark numbers documented. See [Benchmark Results (v1.4)](#benchmark-results-v14)
-for the gap analysis vs `zstd -19`.
+Branch session exploring v3.5 (chunking) and v4 (sparse rANS) was
+attempted but failed: the byte-aligned rANS state overflows for
+non-uniform frequency tables on any block > ~500 bytes. Multiple
+fallbacks (arithmetic coding, Huffman) hit implementation bugs in
+the time budget. Reverted to v3 because at least v3 is internally
+consistent (and honest about its limits).
+
+**Do not use this for anything that needs 100% roundtrip on arbitrary
+input.** Use `gzip` or `zstd` for real work. This project is an
+experiment, not a production compressor.
+
+See [Known Limitations](#known-limitations) for the honest bug list.
 
 This is not a `zstd` clone. It is an experiment to validate the design
 hypotheses that the original proposal made (AI-driven routing, neural

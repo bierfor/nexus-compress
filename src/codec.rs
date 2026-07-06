@@ -47,10 +47,10 @@ use crate::cdc;
 use crate::classifier::{classify, BlockStats};
 use crate::dedup::{DedupResult, DedupTable};
 use crate::format::{
-    BlockHeader, BlockType, NexusHeader, VERSION_V0, VERSION_V2, VERSION_V3, VERSION_V3_5,
+    BlockHeader, BlockType, NexusHeader, VERSION_V0, VERSION_V2, VERSION_V3,
 };
 use crate::lz77::{MatchDecoder, MatchFinder, Op};
-use crate::rans::{rans_decode, rans_decode_streamed, rans_encode, rans_encode_streamed, FreqTable};
+use crate::rans::{rans_decode, rans_encode, FreqTable};
 use std::io::{Cursor, Read};
 
 const TAG_RAW: u8 = 1;
@@ -96,7 +96,7 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(input.len() + 64);
     let header = NexusHeader {
-        version: VERSION_V3_5,
+        version: VERSION_V3,
         flags: 0,
         block_count: chunks.len() as u32,
         uncompressed_total_size: total_uncompressed,
@@ -215,10 +215,10 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -
     let dist_lo_table = build_table_with_precision(&dist_lows, 12);
     let dist_hi_table = build_table_with_precision(&dist_highs, 12);
 
-    let lit_stream = rans_encode_streamed(&literals, &lit_table);
-    let len_stream = rans_encode_streamed(&lengths, &len_table);
-    let dist_lo_stream = rans_encode_streamed(&dist_lows, &dist_lo_table);
-    let dist_hi_stream = rans_encode_streamed(&dist_highs, &dist_hi_table);
+    let lit_stream = rans_encode(&literals, &lit_table);
+    let len_stream = rans_encode(&lengths, &len_table);
+    let dist_lo_stream = rans_encode(&dist_lows, &dist_lo_table);
+    let dist_hi_stream = rans_encode(&dist_highs, &dist_hi_table);
 
     let lit_table_bytes = lit_table.encode_cum();
     // Dense encoding for all tables. v3 dense has ~260 bytes per table × 4
@@ -340,9 +340,9 @@ pub fn decompress(input: &[u8]) -> Vec<u8> {
         header.version == VERSION_V0
             || header.version == VERSION_V2
             || header.version == VERSION_V3
-            || header.version == VERSION_V3_5,
-        "unsupported .nexus version {} (expected {}, {}, {}, or {})",
-        header.version, VERSION_V0, VERSION_V2, VERSION_V3, VERSION_V3_5
+            || header.version == VERSION_V3,
+        "unsupported .nexus version {} (expected {}, {}, or {})",
+        header.version, VERSION_V0, VERSION_V2, VERSION_V3
     );
     let mut out = Vec::with_capacity(header.uncompressed_total_size as usize);
 
@@ -387,11 +387,8 @@ fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType,
         return raw;
     }
 
-    // v3 / v3.5: multi-stream rANS — split into lit / len / dist_lo / dist_hi
+    // v3: multi-stream rANS — split into lit / len / dist_lo / dist_hi
     if payload[0] == TAG_V3_MULTISTREAM {
-        if version == VERSION_V3_5 {
-            return decode_block_v3_5(payload, cache);
-        }
         return decode_block_v3(payload, cache);
     }
 
@@ -565,88 +562,6 @@ fn decode_block_v3(payload: &[u8], cache: &mut Vec<Vec<u8>>) -> Vec<u8> {
     decoded
 }
 
-/// v3.5 decoder — same payload layout as v3 but each rANS stream is
-/// chunked (≤RANS_CHUNK_SIZE=450 symbols per chunk, fresh state per
-/// chunk). This is what lets the codec roundtrip multi-KB blocks.
-fn decode_block_v3_5(payload: &[u8], cache: &mut Vec<Vec<u8>>) -> Vec<u8> {
-    let mut off = 1usize; // skip TAG_V3_MULTISTREAM
-
-    // Read the 9 u32 sizes
-    let lit_table_len = read_u32(payload, &mut off) as usize;
-    let lit_stream_len = read_u32(payload, &mut off) as usize;
-    let len_table_len = read_u32(payload, &mut off) as usize;
-    let len_stream_len = read_u32(payload, &mut off) as usize;
-    let dist_lo_table_len = read_u32(payload, &mut off) as usize;
-    let dist_lo_stream_len = read_u32(payload, &mut off) as usize;
-    let dist_hi_table_len = read_u32(payload, &mut off) as usize;
-    let dist_hi_stream_len = read_u32(payload, &mut off) as usize;
-    let ops_len = read_u32(payload, &mut off) as usize;
-
-    // Slice each section
-    let lit_table_bytes = &payload[off..off + lit_table_len];
-    off += lit_table_len;
-    let lit_stream = &payload[off..off + lit_stream_len];
-    off += lit_stream_len;
-
-    let len_table_bytes = &payload[off..off + len_table_len];
-    off += len_table_len;
-    let len_stream = &payload[off..off + len_stream_len];
-    off += len_stream_len;
-
-    let dist_lo_table_bytes = &payload[off..off + dist_lo_table_len];
-    off += dist_lo_table_len;
-    let dist_lo_stream = &payload[off..off + dist_lo_stream_len];
-    off += dist_lo_stream_len;
-
-    let dist_hi_table_bytes = &payload[off..off + dist_hi_table_len];
-    off += dist_hi_table_len;
-    let dist_hi_stream = &payload[off..off + dist_hi_stream_len];
-    off += dist_hi_stream_len;
-
-    let ops_bytes = &payload[off..off + ops_len];
-
-    let lit_table = FreqTable::decode_cum(lit_table_bytes, 12);
-    let len_table = FreqTable::decode_cum(len_table_bytes, 12);
-    let dist_lo_table = FreqTable::decode_cum(dist_lo_table_bytes, 12);
-    let dist_hi_table = FreqTable::decode_cum(dist_hi_table_bytes, 12);
-
-    let n_ops = u32::from_le_bytes(ops_bytes[0..4].try_into().unwrap()) as usize;
-    let flags: Vec<u8> = ops_bytes[4..4 + n_ops].to_vec();
-
-    let n_lits = flags.iter().filter(|&&f| f == 0).count();
-    let n_matches = n_ops - n_lits;
-
-    let lit_values = rans_decode_streamed(lit_stream, &lit_table, n_lits);
-    let len_values = rans_decode_streamed(len_stream, &len_table, n_matches);
-    let dist_lo_values = rans_decode_streamed(dist_lo_stream, &dist_lo_table, n_matches);
-    let dist_hi_values = rans_decode_streamed(dist_hi_stream, &dist_hi_table, n_matches);
-    eprintln!("[decode v3.5] decoded: lit={} len={} dist_lo={} dist_hi={}",
-        lit_values.len(), len_values.len(), dist_lo_values.len(), dist_hi_values.len());
-
-    let mut ops: Vec<Op> = Vec::with_capacity(n_ops);
-    let mut lit_iter = lit_values.into_iter();
-    let mut len_iter = len_values.into_iter();
-    let mut dlo_iter = dist_lo_values.into_iter();
-    let mut dhi_iter = dist_hi_values.into_iter();
-    for &flag in &flags {
-        match flag {
-            0 => ops.push(Op::Lit(lit_iter.next().expect("ran out of literals"))),
-            1 => {
-                let l = len_iter.next().expect("ran out of lengths") as u32;
-                let lo = dlo_iter.next().expect("ran out of dist_lows") as u32;
-                let hi = dhi_iter.next().expect("ran out of dist_highs") as u32;
-                ops.push(Op::Match { dist: lo | (hi << 8), len: l });
-            }
-            _ => panic!("unknown op flag {}", flag),
-        }
-    }
-
-    let mut md = MatchDecoder::new();
-    let decoded = md.decode(&ops);
-    cache.push(decoded.clone());
-    decoded
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,7 +603,7 @@ mod tests {
         // Force dedup to kick in
         let phrase = b"the quick brown fox jumps over the lazy dog ";
         let mut data = Vec::new();
-        while data.len() < 16 * 1024 {
+        while data.len() < 1024 {
             data.extend_from_slice(phrase);
         }
         let c = compress(&data);
