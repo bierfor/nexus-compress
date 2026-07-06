@@ -53,14 +53,6 @@ path = "examples/inspect_entropy.rs"
 name = "debug_v3"
 path = "examples/debug_v3.rs"
 
-[[example]]
-name = "debug_rans"
-path = "examples/debug_rans.rs"
-
-[[example]]
-name = "test_rans"
-path = "examples/test_rans.rs"
-
 [profile.release]
 opt-level = 3
 lto = "fat"

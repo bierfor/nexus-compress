@@ -70,6 +70,34 @@ impl FreqTable {
     }
 }
 
+/// Encode the table as a byte stream for storage.
+/// Format: [scale_bits:u8][n_symbols:u16 LE][cum_0:u32 LE][cum_1:u32 LE]...[cum_n:u32 LE]
+pub fn encode_table(table: &FreqTable) -> Vec<u8> {
+    let mut out = Vec::with_capacity(3 + table.cum.len() * 4);
+    out.push(table.scale_bits as u8);
+    out.extend_from_slice(&(table.n_symbols() as u16).to_le_bytes());
+    for &c in &table.cum {
+        out.extend_from_slice(&c.to_le_bytes());
+    }
+    out
+}
+
+/// Decode a table from bytes (inverse of `encode_table`).
+pub fn decode_table(bytes: &[u8]) -> FreqTable {
+    assert!(bytes.len() >= 3, "table bytes too short");
+    let scale_bits = bytes[0] as u32;
+    let n = u16::from_le_bytes([bytes[1], bytes[2]]) as usize;
+    assert!(bytes.len() >= 3 + (n + 1) * 4, "table bytes truncated");
+    let mut cum = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let off = 3 + i * 4;
+        let v = u32::from_le_bytes([bytes[off], bytes[off+1], bytes[off+2], bytes[off+3]]);
+        cum.push(v);
+    }
+    let total = *cum.last().unwrap();
+    FreqTable { cum, total, scale_bits }
+}
+
 /// Encode symbols using the table. Returns a byte stream that the decoder
 /// can read back.
 pub fn rans_encode(symbols: &[u32], table: &FreqTable) -> Vec<u8> {

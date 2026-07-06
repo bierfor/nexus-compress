@@ -50,7 +50,7 @@ use crate::format::{
     BlockHeader, BlockType, NexusHeader, VERSION_V0, VERSION_V2, VERSION_V3,
 };
 use crate::lz77::{MatchDecoder, MatchFinder, Op};
-use crate::rans::{rans_decode, rans_encode, FreqTable};
+use crate::rans_v4::{decode_table, rans_decode, rans_encode, encode_table, FreqTable};
 use std::io::{Cursor, Read};
 
 const TAG_RAW: u8 = 1;
@@ -215,12 +215,18 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -
     let dist_lo_table = build_table_with_precision(&dist_lows, 12);
     let dist_hi_table = build_table_with_precision(&dist_highs, 12);
 
-    let lit_stream = rans_encode(&literals, &lit_table);
-    let len_stream = rans_encode(&lengths, &len_table);
-    let dist_lo_stream = rans_encode(&dist_lows, &dist_lo_table);
-    let dist_hi_stream = rans_encode(&dist_highs, &dist_hi_table);
+    // Convert Vec<u8> streams to Vec<u32> for rans_v4.
+    let lit_u32: Vec<u32> = literals.iter().map(|&x| x as u32).collect();
+    let len_u32: Vec<u32> = lengths.iter().map(|&x| x as u32).collect();
+    let dist_lo_u32: Vec<u32> = dist_lows.iter().map(|&x| x as u32).collect();
+    let dist_hi_u32: Vec<u32> = dist_highs.iter().map(|&x| x as u32).collect();
 
-    let lit_table_bytes = lit_table.encode_cum();
+    let lit_stream = rans_encode(&lit_u32, &lit_table);
+    let len_stream = rans_encode(&len_u32, &len_table);
+    let dist_lo_stream = rans_encode(&dist_lo_u32, &dist_lo_table);
+    let dist_hi_stream = rans_encode(&dist_hi_u32, &dist_hi_table);
+
+    let lit_table_bytes = encode_table(&lit_table);
     // Dense encoding for all tables. v3 dense has ~260 bytes per table × 4
     // tables ≈ 1KB overhead per block — significant on small blocks
     // (e.g., code.rs blocks are 2-4KB compressed). Sparse encoding was
@@ -228,9 +234,9 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -
     // invariant: from_counts forces freq=1 for unused symbols, so no
     // symbol is truly "absent" in the table. We'd need a different
     // rANS variant to allow freq=0; that's a v4 task.
-    let len_table_bytes = len_table.encode_cum();
-    let dist_lo_table_bytes = dist_lo_table.encode_cum();
-    let dist_hi_table_bytes = dist_hi_table.encode_cum();
+    let len_table_bytes = encode_table(&len_table);
+    let dist_lo_table_bytes = encode_table(&dist_lo_table);
+    let dist_hi_table_bytes = encode_table(&dist_hi_table);
 
     // 4. Op-flags stream (one byte per op: 0 = literal, 1 = match).
     //    This stream is raw (no rANS) because flags are already
@@ -318,7 +324,14 @@ fn build_table_with_precision(data: &[u8], scale_bits: u32) -> FreqTable {
     for &b in data {
         counts[b as usize] += 1;
     }
-    FreqTable::from_counts(&counts, scale_bits)
+    let mut table = FreqTable::from_counts(&counts);
+    // Override the auto-picked scale_bits with the requested one (if it fits).
+    // If the requested precision is too small for the total, fall back to
+    // auto-picked. rANS needs scale_bits s.t. 2^scale_bits >= total.
+    if (1u32 << scale_bits) >= table.total && scale_bits > 0 {
+        table.scale_bits = scale_bits;
+    }
+    table
 }
 
 #[inline]
@@ -412,7 +425,7 @@ fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType,
     let rans_payload = &payload[9 + table_len..9 + table_len + rans_len];
     let ops_bytes = &payload[9 + table_len + rans_len..];
 
-    let table = FreqTable::decode_cum(table_bytes, 12);
+    let table = decode_table(table_bytes);
 
     let n_ops = u32::from_le_bytes(ops_bytes[0..4].try_into().unwrap()) as usize;
     let mut ops: Vec<Op> = Vec::with_capacity(n_ops);
@@ -459,7 +472,7 @@ fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType,
     let mut lit_iter = decoded_lits.into_iter();
     for op in ops.iter_mut() {
         if let Op::Lit(slot) = op {
-            *slot = lit_iter.next().expect("ran out of decoded literals");
+            *slot = lit_iter.next().expect("ran out of decoded literals") as u8;
         }
     }
 
@@ -515,10 +528,10 @@ fn decode_block_v3(payload: &[u8], cache: &mut Vec<Vec<u8>>) -> Vec<u8> {
     let ops_bytes = &payload[off..off + ops_len];
 
     // Decode the rANS streams
-    let lit_table = FreqTable::decode_cum(lit_table_bytes, 12);
-    let len_table = FreqTable::decode_cum(len_table_bytes, 12);
-    let dist_lo_table = FreqTable::decode_cum(dist_lo_table_bytes, 12);
-    let dist_hi_table = FreqTable::decode_cum(dist_hi_table_bytes, 12);
+    let lit_table = decode_table(lit_table_bytes);
+    let len_table = decode_table(len_table_bytes);
+    let dist_lo_table = decode_table(dist_lo_table_bytes);
+    let dist_hi_table = decode_table(dist_hi_table_bytes);
 
     let n_ops = u32::from_le_bytes(ops_bytes[0..4].try_into().unwrap()) as usize;
     let flags: Vec<u8> = ops_bytes[4..4 + n_ops].to_vec();
@@ -534,7 +547,7 @@ fn decode_block_v3(payload: &[u8], cache: &mut Vec<Vec<u8>>) -> Vec<u8> {
 
     // Reconstruct ops by interleaving per the flags
     let mut ops: Vec<Op> = Vec::with_capacity(n_ops);
-    let mut lit_iter = lit_values.into_iter();
+    let mut lit_iter = lit_values.into_iter().map(|v| v as u8);
     let mut len_iter = len_values.into_iter();
     let mut dlo_iter = dist_lo_values.into_iter();
     let mut dhi_iter = dist_hi_values.into_iter();
