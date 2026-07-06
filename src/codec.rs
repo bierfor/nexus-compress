@@ -308,13 +308,6 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -
     compressed
 }
 
-/// Build a rANS frequency table from a byte stream with default 12-bit
-/// precision. Empty input gets a uniform table (decoders should never
-/// call decode on it).
-fn build_table(data: &[u8]) -> FreqTable {
-    build_table_with_precision(data, 12)
-}
-
 /// Build a rANS frequency table with custom precision. Lower precision
 /// (e.g., 8 bits) gives smaller tables at the cost of slightly less
 /// accurate probability estimates. For small-alphabet streams (match
@@ -375,7 +368,7 @@ pub fn decompress(input: &[u8]) -> Vec<u8> {
     out
 }
 
-fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType, cache: &mut Vec<Vec<u8>>, version: u8) -> Vec<u8> {
+fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType, cache: &mut Vec<Vec<u8>>, _version: u8) -> Vec<u8> {
     if uncompressed_size == 0 {
         return vec![];
     }

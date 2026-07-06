@@ -207,7 +207,7 @@ impl MatchFinder {
             }
 
             // Find best match at current position
-            let (mut best_len, mut best_dist) = self.peek(data, i);
+            let (best_len, best_dist) = self.peek(data, i);
 
             // Lazy matching: if there's a match here, peek at i+1 and see if
             // we'd get a longer one by emitting a literal first.

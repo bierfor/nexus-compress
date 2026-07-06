@@ -8,7 +8,8 @@
 //!     -> residual -> Context Mixing model -> probabilities
 //!     -> rANS encoder -> .nexus bytes
 //!
-//! v0 format spec lives in `format.rs`.
+//! v4 format spec lives in `format.rs`. The entropy coder (`rans_v4`) is a
+//! thin wrapper over the well-tested `rans` crate (ryg_rans).
 
 pub mod cdc;
 pub mod classifier;
@@ -18,10 +19,7 @@ pub mod cost;
 pub mod dedup;
 pub mod format;
 pub mod lz77;
-pub mod range2;
-pub mod rans;
 pub mod rans_v4;
-pub mod subbotin;
 
 pub use codec::{compress, decompress};
 pub use format::{BlockType, NexusHeader};
