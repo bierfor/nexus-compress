@@ -35,7 +35,6 @@
 //! to make good per-position decisions.
 
 pub mod probe {
-    use crate::dict_codec::flag;
     use std::collections::HashMap;
 
     /// Probe a single file's compressed output and return per-op-type
@@ -253,7 +252,7 @@ pub mod probe {
     /// in bytes (excluding the freq-table header). The bitstream
     /// is what actually gets written to the .nexus file for these
     /// symbols.
-    fn rans_payload_size_u8(syms: &[u8], scale_bits: u32) -> u64 {
+    fn rans_payload_size_u8(syms: &[u8], _scale_bits: u32) -> u64 {
         if syms.is_empty() {
             return 0;
         }
@@ -266,7 +265,7 @@ pub mod probe {
     }
 
     /// Same for u32 symbols (used by the dict_id stream).
-    fn rans_payload_size_u32(syms: &[u32], scale_bits: u32) -> u64 {
+    fn rans_payload_size_u32(syms: &[u32], _scale_bits: u32) -> u64 {
         if syms.is_empty() {
             return 0;
         }

@@ -50,7 +50,7 @@ use crate::format::{
     BlockHeader, BlockType, NexusHeader, VERSION_V0, VERSION_V2, VERSION_V3,
 };
 use crate::lz77::{MatchDecoder, MatchFinder, Op};
-use crate::rans_v4::{decode_table, rans_decode, rans_encode, encode_table, FreqTable};
+use crate::rans_v4::{decode_table, rans_decode, FreqTable};
 use std::io::{Cursor, Read};
 
 const TAG_RAW: u8 = 1;
@@ -426,6 +426,7 @@ fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
 /// (e.g., 8 bits) gives smaller tables at the cost of slightly less
 /// accurate probability estimates. For small-alphabet streams (match
 /// fields in v3) 8 bits is plenty and saves ~150 bytes per table.
+#[allow(dead_code)] // experimental helper kept for future sparse-stream work
 fn build_table_with_precision(data: &[u8], scale_bits: u32) -> FreqTable {
     let mut counts = [0u32; 256];
     for &b in data {

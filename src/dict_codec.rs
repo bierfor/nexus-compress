@@ -898,6 +898,7 @@ pub fn count_ops(bytes: &[u8], n_ops: usize) -> (usize, usize, usize) {
 // Helpers
 // ---------------------------------------------------------------
 
+#[allow(dead_code)] // experimental helper kept for future sparse-stream work
 fn build_table_with_precision(data: &[u8], scale_bits: u32) -> FreqTable {
     let mut counts = [0u32; 256];
     for &b in data {
@@ -912,6 +913,7 @@ fn build_table_with_precision(data: &[u8], scale_bits: u32) -> FreqTable {
 
 /// Build a rANS table for a dict-ids stream. The alphabet is 0..=255
 /// (MAX_DICT_ENTRIES). Used for the 5th stream.
+#[allow(dead_code)] // experimental helper kept for future dict-stream work
 fn build_table_with_precision_dict(data: &[u32]) -> FreqTable {
     let mut counts = [0u32; 256];
     for &v in data {
@@ -1022,6 +1024,7 @@ fn build_sparse_dict_table(dense_ids: &[u32], n_symbols: usize) -> FreqTable {
     table
 }
 
+#[allow(dead_code)] // experimental helper kept for future u32 stream work
 fn as_u32(data: &[u8]) -> Vec<u32> {
     data.iter().map(|&b| b as u32).collect()
 }
