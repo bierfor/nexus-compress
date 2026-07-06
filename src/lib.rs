@@ -20,6 +20,7 @@ pub mod dedup;
 pub mod format;
 pub mod lz77;
 pub mod rans_v4;
+pub mod rle;
 
 pub use codec::{compress, decompress};
 pub use format::{BlockType, NexusHeader};

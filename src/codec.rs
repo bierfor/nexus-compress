@@ -58,6 +58,7 @@ const TAG_RANS_LITERALS_V0: u8 = 2;
 const TAG_DUPLICATE: u8 = 3;
 const TAG_RANS_LITERALS_V2: u8 = 4;
 const TAG_V3_MULTISTREAM: u8 = 5;
+const TAG_V3_MULTISTREAM_RLE: u8 = 7;
 
 /// CDC chunk size parameters.
 ///
@@ -159,9 +160,60 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
     out
 }
 
-fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -> Vec<u8> {
+fn encode_block(block: &[u8], block_type: &mut BlockType, stats: &BlockStats) -> Vec<u8> {
     if block.is_empty() {
         return vec![];
+    }
+
+    // Try the standard v3 multistream path.
+    let standard = encode_v3_multistream(block).map(|mut payload| {
+        payload.insert(0, TAG_V3_MULTISTREAM);
+        payload
+    });
+
+    // Try the RLE pre-filter path. RLE shrinks input when there are runs
+    // of ≥2 same bytes; it expands when bytes are all unique AND have
+    // values >= 0x80 (because each high byte becomes a 2-byte "run of 1").
+    //
+    // Gating heuristic: only try RLE when the block has a non-trivial
+    // average run length (>= 1.1 means at least 10% of adjacent byte pairs
+    // are equal). On blocks where this isn't true, the standard path is
+    // faster and produces equivalent output — RLE would just be wasted
+    // LZ77+rans work to confirm the same answer.
+    let rle_path = if stats.run_avg >= 1.1 {
+        let rle_block = crate::rle::compress_rle(block);
+        if rle_block.len() < block.len() {
+            encode_v3_multistream(&rle_block).map(|mut payload| {
+                payload.insert(0, TAG_V3_MULTISTREAM_RLE);
+                payload
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match (standard, rle_path) {
+        (Some(s), Some(r)) if r.len() < s.len() => r,
+        (Some(s), _) => s,
+        (None, Some(r)) => r,
+        (None, None) => {
+            *block_type = BlockType::Raw;
+            let mut raw = Vec::with_capacity(1 + block.len());
+            raw.push(TAG_RAW);
+            raw.extend_from_slice(block);
+            raw
+        }
+    }
+}
+
+/// Build the v3 multistream payload (without the leading tag byte) for
+/// the given input data. Returns None if the encoded form is not smaller
+/// than the input (incompressible).
+fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
+    if data.is_empty() {
+        return None;
     }
 
     // 1. LZ77 with hash chains + lazy matching.
@@ -173,7 +225,7 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -
     //    code.rs; optimal on v2 found 2.23x). Re-enabling optimal is
     //    a follow-up after v3 baseline lands.
     let mut mf = MatchFinder::new();
-    let ops = mf.encode(block);
+    let ops = mf.encode(data);
 
     // 2. Split ops into THREE independent streams for v3.
     //
@@ -202,14 +254,6 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -
     }
 
     // 3. Build frequency tables and rANS-encode each stream.
-    //
-    //    Precision tuning: literals use 12-bit (full ASCII + control
-    //    char range needs precision). The match-field streams (lengths,
-    //    dist_low, dist_high) use 8-bit precision — their alphabets are
-    //    small (≤256 symbols used in practice) and the heavy skew of
-    //    a few common values fits comfortably in 256 bins. The smaller
-    //    precision = smaller cum[] table = significantly fewer bytes
-    //    per stream header.
     let lit_table = build_table_with_precision(&literals, 12);
     let len_table = build_table_with_precision(&lengths, 12);
     let dist_lo_table = build_table_with_precision(&dist_lows, 12);
@@ -239,10 +283,6 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -
     let dist_hi_table_bytes = encode_table(&dist_hi_table);
 
     // 4. Op-flags stream (one byte per op: 0 = literal, 1 = match).
-    //    This stream is raw (no rANS) because flags are already
-    //    maximally compressed: 1 bit each, packed 8 per byte later
-    //    would be ideal but raw bytes are simpler and the count is
-    //    small relative to the rANS streams.
     let mut ops_bytes = Vec::with_capacity(ops.len() + 4);
     ops_bytes.extend_from_slice(&(ops.len() as u32).to_le_bytes());
     for op in &ops {
@@ -252,9 +292,8 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -
         }
     }
 
-    // 5. Compressed payload (v3 format).
+    // 5. Compressed payload (v3 format, no leading tag here — caller adds it).
     //    Layout:
-    //      [tag=5]
     //      [u32 lit_table_len][u32 lit_stream_len]
     //      [u32 len_table_len][u32 len_stream_len]
     //      [u32 dist_lo_table_len][u32 dist_lo_stream_len]
@@ -265,8 +304,8 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -
     //      [dist_lo_table][dist_lo_stream]
     //      [dist_hi_table][dist_hi_stream]
     //      [ops_bytes]
-    let mut compressed = Vec::with_capacity(
-        1 + 8 * 8 + lit_table_bytes.len()
+    let mut out = Vec::with_capacity(
+        8 * 8 + lit_table_bytes.len()
             + lit_stream.len()
             + len_table_bytes.len()
             + len_stream.len()
@@ -276,36 +315,30 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, _stats: &BlockStats) -
             + dist_hi_stream.len()
             + ops_bytes.len(),
     );
-    compressed.push(TAG_V3_MULTISTREAM);
-    push_u32(&mut compressed, lit_table_bytes.len() as u32);
-    push_u32(&mut compressed, lit_stream.len() as u32);
-    push_u32(&mut compressed, len_table_bytes.len() as u32);
-    push_u32(&mut compressed, len_stream.len() as u32);
-    push_u32(&mut compressed, dist_lo_table_bytes.len() as u32);
-    push_u32(&mut compressed, dist_lo_stream.len() as u32);
-    push_u32(&mut compressed, dist_hi_table_bytes.len() as u32);
-    push_u32(&mut compressed, dist_hi_stream.len() as u32);
-    push_u32(&mut compressed, ops_bytes.len() as u32);
-    compressed.extend_from_slice(&lit_table_bytes);
-    compressed.extend_from_slice(&lit_stream);
-    compressed.extend_from_slice(&len_table_bytes);
-    compressed.extend_from_slice(&len_stream);
-    compressed.extend_from_slice(&dist_lo_table_bytes);
-    compressed.extend_from_slice(&dist_lo_stream);
-    compressed.extend_from_slice(&dist_hi_table_bytes);
-    compressed.extend_from_slice(&dist_hi_stream);
-    compressed.extend_from_slice(&ops_bytes);
+    push_u32(&mut out, lit_table_bytes.len() as u32);
+    push_u32(&mut out, lit_stream.len() as u32);
+    push_u32(&mut out, len_table_bytes.len() as u32);
+    push_u32(&mut out, len_stream.len() as u32);
+    push_u32(&mut out, dist_lo_table_bytes.len() as u32);
+    push_u32(&mut out, dist_lo_stream.len() as u32);
+    push_u32(&mut out, dist_hi_table_bytes.len() as u32);
+    push_u32(&mut out, dist_hi_stream.len() as u32);
+    push_u32(&mut out, ops_bytes.len() as u32);
+    out.extend_from_slice(&lit_table_bytes);
+    out.extend_from_slice(&lit_stream);
+    out.extend_from_slice(&len_table_bytes);
+    out.extend_from_slice(&len_stream);
+    out.extend_from_slice(&dist_lo_table_bytes);
+    out.extend_from_slice(&dist_lo_stream);
+    out.extend_from_slice(&dist_hi_table_bytes);
+    out.extend_from_slice(&dist_hi_stream);
+    out.extend_from_slice(&ops_bytes);
 
-    // 6. Incompressible-block filter
-    if compressed.len() >= block.len() {
-        *block_type = BlockType::Raw;
-        let mut raw = Vec::with_capacity(1 + block.len());
-        raw.push(TAG_RAW);
-        raw.extend_from_slice(block);
-        return raw;
+    if out.len() >= data.len() {
+        None
+    } else {
+        Some(out)
     }
-
-    compressed
 }
 
 /// Build a rANS frequency table with custom precision. Lower precision
@@ -395,7 +428,11 @@ fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType,
 
     // v3: multi-stream rANS — split into lit / len / dist_lo / dist_hi
     if payload[0] == TAG_V3_MULTISTREAM {
-        return decode_block_v3(payload, cache);
+        return decode_block_v3(payload, cache, false);
+    }
+    // v3 + RLE pre-filter: same as above, but RLE-decode the LZ77 output.
+    if payload[0] == TAG_V3_MULTISTREAM_RLE {
+        return decode_block_v3(payload, cache, true);
     }
 
     // v0 / v2: single rANS stream
@@ -483,8 +520,11 @@ fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType,
 /// Reads 4 rANS streams (literals, lengths, dist_low, dist_high) and
 /// reconstructs the op stream from the interleave flags. Each rANS
 /// stream has its own frequency table.
-fn decode_block_v3(payload: &[u8], cache: &mut Vec<Vec<u8>>) -> Vec<u8> {
-    let mut off = 1usize; // skip TAG_V3_MULTISTREAM
+///
+/// `was_rle`: if true, the input was RLE-pre-filtered before LZ77, so
+/// the LZ77 output must be RLE-decoded to recover the original block.
+fn decode_block_v3(payload: &[u8], cache: &mut Vec<Vec<u8>>, was_rle: bool) -> Vec<u8> {
+    let mut off = 1usize; // skip TAG_V3_MULTISTREAM or TAG_V3_MULTISTREAM_RLE
 
     // Read the 9 u32 sizes
     let lit_table_len = read_u32(payload, &mut off) as usize;
@@ -563,7 +603,10 @@ fn decode_block_v3(payload: &[u8], cache: &mut Vec<Vec<u8>>) -> Vec<u8> {
     }
 
     let mut md = MatchDecoder::new();
-    let decoded = md.decode(&ops);
+    let mut decoded = md.decode(&ops);
+    if was_rle {
+        decoded = crate::rle::decompress_rle(&decoded);
+    }
     cache.push(decoded.clone());
     decoded
 }
