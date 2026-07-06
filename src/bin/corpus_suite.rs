@@ -51,12 +51,21 @@ fn main() {
     eprintln!("[corpus_suite] NexusCompress v4 vs gzip -9 vs zstd -19\n");
     eprintln!("Running benchmarks... (this may take a few seconds)\n");
 
-    // Collect per-file results.
+    // Collect per-file results. Skip files without an extension or
+    // dot-prefix — the corpus script `gen_corpus.py` only writes
+    // extensioned names, so anything bare-named (e.g. `code`, `data`)
+    // is a stray duplicate from older test runs that would
+    // double-count the aggregate. Dotfiles (`.DS_Store`) and
+    // properly extensioned files (`.rs`, `.json`, ...) pass through.
     let entries: Vec<_> = std::fs::read_dir(corpus_dir)
         .expect("read corpus")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.is_file())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.contains('.')
+        })
         .collect();
     let mut paths: Vec<_> = entries;
     paths.sort();

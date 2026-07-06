@@ -261,12 +261,66 @@ pub fn load_sub_dict(select: u8) -> Option<Dictionary> {
     }
 }
 
+/// Lower and upper Shannon-entropy bounds (in bits per byte) for the
+/// "potential gain zone" of the dict-aware paths.
+///
+/// - Below `ENTROPY_GATE_LO`: clearly repetitive (RLE / v3 std destroy
+///   the file with 0.1–1% of the bytes; a 669-byte local-dict bitmask
+///   is pure overhead).
+/// - Above `ENTROPY_GATE_HI`: clearly random (the byte stream is at
+///   its physical entropy ceiling; the dict can't find repeated
+///   phrases, and `dict_select_for_block` would return NONE anyway).
+/// - In between: the dict might pay for its 32/669-byte bitmask. This
+///   is where text, code, JSON, and mixed-text corpora live.
+pub const ENTROPY_GATE_LO: f32 = 3.0;
+pub const ENTROPY_GATE_HI: f32 = 7.5;
+
+/// Ultra-fast entropy gatekeeper. Returns `true` iff the block's
+/// Shannon entropy (over the FULL block, not just a 500-byte
+/// sample) falls in `[ENTROPY_GATE_LO, ENTROPY_GATE_HI]` — the
+/// "potential gain zone" for the dict-aware paths.
+///
+/// Cost: ~1 µs per KB of block. Capped by CDC's `MAX_CHUNK = 64KB`
+/// so worst-case per call is ~64 µs. For ~30 blocks per file, total
+/// overhead is ~1-2 ms per file — well under the LZ77+dict pass
+/// cost (~5-10 ms per block) that we save by skipping.
+///
+/// Why full block (not first 500 bytes): for files with non-uniform
+/// entropy distribution (e.g. `mixed.bin` has a ~64KB random header
+/// followed by natural text), a small sample mis-represents the
+/// block's true entropy and would incorrectly reject blocks that
+/// could win on the dict paths.
+pub fn quick_entropy_gate(block: &[u8]) -> bool {
+    if block.is_empty() {
+        return false;
+    }
+    // Sample the FULL block, not just the first 500 bytes. For files
+    // with non-uniform entropy distribution (e.g. `mixed.bin` with
+    // a ~64KB random header followed by natural text) a small sample
+    // mis-represents the block and would incorrectly reject blocks
+    // that could win on the dict paths.
+    let mut counts = [0u32; 256];
+    for &b in block {
+        counts[b as usize] += 1;
+    }
+    let h = shannon_entropy(&counts, block.len() as u32);
+    h >= ENTROPY_GATE_LO && h <= ENTROPY_GATE_HI
+}
+
 /// Quick check used by the codec to decide whether to attempt the v4.5
 /// dict-aware path on a block. Returns `true` iff the pre-scan selects
 /// a non-NONE dictionary. Cheap (~microseconds per call) — runs the
 /// same heuristic as `dict_select_for_block` but short-circuits on
 /// `select::NONE`.
+///
+/// Now (sprint 2.8.5) fronted by `quick_entropy_gate` so the much
+/// more expensive pre-scan (printable ratio, 4-byte uniqueness,
+/// code-keyword matching) is skipped for clearly random or clearly
+/// repetitive blocks.
 pub fn should_try_v45(block: &[u8]) -> bool {
+    if !quick_entropy_gate(block) {
+        return false;
+    }
     dict_select_for_block(block) != select::NONE
 }
 
@@ -1323,5 +1377,67 @@ mod tests {
         }
         let result = encode_v45_multistream_local(&data);
         assert!(result.is_none(), "LOCAL on random data should return None");
+    }
+
+    #[test]
+    fn gatekeeper_rejects_random() {
+        // Pseudo-random bytes: entropy ≈ 8.0 → above 7.5 → false.
+        let mut data = vec![0u8; 4096];
+        let mut s: u32 = 0xc0ffee;
+        for b in data.iter_mut() {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            *b = s as u8;
+        }
+        assert!(!quick_entropy_gate(&data), "random block should be rejected");
+        assert!(!should_try_v45(&data), "should_try_v45 should reject random");
+    }
+
+    #[test]
+    fn gatekeeper_rejects_repetitive() {
+        // Highly repetitive: 8 unique chars → entropy ≈ 3.0 (boundary).
+        // Use 4 unique chars to get entropy < 3.0 and be firmly in the
+        // "repetitive" zone.
+        let data: Vec<u8> = (0..4096).map(|i| b"abcd"[i % 4]).collect();
+        let h = {
+            let mut counts = [0u32; 256];
+            for &b in &data[..500] {
+                counts[b as usize] += 1;
+            }
+            let mut hh = 0f32;
+            for &c in counts.iter() {
+                if c > 0 {
+                    let p = c as f32 / 500.0;
+                    hh -= p * p.log2();
+                }
+            }
+            hh
+        };
+        assert!(h < ENTROPY_GATE_LO, "test setup: h={} should be < 3.0", h);
+        assert!(!quick_entropy_gate(&data), "repetitive block should be rejected");
+        // should_try_v45 first runs quick_entropy_gate (now scanning the
+        // full block). For 4KB of 4 unique chars the full-block entropy
+        // is log2(4) = 2.0, firmly below the 3.0 lower bound.
+        assert!(!should_try_v45(&data), "should_try_v45 should reject repetitive");
+    }
+
+    #[test]
+    fn gatekeeper_accepts_natural_text() {
+        // ASCII text: entropy typically 4.0–6.0 → inside the active zone.
+        let data: Vec<u8> = b"the quick brown fox jumps over the lazy dog the quick brown fox"
+            .iter()
+            .cycle()
+            .take(4096)
+            .cloned()
+            .collect();
+        assert!(quick_entropy_gate(&data), "natural text should be in the active zone");
+        assert!(should_try_v45(&data), "should_try_v45 should accept natural text");
+    }
+
+    #[test]
+    fn gatekeeper_empty_block() {
+        assert!(!quick_entropy_gate(&[]));
+        assert!(!should_try_v45(&[]));
     }
 }

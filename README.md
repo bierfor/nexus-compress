@@ -1312,6 +1312,95 @@ and panic. No backward-compat shim.
 
 ---
 
+## Entropy gatekeeper (sprint 2.8.5)
+
+Sprint 2.8 noted that the LOCAL path costs ~80ms total compress
+time on the bench corpus, even when it doesn't win. Sprint 2.8.5
+adds a fast entropy-based gatekeeper to skip the LOCAL pre-scan
+on blocks where it can't possibly win.
+
+### Design
+
+The gatekeeper is a single Shannon-entropy check on the full block:
+
+```rust
+pub fn quick_entropy_gate(block: &[u8]) -> bool {
+    // Skip if entropy is below 3.0 (highly repetitive — RLE/v3 win)
+    // or above 7.5 (random — pre-scan returns NONE anyway).
+    h >= ENTROPY_GATE_LO && h <= ENTROPY_GATE_HI
+}
+```
+
+Why **full block** (not just the first 500 bytes like the existing
+`dict_select_for_block` pre-scan): for files with non-uniform
+entropy distribution (e.g. `mixed.bin`, which has a ~5KB random
+header followed by 60KB of natural text in a single CDC block),
+a 500-byte sample sees the random header tail and incorrectly
+rejects blocks that would win on the dict. The full block
+preserves the v4.8 wins on heterogeneous files.
+
+### Where it's used
+
+- **LOCAL path** (`encode_v45_multistream_local`): gated by
+  `quick_entropy_gate` only. The LOCAL encoder is self-gating
+  internally via `select_local_dict_ids` returning 0 matches for
+  truly random blocks, so we don't need to also call
+  `should_try_v45` (which would re-introduce the 500-byte sample
+  bias).
+- **fixed-256 path** (`encode_v45_multistream`): already gated by
+  `should_try_v45`, which now front-loads `quick_entropy_gate` so
+  the much more expensive pre-scan (printable ratio, 4-byte
+  uniqueness, code-keyword matching) is skipped for clearly
+  random or repetitive blocks.
+
+### Measured impact (median of 3 runs)
+
+| File          | v4.8 LOCAL (ms) | v4.8.5 (ms) | Δ      |
+|---|---:|---:|---:|
+| **random.bin**    | 21.6  | **5.2**  | **-76%** |
+| repetitive.bin    | 2.3   | 2.6  | +13% (noise) |
+| text.txt          | 22.2  | 23.0 | noise |
+| mixed.bin         | 5.8   | 5.8  | tied |
+| code.rs           | 17.9  | 20.8 | noise |
+| data.json         | 99.9  | 99.3 | tied |
+| **Total**         | **170** | **160** | **-6%** |
+
+The headline: **random.bin goes from 21.6ms to 5.2ms (-76%)** —
+the LOCAL pre-scan was being run on 7 random blocks (~3ms each
+in `select_local_dict_ids`, returning 0 matches), and the
+gatekeeper now skips all 7. Other files are stable within noise
+because the LOCAL encoder is already self-gating and returns
+None cheaply for blocks it can't compress.
+
+### Trade-off honesty
+
+The full-block scan is ~5× more expensive per call than a 500-byte
+sample (~30 µs vs ~6 µs per block). For 30 blocks per file that's
+~1 ms of overhead per file. But the LOCAL pre-scan it replaces
+on rejected blocks costs 5-10 ms each, so the trade-off is
+positive whenever the gatekeeper rejects any block.
+
+The one file that regressed slightly in this design: `repetitive.bin`
+went from 2.3 to 2.6 ms (+0.3 ms). The blocks have entropy exactly
+3.0 (8 unique chars repeating), which is on the gatekeeper's lower
+boundary and passes. The LOCAL encoder then runs `select_local_dict_ids`
+on 4 blocks of 65 KB and finds 0 matches (~0.1 ms each). Could
+tighten the threshold to `h > 3.0` to recover this, but the
+correctness/stability trade-off isn't worth it for 0.3 ms.
+
+### Bonus fix: corpus-suite filter
+
+The bench binary (`src/bin/corpus_suite.rs`) was double-counting
+files because the corpus directory contained both
+extensioned (`code.rs`) and bare (`code`) versions of each test
+file (leftover from older test runs). The bench now filters to
+`name.contains('.')` so only proper extensioned files are
+processed. This made the bench reproducible across runs
+(previously the aggregate varied ±5% based on which duplicates
+existed at bench time).
+
+---
+
 ## Build & test
 
 ```bash

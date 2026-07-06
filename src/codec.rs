@@ -216,7 +216,19 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, stats: &BlockStats) ->
     // 669-byte bitmask (5348 bits) to mark which entries are active.
     // Wins when the block has many dict matches AND the fixed 256-entry
     // compact sub-dict doesn't cover the most-frequent entries.
-    let local_path = if block.len() >= 8 * 1024 {
+    //
+    // Gated by `quick_entropy_gate` (NOT `should_try_v45`) so the
+    // LOCAL path isn't held back by the 500-byte sample bias in
+    // `dict_select_for_block`. For files with non-uniform entropy
+    // distribution (e.g. `mixed.bin`, which has a ~5KB random header
+    // followed by 60KB of natural text in a single CDC block), the
+    // 500-byte sample sees the random header tail and incorrectly
+    // rejects blocks that would win on the dict. The LOCAL encoder
+    // is self-gating: `select_local_dict_ids` returns 0 matches for
+    // truly random blocks, so the function returns None cheaply.
+    let local_path = if block.len() >= 8 * 1024
+        && crate::dict_codec::quick_entropy_gate(block)
+    {
         crate::dict_codec::encode_v45_multistream_local(block).map(|mut payload| {
             payload.insert(0, TAG_V3_MULTISTREAM_DICT);
             payload
