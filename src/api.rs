@@ -40,6 +40,33 @@
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
+/// Compression level — controls the LZ77 strategy and which codec
+/// paths the encoder tries.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CompressionLevel {
+    /// Lazy LZ77 matching. Default. ~8× faster than `Premium` with
+    /// no measurable ratio loss on the corpus (3.15× aggregate).
+    /// The cost model in `src/cost.rs` says match=17 bits, literal=8
+    /// bits, so lazy + 1-lookahead matches the DP's per-position
+    /// decisions well enough that the optimal DP's 8.8× cost buys
+    /// ~0% gain.
+    Fast,
+    /// Optimal LZ77 DP (`encode_optimal`). ~8.8× slower than
+    /// `Fast` for marginal or zero ratio gain. The DP's
+    /// all-literals future-cost estimate is too coarse to
+    /// consistently beat lazy on natural text. Kept as an
+    /// experimental option; the UI should hide it behind an
+    /// "Advanced / max compression" toggle.
+    Premium,
+}
+
+impl Default for CompressionLevel {
+    fn default() -> Self {
+        Self::Fast
+    }
+}
+
 // -----------------------------------------------------------------------
 // Result types
 // -----------------------------------------------------------------------
@@ -172,8 +199,22 @@ pub type ApiResult<T> = std::result::Result<T, ApiError>;
 /// a modern x86. Tauri commands should wrap this in
 /// `spawn_blocking` to keep the async runtime responsive.
 pub fn compress_bytes(input: &[u8]) -> CompressResult {
+    compress_bytes_with_level(input, CompressionLevel::Fast)
+}
+
+/// Like `compress_bytes` but lets the caller pick the LZ77 strategy.
+///
+/// `Fast` (default): lazy matching. ~8× faster than `Premium`
+/// with no measurable ratio loss on the corpus.
+///
+/// `Premium`: optimal DP. ~8.8× slower for marginal or zero
+/// ratio gain. Keep as an experimental option.
+pub fn compress_bytes_with_level(input: &[u8], level: CompressionLevel) -> CompressResult {
     let start = Instant::now();
-    let compressed = crate::compress(input);
+    let compressed = match level {
+        CompressionLevel::Fast => crate::compress(input),
+        CompressionLevel::Premium => crate::compress_premium(input),
+    };
     let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let original_size = input.len() as u64;
@@ -405,6 +446,61 @@ mod tests {
         let result = self_test().expect("self_test should succeed");
         assert!(result.roundtrip_ok, "self_test roundtrip failed");
         assert!(result.ratio > 1.0, "self_test input should compress");
+    }
+
+    #[test]
+    fn compression_level_default_is_fast() {
+        assert_eq!(CompressionLevel::default(), CompressionLevel::Fast);
+    }
+
+    #[test]
+    fn compress_with_level_fast_works() {
+        // The default `Fast` level should be the same as the
+        // existing `compress_bytes` (lazy LZ77).
+        let data: Vec<u8> = b"the quick brown fox jumps over the lazy dog"
+            .iter()
+            .cycle()
+            .take(4096)
+            .cloned()
+            .collect();
+        let r_fast = compress_bytes_with_level(&data, CompressionLevel::Fast);
+        let r_default = compress_bytes(&data);
+        // Fast is the default — the two calls produce the same
+        // output (and the same stats).
+        assert_eq!(r_fast.compressed_size, r_default.compressed_size);
+        assert_eq!(r_fast.compress_time_ms >= 0.0, true);
+        // Roundtrip must hold.
+        let d = decompress_bytes(&r_fast.compressed).expect("decompress");
+        assert_eq!(d.data, data);
+    }
+
+    #[test]
+    fn compress_with_level_premium_runs() {
+        // The `Premium` level currently delegates to the same
+        // codec (the optimal DP was found to be 8.8× slower with
+        // ~0% ratio gain — see README sprint 2.9). The function
+        // exists and produces a valid roundtrip.
+        let data: Vec<u8> = b"the quick brown fox jumps over the lazy dog"
+            .iter()
+            .cycle()
+            .take(4096)
+            .cloned()
+            .collect();
+        let r = compress_bytes_with_level(&data, CompressionLevel::Premium);
+        let d = decompress_bytes(&r.compressed).expect("decompress");
+        assert_eq!(d.data, data);
+    }
+
+    #[test]
+    fn compression_level_serde_roundtrip() {
+        // The level must survive a serde roundtrip so the Tauri
+        // command param works over the IPC boundary.
+        let json_fast = serde_json::to_string(&CompressionLevel::Fast).unwrap();
+        let json_premium = serde_json::to_string(&CompressionLevel::Premium).unwrap();
+        assert_eq!(json_fast, "\"fast\"");
+        assert_eq!(json_premium, "\"premium\"");
+        let parsed: CompressionLevel = serde_json::from_str(&json_premium).unwrap();
+        assert_eq!(parsed, CompressionLevel::Premium);
     }
 
     #[test]

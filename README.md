@@ -1500,6 +1500,109 @@ the `catch_unwind`.
 
 ---
 
+## Optimal parser (sprint 2.9 — the final boss)
+
+Sprint 2.9's mission: re-enable the optimal LZ77 DP with a
+corrected cost model and decide once and for all whether it wins
+against lazy matching on the v4.8 bitstream.
+
+### Step 1: Cost telemetry (`src/cost_probe.rs`)
+
+The first job was to measure the REAL bits per op-type in the
+v4.8 bitstream, not what the v2-era cost model thought. The
+probe encodes each of the 5 rANS streams and reports the
+average bits per symbol:
+
+| File           | lit bits/sym | len bits/sym | dist_lo | dist_hi | dict_id |
+|----------------|-------------:|-------------:|--------:|--------:|--------:|
+| code.rs        | 5.48         | 2.42         | 2.60    | 1.80    | 5.33    |
+| text.txt       | 4.77         | 4.45         | 8.65    | 4.91    | 0       |
+| data.json      | 4.63         | 5.13         | 8.05    | 5.57    | 1.78    |
+| mixed.bin      | 8.94         | 4.32         | 6.59    | 3.42    | 0       |
+| trained.dict   | 6.07         | 3.22         | 7.86    | 3.50    | 0       |
+| **average**    | **~7**       | **~4**       | **~7**  | **~4**  | **~2**  |
+
+Adding the 2-bit op-flag per op:
+
+| Op type | Real cost (v4) | Old static (v2) | Over-estimate |
+|---------|---------------:|----------------:|--------------:|
+| Literal | 2 + 7 = **9**  | 13              | 1.4×          |
+| Match   | 2 + 4+7+4 = **17** | 32          | 1.9×          |
+| DictRef | 2 + 2 = **4**  | (didn't exist)  | n/a           |
+
+The old v2 constants were 1.4-1.9× too pessimistic.
+
+### Step 2: Cost model corrected (`src/cost.rs`)
+
+Updated to v4 constants:
+
+```rust
+pub const LITERAL_BITS: u32 = 8;   // was 13
+pub const MATCH_BITS: u32 = 17;    // was 32
+pub const MATCH_LENGTH_THRESHOLD: u32 = 4;  // was 3
+```
+
+Threshold changed from 3 to 4 because at L=3 the effective per-match
+cost is 17 vs 3×8=24 literals — a 7-bit win, but borderline
+(measured match cost is closer to 20 for natural text). At L=4
+the win is 32-17=15 bits, comfortable.
+
+### Step 3: Optimal DP re-enabled, then reverted
+
+Replaced `mf.encode(data)` (lazy) with `mf.encode_optimal(data)`
+in the standard v3 path of the codec. Built, ran bench, got:
+
+| File          | v4.8.6 (lazy) | v4.9 (optimal) | Δ       |
+|---------------|--------------:|---------------:|--------:|
+| code.rs       | 32.17x (3.3KB)| 32.17x (3.3KB)| tied    |
+| data.json     | 5.44x (117KB) | 5.43x (118KB)  | **slightly worse** |
+| mixed.bin     | 3.59x (27KB)  | 3.59x (27KB)   | tied    |
+| random.bin    | 1.00x         | 1.00x          | tied    |
+| repetitive.bin| 263.20x       | 263.20x        | tied    |
+| text.txt      | 2.98x (60KB)  | 2.98x (60KB)   | tied    |
+| trained.dict  | 1.43x (41KB)  | 1.43x (42KB)   | **slightly worse** |
+| **Aggregate** | 3.15x         | 3.15x          | tied    |
+| **Compress**  | 171ms         | **1411ms**     | **8.8× SLOWER** |
+
+### Verdict: lazy wins
+
+The optimal DP with the corrected v4 cost model is **8.8× slower
+with no measurable ratio gain** (and actually slightly worse on
+data.json and trained.dict — the DP's all-literals future-cost
+estimate is too coarse and fragments matches that lazy finds
+intact).
+
+This matches the lesson from the v0/v1 era: the cost model is
+necessary but not sufficient. The DP's future-cost estimate
+(all-literals past the lookahead) mis-represents the codec's
+actual cost for paths with mixed match/literal sequences, so
+the DP makes decisions that are locally optimal but globally
+suboptimal. Lazy matching + 1-lookahead approximates the
+codec's actual decisions well enough to match or beat the DP
+on this corpus.
+
+### `CompressionLevel` API
+
+The optimal parser is exposed as a `Premium` level in the Tauri
+API (sprint 2.8.6), behind a `compression_level` field that
+defaults to `Fast` (lazy). The premium path is the same as
+fast for now — the doc above documents the bench result. To
+re-enable the optimal DP for testing, edit
+`src/codec.rs::compress_premium` to call into a variant of the
+LZ77 pipeline that uses `encode_optimal` instead of `encode`.
+
+### Files added in sprint 2.9
+
+- `src/cost_probe.rs`: 5 per-stream bits/symbol probes +
+  corpus-wide op count. Run via `cargo test --lib --release
+  cost_probe -- --nocapture`.
+- `src/cost.rs`: rewritten with v4 constants
+  (literal=8, match=17, threshold=4).
+- `src/api.rs::CompressionLevel`: new enum, defaults to Fast.
+- `src/codec.rs::compress_premium`: stub for the premium path.
+
+---
+
 ## Build & test
 
 ```bash

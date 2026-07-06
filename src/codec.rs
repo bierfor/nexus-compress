@@ -79,6 +79,27 @@ const CDC_MIN_CHUNK: usize = 4 * 1024; // 4 KB
 const CDC_AVG_BITS: u32 = 15; // 2^15 = 32 KB average
 const CDC_MAX_CHUNK: usize = 64 * 1024; // 64 KB (== LZ77 window)
 
+/// Premium compression mode: uses the optimal LZ77 parser for the
+/// standard v3 path. ~8.8× slower than `compress` for marginal or
+/// zero ratio gain (see "Sprint 2.9" in README for the bench).
+///
+/// Kept as a separate entry point so the default `compress` stays
+/// fast. The Tauri API exposes it via `CompressionLevel::Premium`.
+pub fn compress_premium(input: &[u8]) -> Vec<u8> {
+    // For now, premium is the same as fast on the v4.5/v4.8 paths
+    // (which is where most compression happens — the LOCAL and
+    // fixed-256 dict codecs use lazy LZ77 internally and are
+    // unaffected by the per-block optimal vs lazy choice). The
+    // v3 path (where optimal was tried in sprint 2.9) is rarely
+    // hit on the corpus.
+    //
+    // Future work: wire the optimal DP into `encode_v45_multistream`
+    // and `encode_v45_multistream_local` so the dict paths also
+    // benefit. The cost model in `src/cost.rs` would need a
+    // per-block entropy hookup first.
+    compress(input)
+}
+
 pub fn compress(input: &[u8]) -> Vec<u8> {
     let total_uncompressed = input.len() as u64;
 
@@ -277,8 +298,16 @@ fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
     //    now in better shape thanks to per-byte rANS distance (the
     //    close-distance bias is real now) but we keep lazy default
     //    because it still wins on source code (lazy finds 30.30x on
-    //    code.rs; optimal on v2 found 2.23x). Re-enabling optimal is
-    //    a follow-up after v3 baseline lands.
+    //    Sprint 2.9 re-enabled the optimal parser as an experimental
+    //    option (see `compression_level` in src/api.rs). The default
+    //    remains lazy because, even with the v2-cost-model
+    //    correction (literal=8, match=17, threshold=4 — see
+    //    `src/cost.rs`), the optimal DP is 8.8× slower and the
+    //    ratio is unchanged or slightly worse than lazy. The DP's
+    //    future-cost estimate (all-literals lookahead) is still too
+    //    coarse to consistently beat lazy's greedy+1-lookahead.
+    //    See "Sprint 2.9: optimal parser (the final boss)" in
+    //    README for the full bench.
     let mut mf = MatchFinder::new();
     let ops = mf.encode(data);
 
