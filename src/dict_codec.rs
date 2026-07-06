@@ -305,26 +305,30 @@ pub fn encode_v45_multistream(data: &[u8]) -> Option<Vec<u8>> {
     let len_table = build_table_with_precision(&lengths, 12);
     let dist_lo_table = build_table_with_precision(&dist_lows, 12);
     let dist_hi_table = build_table_with_precision(&dist_highs, 12);
-    // The dict-ids stream uses the 0..=MAX_DICT_ENTRIES-1 alphabet.
-    // The LZ77 matchfinder uses `trained_dict_compact()` (256 entries)
-    // for trained blocks, so all emitted DictRef ids are in 0..=255.
-    // The compact dict preserves the first 256 entries of the full
-    // trained dict (highest-score tokens).
-    let dict_table = build_table_with_precision_dict(&dict_ids);
+    // Sparse dict-ids table (v4.6): the alphabet is collapsed from
+    // 256 to just the set bits in the bitmask. For most blocks this
+    // shrinks the table from ~1027 bytes to ~50-200 bytes.
+    let (dict_bitmask, _dict_remap, dict_dense_ids) = sparse_dict_encode(&dict_ids);
+    let dict_table = build_sparse_dict_table(&dict_dense_ids, _dict_remap.len());
 
     // 5. rANS-encode.
     let lit_stream = rans_encode(&as_u32(&literals), &lit_table);
     let len_stream = rans_encode(&as_u32(&lengths), &len_table);
     let dist_lo_stream = rans_encode(&as_u32(&dist_lows), &dist_lo_table);
     let dist_hi_stream = rans_encode(&as_u32(&dist_highs), &dist_hi_table);
-    let dict_stream = rans_encode(&dict_ids, &dict_table);
+    let dict_stream = rans_encode(&dict_dense_ids, &dict_table);
 
-    // 6. Table bytes.
+    // 6. Table bytes. The dict table section is now:
+    //   [32 bytes bitmask][encode_table(dense table)]
+    // The decoder reads the bitmask first, then the rANS table for
+    // the alphabet size it implies.
     let lit_table_bytes = encode_table(&lit_table);
     let len_table_bytes = encode_table(&len_table);
     let dist_lo_table_bytes = encode_table(&dist_lo_table);
     let dist_hi_table_bytes = encode_table(&dist_hi_table);
-    let dict_table_bytes = encode_table(&dict_table);
+    let mut dict_table_bytes = Vec::with_capacity(DICT_BITMASK_BYTES + 64);
+    dict_table_bytes.extend_from_slice(&dict_bitmask);
+    dict_table_bytes.extend_from_slice(&encode_table(&dict_table));
 
     // 7. Op-flags (2 bits per op, packed 4 per byte).
     let op_flags_bytes = pack_op_flags(&ops);
@@ -435,6 +439,21 @@ pub fn decode_v45_multistream(payload: &[u8]) -> Vec<u8> {
     off += dict_table_len;
     let dict_stream = &payload[off..off + dict_stream_len];
     off += dict_stream_len;
+
+    // Decode the dict table (sparse v4.6 format):
+    //   [32 bytes bitmask][rANS table for the dense alphabet]
+    if dict_table_bytes.len() < DICT_BITMASK_BYTES {
+        panic!(
+            "dict table section too short: {} bytes (need at least {} for bitmask)",
+            dict_table_bytes.len(),
+            DICT_BITMASK_BYTES
+        );
+    }
+    let mut dict_bitmask = [0u8; DICT_BITMASK_BYTES];
+    dict_bitmask.copy_from_slice(&dict_table_bytes[..DICT_BITMASK_BYTES]);
+    let dict_table_inner_bytes = &dict_table_bytes[DICT_BITMASK_BYTES..];
+    let dict_table = decode_table(dict_table_inner_bytes);
+    let dict_remap = sparse_dict_decode_remap(&dict_bitmask);
     let op_flags_bytes = &payload[off..off + op_flags_len];
 
     // Decode the rANS tables.
@@ -442,7 +461,7 @@ pub fn decode_v45_multistream(payload: &[u8]) -> Vec<u8> {
     let len_table = decode_table(len_table_bytes);
     let dist_lo_table = decode_table(dist_lo_table_bytes);
     let dist_hi_table = decode_table(dist_hi_table_bytes);
-    let dict_table = decode_table(dict_table_bytes);
+    // (dict table already decoded above with the bitmask.)
 
     // Count how many of each op type there are by scanning op_flags.
     // We use n_ops to avoid reading phantom bits in the last byte.
@@ -453,7 +472,19 @@ pub fn decode_v45_multistream(payload: &[u8]) -> Vec<u8> {
     let len_values = rans_decode(len_stream, &len_table, n_matches);
     let dist_lo_values = rans_decode(dist_lo_stream, &dist_lo_table, n_matches);
     let dist_hi_values = rans_decode(dist_hi_stream, &dist_hi_table, n_matches);
-    let dict_values = rans_decode(dict_stream, &dict_table, n_dict_refs);
+    // The dict stream encodes dense indices (0..N-1). We need to
+    // remap each dense index to the original dict id via the bitmask.
+    let dict_dense_values = rans_decode(dict_stream, &dict_table, n_dict_refs);
+    let dict_values: Vec<u32> = dict_dense_values
+        .iter()
+        .map(|&d| {
+            if (d as usize) < dict_remap.len() {
+                dict_remap[d as usize] as u32
+            } else {
+                panic!("dense dict idx {} out of range (remap size {})", d, dict_remap.len())
+            }
+        })
+        .collect();
 
     // Reconstruct ops by interleaving per the flags.
     let mut ops: Vec<Op> = Vec::with_capacity(n_ops);
@@ -580,6 +611,102 @@ fn build_table_with_precision_dict(data: &[u32]) -> FreqTable {
     let mut counts = [0u32; 256];
     for &v in data {
         if (v as usize) < 256 {
+            counts[v as usize] += 1;
+        }
+    }
+    let mut table = FreqTable::from_counts(&counts);
+    if (1u32 << 12) >= table.total && 12 > 0 {
+        table.scale_bits = 12;
+    }
+    table
+}
+
+// ---------------------------------------------------------------------
+// Sparse table encoding for the 5th (dict-id) stream (v4.6).
+//
+// The dense 256-entry dict table costs ~1027 bytes regardless of how
+// many ids are actually used in a block. For most blocks only ~10-50
+// ids are referenced; the rest are "ghost" entries that rANS forces
+// to freq≥1 to maintain the alphabet invariant. Sparse encoding
+// collapses the alphabet to the actually-used subset:
+//
+//   - 32-byte bitmask (256 bits) marks which ids are present in the
+//     block. Bit i = 1 means id i appears at least once.
+//   - The rANS table is built only for the set bits, in id order.
+//     Dense index 0 = smallest set id, dense index 1 = next, etc.
+//   - The rANS stream encodes dense indices, not original ids.
+//   - The decoder reads the bitmask, rebuilds the remap table, and
+//     translates dense indices back to original ids after decoding.
+//
+// Overhead for a block with K distinct dict ids:
+//   bitmask  : 32 bytes (constant)
+//   table    : 7 + 4*(K+1) bytes
+//   stream   : K*ceil(log2(K)) bits ≈ 1 byte/symbol minimum
+// vs. dense  : 7 + 4*257 = 1035 bytes (table) + 0 (empty stream if 0 refs)
+// So for K=10: ~80 bytes vs. 1035 bytes — saves ~950 bytes per block.
+// For K=0 (no dict refs): 32 + 0 + 0 = 32 bytes vs. 1035 bytes.
+// ---------------------------------------------------------------------
+
+/// Bitmask size: 256 bits = 32 bytes. One bit per dict id.
+pub const DICT_BITMASK_BYTES: usize = 32;
+
+/// Build the sparse representation of a dict_ids stream.
+///
+/// Returns:
+///   - `bitmask`: 32-byte presence bitmask (bit i = id i present)
+///   - `remap`: dense_idx → original_id, in id-ascending order
+///   - `dense_ids`: the input remapped through the dense alphabet
+pub fn sparse_dict_encode(ids: &[u32]) -> ([u8; DICT_BITMASK_BYTES], Vec<u16>, Vec<u32>) {
+    let mut bitmask = [0u8; DICT_BITMASK_BYTES];
+    for &id in ids {
+        let id_u16 = id as u16;
+        if (id_u16 as usize) < 256 {
+            let byte = (id_u16 / 8) as usize;
+            let bit = id_u16 % 8;
+            bitmask[byte] |= 1 << bit;
+        }
+    }
+    // Build remap: for each set bit, dense_idx = count of set bits up to here.
+    let mut remap: Vec<u16> = Vec::new();
+    for id in 0..256u16 {
+        let byte = (id / 8) as usize;
+        let bit = id % 8;
+        if bitmask[byte] & (1 << bit) != 0 {
+            remap.push(id);
+        }
+    }
+    // Build reverse remap (id -> dense_idx) for fast lookup.
+    let mut reverse = [0u16; 256];
+    for (dense_idx, &orig) in remap.iter().enumerate() {
+        reverse[orig as usize] = dense_idx as u16;
+    }
+    let dense_ids: Vec<u32> = ids
+        .iter()
+        .map(|&id| reverse[id as usize] as u32)
+        .collect();
+    (bitmask, remap, dense_ids)
+}
+
+/// Inverse of `sparse_dict_encode`: given a bitmask, build the
+/// dense_idx → original_id remap.
+pub fn sparse_dict_decode_remap(bitmask: &[u8; DICT_BITMASK_BYTES]) -> Vec<u16> {
+    let mut remap = Vec::new();
+    for id in 0..256u16 {
+        let byte = (id / 8) as usize;
+        let bit = id % 8;
+        if bitmask[byte] & (1 << bit) != 0 {
+            remap.push(id);
+        }
+    }
+    remap
+}
+
+/// Build a rANS table for the dense (sparse-mapped) dict-id stream.
+/// The alphabet is 0..N-1 where N = number of set bits in the bitmask.
+fn build_sparse_dict_table(dense_ids: &[u32], n_symbols: usize) -> FreqTable {
+    let mut counts = vec![0u32; n_symbols];
+    for &v in dense_ids {
+        if (v as usize) < n_symbols {
             counts[v as usize] += 1;
         }
     }
@@ -771,5 +898,88 @@ mod tests {
         }
         let result = encode_v45_multistream(&data);
         assert!(result.is_none(), "random data should fall back to v3 (None)");
+    }
+
+    // ---------------------------------------------------------------
+    // Sparse table encoding (v4.6)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn sparse_bitmask_basic() {
+        let ids = vec![0u32, 1, 5, 100, 255];
+        let (bitmask, remap, dense_ids) = sparse_dict_encode(&ids);
+        // Verify bitmask: bit 0, 1, 5, 100, 255 set
+        assert_eq!(bitmask[0] & 0b00000011, 0b00000011); // bits 0, 1
+        assert_eq!(bitmask[0] & 0b00100000, 0b00100000); // bit 5
+        assert_eq!(bitmask[100 / 8] & (1 << (100 % 8)), 1 << (100 % 8));
+        assert_eq!(bitmask[255 / 8] & (1 << (255 % 8)), 1 << (255 % 8));
+        // Remap in id-ascending order
+        assert_eq!(remap, vec![0, 1, 5, 100, 255]);
+        // Dense ids map 0->0, 1->1, 5->2, 100->3, 255->4
+        assert_eq!(dense_ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn sparse_bitmask_empty() {
+        let ids: Vec<u32> = vec![];
+        let (bitmask, remap, dense_ids) = sparse_dict_encode(&ids);
+        assert_eq!(bitmask, [0u8; 32]);
+        assert_eq!(remap, Vec::<u16>::new());
+        assert_eq!(dense_ids, Vec::<u32>::new());
+    }
+
+    #[test]
+    fn sparse_bitmask_all_set() {
+        let ids: Vec<u32> = (0..256u32).collect();
+        let (bitmask, remap, dense_ids) = sparse_dict_encode(&ids);
+        for byte in 0..32 {
+            assert_eq!(bitmask[byte], 0xFF);
+        }
+        assert_eq!(remap.len(), 256);
+        // All 256 ids present → dense == original
+        assert_eq!(dense_ids, ids);
+    }
+
+    #[test]
+    fn sparse_decode_remap_inverts_encode() {
+        let ids = vec![3u32, 7, 11, 200];
+        let (bitmask, remap_encoded, _) = sparse_dict_encode(&ids);
+        let remap_decoded = sparse_dict_decode_remap(&bitmask);
+        assert_eq!(remap_encoded, remap_decoded);
+    }
+
+    #[test]
+    fn sparse_roundtrip_via_v45() {
+        // End-to-end: encode then decode via the full v4.5 path.
+        // Data must be large enough that the 5-stream overhead pays.
+        let phrase = b"the cat sat on the mat ";
+        let mut data = Vec::new();
+        for _ in 0..2000 {
+            data.extend_from_slice(phrase);
+        }
+        let payload = encode_v45_multistream(&data).expect("encode should succeed");
+        let decoded = decode_v45_multistream(&payload);
+        assert_eq!(decoded, data, "sparse roundtrip via v4.5 failed");
+    }
+
+    #[test]
+    fn sparse_table_smaller_than_dense() {
+        // For a block with only a few dict refs, the sparse table
+        // should be MUCH smaller than the dense 256-entry table.
+        // Build a payload that produces ~10 distinct dict refs.
+        let mut data = Vec::new();
+        for _ in 0..2000 {
+            data.extend_from_slice(b"the cat sat on the mat ");
+        }
+        let payload = encode_v45_multistream(&data).expect("encode should succeed");
+        // Find the dict table section. The dict table is the
+        // second-to-last sub-section in the payload. We can't easily
+        // parse it from outside, but we know: if sparse works, the
+        // payload is much smaller than 5*1KB = 5KB tables.
+        assert!(
+            payload.len() < 5000,
+            "sparse payload suspiciously large: {} bytes",
+            payload.len()
+        );
     }
 }

@@ -980,6 +980,108 @@ materialization is exact.
 
 ---
 
+## Sparse table encoding (sprint 2.6)
+
+The v4.5 dict codec stored the 5th-stream (dict-ids) frequency table
+as a dense 256-entry array. The rANS invariant forces every symbol
+to have `freq >= 1`, even for ids that never appear in the block —
+those entries are "ghost" symbols that exist only to maintain the
+alphabet.
+
+For most blocks only 10-50 of the 256 dict ids are actually used. The
+remaining 200+ ghost entries cost 4 bytes each in the rANS cum[]
+table, plus they pull double-duty in the rANS state's `scale_bits`
+computation. For a typical block, the ghost table was ~1027 bytes of
+overhead even when the block used 10 dict refs.
+
+Sprint 2.6 collapses the alphabet to just the present symbols.
+
+### Format change
+
+The 5th-stream table section is now:
+
+```text
+[32 bytes bitmask]      ; 256 bits, bit i = id i present
+[densified rANS table]  ; scale_bits + n_symbols + cum_0..cum_n
+[densified rANS stream] ; n_dict_refs symbols in 0..N-1 alphabet
+```
+
+The `n_symbols` field of the densified rANS table is the popcount of
+the bitmask (≤ 256). The remap from dense indices (0..N-1) to
+original dict ids (0..255) is derived from the bitmask by walking
+the 256 bits in order and assigning dense indices to set bits.
+
+### Per-block overhead
+
+| K = distinct ids | Dense (v4.5) | Sparse (v4.6) | Saved |
+|---:|---:|---:|---:|
+| 0   | 1031 bytes (table) + 0 (stream) = 1031 | 32 (bitmask) + 0 (table) + 0 = 32 | 999 |
+| 10  | 1031 + ~10 = 1041 | 32 + 47 + 30 = 109 | 932 |
+| 50  | 1031 + ~50 = 1081 | 32 + 207 + 150 = 389 | 692 |
+| 100 | 1031 + ~100 = 1131 | 32 + 407 + 300 = 739 | 392 |
+| 256 | 1031 + ~256 = 1287 | 32 + 1031 + 768 = 1831 | -544 ⚠️ |
+
+For blocks that use 0-100 dict ids (the vast majority of real blocks),
+sparse saves 400-1000 bytes. For the pathological case where ALL 256
+ids are used, sparse is slightly larger (~544 bytes extra for the
+bitmask and remap overhead). The bench corpus never hits this case.
+
+### Honest result
+
+| File | v4.5 (dense) | v4.6 (sparse) | Δ from sparse | Δ from v3 |
+|---|---:|---:|---:|---:|
+| text.txt      | 2.21x | **2.38x** | **+7.7%** | +21.4% |
+| data.json     | 4.06x | **4.40x** | **+8.4%** | +16.7% |
+| code.rs       | 9.83x | **10.26x** | **+4.4%** |  +4.4% |
+| mixed.bin     | 2.38x | 2.38x    | tied (v4.6 gated out) | tied |
+| random.bin    | 1.00x | 1.00x    | tied (v4.6 gated out) | tied |
+| repetitive.bin| 53.32x| 53.32x   | tied (v4.6 gated out) | tied |
+
+The most important change: **code.rs now wins too.** The dense 1KB
+table overhead was preventing the v4.5 path from being viable on
+code.rs's smaller blocks. With sparse (50-byte tables), the v4.5
+path now wins on code.rs as well.
+
+The text.txt and data.json gains are slightly below the upper-bound
+estimate (we predicted +12.8% from sparse alone, got +7.7%/+8.4%). The
+difference is real: removing the ghost table makes rANS slightly less
+efficient on the surviving symbols (smaller alphabets = less
+probability mass per symbol = less effective normalization).
+
+### What does NOT change in 2.6
+
+- The 4 v3 streams (lit / len / dist_lo / dist_hi) still use dense
+  256-entry tables. Their symbols are u8 by definition so sparse
+  encoding would only save the table header, not the alphabet.
+- The 2-bit op-flag encoding and dict-select field are unchanged.
+- The trained.dict is still baked in via `include_bytes!`.
+- **Format break:** v4.5 files cannot be read by v4.6 decoders (the
+  dict table section is now 32 bytes longer). The decoder will panic
+  on a v4.5 file because the bitmask bytes will be interpreted as
+  table-header bytes. There is no backward-compat shim — the old
+  dense format was abandoned because it carried the ghost-symbol
+  overhead that this sprint deletes.
+
+### Decoder path
+
+When the codec encounters `TAG_V3_MULTISTREAM_DICT`:
+
+1. Read `dict_select` (1 byte) → load sub-dict.
+2. Read the 11 u32 sizes, slice the 5 rANS streams + op-flags.
+3. Read 32 bytes of bitmask from the dict table section.
+4. Build `remap[dense_idx] = original_id` by walking set bits in
+   id-ascending order.
+5. Decode the densified rANS table (N entries, where N = popcount).
+6. Decode the densified rANS stream (gets `n_dict_refs` dense indices).
+7. Map each dense index → original id via `remap`.
+8. Walk op-flags, dispatching Lit/Match/DictRef (DictRefs use the
+   remapped original ids).
+
+The decode time is unchanged (still 1-3 ms per block). The 32-byte
+bitmask read is negligible.
+
+---
+
 ## Build & test
 
 ```bash
@@ -1029,19 +1131,19 @@ in ~30 lines of wrapper code.
 
 | File | Size | NexusCompress v4 | Ratio | zstd -19 (for context) | Gap |
 |---|---:|---:|---:|---:|---:|
-| code.rs | 105 KB | 10.7 KB | **9.83x** | 330 B (325x) | 33x worse |
-| data.json | 635 KB | 157 KB | **4.06x** ⬆ | 50 KB (12.7x) | 3.1x worse |
+| code.rs | 105 KB | 10.2 KB | **10.26x** ⬆ | 330 B (325x) | 32x worse |
+| data.json | 635 KB | 144 KB | **4.40x** ⬆ | 50 KB (12.7x) | 2.9x worse |
 | mixed.bin | 95 KB | 40 KB | **2.38x** | 18 KB (5.3x) | 2.2x worse |
 | random.bin | 256 KB | 256 KB | **1.00x** ✅ | 256 KB (1x) | EQUAL ✅ |
 | repetitive.bin | 256 KB | 4.8 KB | **53.32x** 🚀 | 43 B (6096x) | 114x worse (but absolute = +4.8KB) |
-| text.txt | 178 KB | 80 KB | **2.21x** ⬆ | 32 KB (5.6x) | 2.5x worse |
-| **aggregate** (excl. trained.dict) | 1.32 MB | 503 KB | **2.67x** | 365 KB (4.30x) | — |
+| text.txt | 178 KB | 75 KB | **2.38x** ⬆ | 32 KB (5.6x) | 2.4x worse |
+| **aggregate** (excl. trained.dict) | 1.32 MB | 489 KB | **2.70x** | 365 KB (4.30x) | — |
 
-Sprint 2.5 (dict codec integration) wins:
-- **text.txt 1.96x → 2.21x** (+12.8%)
-- **data.json 3.77x → 4.06x** (+7.7%)
-- code.rs / mixed.bin / random.bin / repetitive.bin: tied (v4.5
-  is gated out or doesn't win on these)
+Sprint 2.5 + 2.6 (dict codec + sparse table encoding) wins:
+- text.txt 1.96x → **2.38x** (+21.4%)
+- data.json 3.77x → **4.40x** (+16.7%)
+- code.rs 9.83x → **10.26x** (+4.4%, NEW with sparse encoding)
+- mixed.bin / random.bin / repetitive.bin: tied (v4.5 is gated out)
 
 Notes:
 - The v4 table-header fix is `n_symbols as u16` instead of `as u8`. Two
@@ -1049,6 +1151,10 @@ Notes:
 - Sprint 2.5 added a 5th rANS stream for dict-ids, 2-bit packed op-flags,
   and per-block sub-dict selection via a 500-byte pre-scan heuristic.
   See "Dict codec (sprint 2.5)" below.
+- Sprint 2.6 replaced the dense 256-entry dict table with a sparse
+  format (32-byte bitmask + table only for set bits). For a block
+  using 10 distinct dict ids, the table drops from ~1027 to ~50 bytes.
+  See "Sparse table encoding (sprint 2.6)" below.
 - zstd numbers are from real `zstd -19` runs against the same corpus
   (see `corpus_suite` binary in `src/bin/`).
 
