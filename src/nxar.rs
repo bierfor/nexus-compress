@@ -353,6 +353,32 @@ pub fn peek_archive(archive: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
     Ok(entries)
 }
 
+/// Read a file from disk and peek at its NXAR manifest. This is the
+/// fast path used by the UI when the user picks a .nxar via the
+/// Tauri dialog (which returns a path) instead of the HTML5 file
+/// input (which returns bytes and forces a slow IPC transfer).
+pub fn peek_archive_file(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read failed: {}", e))?;
+    peek_archive(&bytes)
+}
+
+/// Read a file from disk, peek the manifest, and (if `extract_to`
+/// is Some) extract to that directory. Combines peek + extract
+/// into a single disk-side operation so the entire archive bytes
+/// never cross the IPC boundary.
+pub fn peek_and_extract_file(
+    path: &Path,
+    extract_to: Option<&Path>,
+) -> Result<(Vec<ArchiveEntry>, Option<DirectoryResult>), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read failed: {}", e))?;
+    let entries = peek_archive(&bytes)?;
+    let result = match extract_to {
+        Some(out) => Some(decompress_directory(&bytes, out)?),
+        None => None,
+    };
+    Ok((entries, result))
+}
+
 /// Deserialize NXAR bytes into (entries, payloads).
 fn deserialize_nxar(archive: &[u8]) -> Result<(Vec<ArchiveEntry>, Vec<Vec<u8>>), String> {
     if archive.len() < 12 {

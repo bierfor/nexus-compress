@@ -457,6 +457,27 @@ pub fn peek_archive(archive: &[u8]) -> ApiResult<crate::nxar::DirectoryResult> {
     })
 }
 
+/// Peek an NXAR archive by reading from a file path. The file is
+/// read from disk in Rust, so the entire archive bytes never
+/// cross the IPC boundary (avoids the multi-second JSON
+/// serialization for large archives).
+pub fn peek_archive_file(path: &Path) -> ApiResult<Vec<crate::nxar::ArchiveEntry>> {
+    crate::nxar::peek_archive_file(path)
+        .map_err(|e| ApiError::new("archive.io", e))
+}
+
+/// Peek + extract in one call. Reads the archive from `path`,
+/// peeks the manifest, and (if `extract_to` is Some) extracts
+/// to that directory. The combined operation reads the file
+/// from disk only once.
+pub fn peek_and_extract_file(
+    path: &Path,
+    extract_to: Option<&Path>,
+) -> ApiResult<(Vec<crate::nxar::ArchiveEntry>, Option<crate::nxar::DirectoryResult>)> {
+    crate::nxar::peek_and_extract_file(path, extract_to)
+        .map_err(|e| ApiError::new("archive.io", e))
+}
+
 /// Open a path in the OS file manager (Finder on macOS, Explorer
 /// on Windows, xdg-open on Linux). Used by the UI's
 /// "open extracted folder" button.

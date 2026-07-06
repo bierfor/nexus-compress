@@ -185,6 +185,39 @@ pub async fn decompress_directory_cmd(
     .map_err(|e| format!("internal: spawn_blocking join failed: {}", e))?
 }
 
+/// Peek at an NXAR archive by reading from a FILE PATH (not via IPC).
+///
+/// This is the fast path: the file is read from disk in Rust, so
+/// the entire archive bytes never cross the IPC boundary. For a
+/// 318 MB archive, the IPC-based peek would JSON-serialize 318 MB
+/// of bytes (~30 seconds); this version is just a 318 MB read
+/// from disk (~0.3 seconds on SSD).
+#[tauri::command]
+pub async fn peek_archive_file_cmd(path: String) -> Result<Vec<api::ArchiveEntry>, String> {
+    let p = std::path::PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || to_ipc(api::peek_archive_file(&p)))
+        .await
+        .map_err(|e| format!("internal: spawn_blocking join failed: {}", e))?
+}
+
+/// Peek + extract in one call. Reads the archive from `path`,
+/// peeks the manifest, and (if `extract_to` is Some) extracts
+/// to that directory. Returns the manifest + the extract
+/// statistics.
+#[tauri::command]
+pub async fn peek_and_extract_file_cmd(
+    path: String,
+    extract_to: Option<String>,
+) -> Result<(Vec<api::ArchiveEntry>, Option<api::DirectoryResult>), String> {
+    let p = std::path::PathBuf::from(path);
+    let out = extract_to.map(std::path::PathBuf::from);
+    tauri::async_runtime::spawn_blocking(move || {
+        to_ipc(api::peek_and_extract_file(&p, out.as_deref()))
+    })
+    .await
+    .map_err(|e| format!("internal: spawn_blocking join failed: {}", e))?
+}
+
 /// Peek at an NXAR archive's manifest. Returns the file list
 /// (paths + sizes) without loading or extracting any payload.
 /// Used by the UI to populate the archive contents preview.

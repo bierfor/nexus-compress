@@ -127,12 +127,30 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
     header.write(&mut out).unwrap();
 
     let mut dedup = DedupTable::new();
-    for (block_id, block) in chunks.iter().enumerate() {
-        let block_id_u32 = block_id as u32;
+    // Sequential counter of unique (non-duplicate, non-empty) blocks.
+    // The decoder's cache[unique_counter] matches this counter, so
+    // Duplicate references resolve correctly. (Earlier versions used
+    // `block_id` (the chunk index) and the indices diverged whenever
+    // any block was marked as a duplicate, causing "Duplicate references
+    // unknown block id" panics on large files.)
+    let mut unique_counter: u32 = 0;
+    // Cache of unique-block contents, indexed by unique_counter. Used
+    // to verify hash matches when dedup.lookup returns Duplicate (to
+    // rule out FNV-1a collisions, which would cause silent corruption).
+    let mut unique_contents: Vec<Vec<u8>> = Vec::new();
 
-        // Dedup check
+    for (block_id, block) in chunks.iter().enumerate() {
+        let _ = block_id; // block_id is no longer the dedup key.
+
+        // Dedup check (only for non-empty blocks).
         if !block.is_empty() {
-            match dedup.lookup(block, block_id_u32) {
+            // The closure looks up the prior block's content by
+            // unique_id so we can verify the hash match. Returns
+            // None if the unique_id is out of range (defensive).
+            let original_content = |orig_id: u32| -> Option<Vec<u8>> {
+                unique_contents.get(orig_id as usize).cloned()
+            };
+            match dedup.lookup(block, unique_counter, original_content) {
                 DedupResult::Duplicate { original_id } => {
                     // Emit Duplicate block: payload = [tag][u32 original_id]
                     let mut payload = Vec::with_capacity(5);
@@ -148,7 +166,9 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
                     continue;
                 }
                 DedupResult::Unique { .. } => {
-                    // Continue to normal compression
+                    // The dedup table recorded this block at
+                    // unique_counter; we'll increment after the
+                    // normal-compression path below.
                 }
             }
         }
@@ -177,6 +197,13 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
             compressed_size: payload.len() as u32,
         };
         bh.write(&mut out).unwrap();
+
+        // Record this block as a new unique entry (indexed by
+        // unique_counter, the same index the decoder will use).
+        if !block.is_empty() {
+            unique_contents.push(block.to_vec());
+            unique_counter += 1;
+        }
         out.extend_from_slice(&payload);
     }
     out
@@ -748,5 +775,42 @@ mod tests {
         let c = compress(&data);
         let d = decompress(&c);
         assert_eq!(d, data, "repetitive roundtrip mismatch");
+    }
+
+    /// Regression test for the v2.9 "Duplicate references unknown
+    /// block id" panic. With 100+ blocks (many unique, many
+    /// duplicates), the encoder's `block_id` and the decoder's
+    /// `unique_id` would diverge and cause a panic. The fix
+    /// (sprint 2.9) uses a `unique_counter` that both sides
+    /// agree on, so the indices align.
+    #[test]
+    fn roundtrip_many_blocks_with_dups() {
+        // Build an input that produces many CDC blocks (each ~4 KB)
+        // with deterministic duplicates interspersed.
+        let mut data = Vec::new();
+        // 8 distinct 4 KB blocks, then their concatenation. CDC will
+        // chunk along the 4 KB boundaries and dedup will catch the
+        // repetitions.
+        let blocks: Vec<Vec<u8>> = (0..8)
+            .map(|i| {
+                let mut b = vec![0u8; 4 * 1024];
+                for (j, slot) in b.iter_mut().enumerate() {
+                    *slot = ((i * 31 + j) % 256) as u8;
+                }
+                b
+            })
+            .collect();
+        // Pattern: A B C D A B C D A B C D ...
+        for _ in 0..40 {
+            for b in &blocks {
+                data.extend_from_slice(b);
+            }
+        }
+        // The input is ~1.3 MB, which produces ~325 CDC blocks of 4 KB
+        // each. The dedup will mark most of them as duplicates.
+        let c = compress(&data);
+        let d = decompress(&c);
+        assert_eq!(d.len(), data.len(), "decoded length mismatch");
+        assert_eq!(d, data, "large-dedup roundtrip mismatch (sprint 2.9 bug)");
     }
 }
