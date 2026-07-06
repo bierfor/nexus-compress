@@ -67,6 +67,21 @@ impl Default for CompressionLevel {
     }
 }
 
+impl std::str::FromStr for CompressionLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "fast" => Ok(Self::Fast),
+            "premium" => Ok(Self::Premium),
+            other => Err(format!(
+                "unknown compression level '{}'; expected 'fast' or 'premium'",
+                other
+            )),
+        }
+    }
+}
+
 // -----------------------------------------------------------------------
 // Result types
 // -----------------------------------------------------------------------

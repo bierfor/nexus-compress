@@ -1606,24 +1606,97 @@ LZ77 pipeline that uses `encode_optimal` instead of `encode`.
 ## Build & test
 
 ```bash
-cargo build --release      # build binary at target/release/nexus
-cargo test --release       # run all unit tests
-cargo bench                # run criterion benchmarks (skeleton, not yet populated)
-./target/release/nexus bench   # run internal benchmark against corpus/
+cargo build --release                          # lib + CLI binaries
+cargo test --release                           # 140 lib + 5 v4 tests
+cargo build --release --bin nexus-rar \
+    --features tauri-app                       # desktop GUI (Tauri 2)
+cargo bench                                    # criterion benches
+./target/release/corpus_suite                  # corpus bench vs gzip/zstd
 ```
 
-21 unit tests cover: rANS roundtrip (uniform, skewed, random, long, rebuild),
-LZ77 roundtrip (text, long, random), content classifier (text, random,
-structured), FNV-1a hash known test vectors + dedup table detection,
-codec end-to-end roundtrip (small text, empty, random, repetitive).
+140 lib + 5 v4 integration tests = 145 total. Covers: rANS
+roundtrip (uniform, skewed, random, long, rebuild), LZ77
+roundtrip (text, long, random, optimal), content classifier,
+FNV-1a hash vectors, codec end-to-end (small text, empty,
+random, repetitive), bit-cost model calibration
+(sprint 2.9 v4 constants), optimal-vs-lazy correctness,
+Gear table integrity, CDC determinism + boundary stability,
+CDC `min`/`max` enforcement, gatekeeper entropy cases,
+LOCAL sub-dict roundtrips, sparse encoding for all 5
+streams, dict codec roundtrips (Trained/Code/JSON/Local),
+API roundtrips + serde + self_test + CompressionLevel.
 
-40 unit tests cover everything in v1.4, plus: bit-cost model
-calibration (literal vs match amortized), optimal-parsing roundtrips
-(text, long, random), optimal-vs-lazy correctness on synthetic
-patterns, optimal-degenerate protection (must use matches, not all
-literals), Gear table integrity, CDC determinism, CDC boundary
-stability under modification, CDC `min`/`max` enforcement,
-empty-input edge case.
+---
+
+## NexusRAR — desktop GUI (Phase 2)
+
+`sprint 2.10+` adds a Tauri 2.x desktop application that
+wraps the v4 engine in a dark/cyberpunk GUI.
+
+### Layout
+
+```
+ui/
+├── index.html     # 3-panel layout: dropzone, controls, telemetry
+├── main.js        # vanilla ES2022 controller, talks to Rust via IPC
+└── styles.css     # dark cyberpunk theme: cyan #00f0ff + magenta #ff00aa
+```
+
+```
+src/
+├── tauri_app.rs       # Tauri builder + command registration
+└── tauri_commands.rs  # 5 IPC commands wrapping nexus_compress::api
+```
+
+### Build
+
+```bash
+cargo build --release --bin nexus-rar --features tauri-app
+./target/release/nexus-rar
+```
+
+The Tauri binary is ~5 MB (Rust + WKWebView), the UI is
+~30 KB of static files, no Node/bundler required.
+
+### IPC commands
+
+| Command                          | Wraps                                      |
+|----------------------------------|--------------------------------------------|
+| `compress_bytes_cmd`             | `api::compress_bytes`                      |
+| `decompress_bytes_cmd`           | `api::decompress_bytes`                    |
+| `compress_bytes_with_level_cmd`  | `api::compress_bytes_with_level` (Premium) |
+| `engine_info_cmd`                | `api::engine_info` (called on startup)     |
+| `self_test_cmd`                  | `api::self_test` (8KB canned sample)       |
+
+All CPU-bound commands use `tauri::async_runtime::spawn_blocking`
+so the UI stays at 60 FPS during compression.
+
+### UI features (v1)
+
+- **Dropzone** with drag-and-drop + click-to-browse
+- **Compression level slider**: Fast (lazy, default) / Premium
+  (experimental optimal DP)
+- **Action buttons**: compress, decompress, self-test
+- **Telemetry console** with timestamped log lines, color-coded
+  tags (info / ok / warn / err / rx / tx)
+- **Result strip** with original/compressed/ratio/time
+- **Engine features footer** showing the v4 capabilities
+  (entropy-gate, local-subdict, sparse-v3)
+- **Status pill** in the top bar (idle / working / ok / err)
+
+### Trade-offs / not-yet
+
+- **No file save dialog** (Tauri 2.x dialog plugin not yet wired
+  up — output is held in memory and shown in console).
+- **Folder support** is partial: the file input has
+  `webkitdirectory` but only the first file is processed.
+- **.icns / .ico bundle icons** not generated (only PNG for
+  dev builds). Add via `cargo tauri icon icons/icon.png`
+  before a release bundle.
+- **No CSP `unsafe-eval`** — the UI doesn't use eval; the
+  `script-src 'unsafe-inline'` allowance is for the inline
+  `<script>` blocks in `index.html` (none currently used)
+  or future inline event handlers.
 
 ---
 

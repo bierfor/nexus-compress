@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>NexusRAR — Hybrid Compressor</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- Top bar: logo + status pill -->
+      <header class="topbar">
+        <div class="brand">
+          <span class="logo-glyph">▣</span>
+          <span class="brand-name">NexusRAR</span>
+          <span class="brand-sub">v0.1.0 · hybrid compressor</span>
+        </div>
+        <div class="status-pill" id="status-pill">
+          <span class="status-dot" id="status-dot"></span>
+          <span class="status-text" id="status-text">starting…</span>
+        </div>
+      </header>
+
+      <!-- Main grid: dropzone (left) + telemetry (right) -->
+      <main class="grid">
+        <!-- LEFT: dropzone + controls -->
+        <section class="panel panel-dropzone">
+          <div class="panel-header">
+            <span class="panel-title">// source</span>
+            <span class="panel-hint" id="source-meta">no file</span>
+          </div>
+
+          <div
+            class="dropzone"
+            id="dropzone"
+            tabindex="0"
+            role="button"
+            aria-label="drop file here or click to browse"
+          >
+            <div class="dropzone-inner">
+              <div class="dropzone-icon">⤓</div>
+              <div class="dropzone-text">
+                <div class="dropzone-primary">
+                  drop file or folder<br /><span class="muted">or click to browse</span>
+                </div>
+                <div class="dropzone-secondary" id="dropzone-secondary">
+                  ready
+                </div>
+              </div>
+            </div>
+            <input
+              type="file"
+              id="file-input"
+              class="file-input"
+              multiple
+              webkitdirectory
+            />
+          </div>
+
+          <div class="controls">
+            <label class="control-label">
+              <span>compression level</span>
+              <span class="muted" id="level-desc">fast · lazy LZ77 + 5-stream rANS</span>
+            </label>
+            <div class="slider-wrap">
+              <input
+                type="range"
+                id="level-slider"
+                class="level-slider"
+                min="0"
+                max="1"
+                step="1"
+                value="0"
+              />
+              <div class="slider-ticks">
+                <span class="tick active" data-level="0">fast</span>
+                <span class="tick" data-level="1">premium</span>
+              </div>
+            </div>
+
+            <div class="action-row">
+              <button class="btn btn-primary" id="btn-compress" disabled>
+                compress
+              </button>
+              <button class="btn" id="btn-decompress" disabled>
+                decompress
+              </button>
+              <button class="btn btn-ghost" id="btn-self-test">
+                self-test
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- RIGHT: telemetry + result -->
+        <section class="panel panel-telemetry">
+          <div class="panel-header">
+            <span class="panel-title">// telemetry</span>
+            <span class="panel-hint" id="telemetry-meta">idle</span>
+          </div>
+
+          <div class="result-strip" id="result-strip" hidden>
+            <div class="result-cell">
+              <div class="result-label">original</div>
+              <div class="result-value" id="result-orig">—</div>
+            </div>
+            <div class="result-cell">
+              <div class="result-label">compressed</div>
+              <div class="result-value" id="result-comp">—</div>
+            </div>
+            <div class="result-cell result-ratio">
+              <div class="result-label">ratio</div>
+              <div class="result-value" id="result-ratio">—</div>
+            </div>
+            <div class="result-cell">
+              <div class="result-label">time</div>
+              <div class="result-value" id="result-time">—</div>
+            </div>
+          </div>
+
+          <div class="console" id="console" aria-live="polite"></div>
+        </section>
+      </main>
+
+      <!-- Bottom: engine features strip -->
+      <footer class="features" id="features">
+        <span class="muted">// engine</span>
+        <span class="muted">starting…</span>
+      </footer>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
