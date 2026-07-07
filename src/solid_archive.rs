@@ -133,13 +133,25 @@ fn apply_preprocessor(pre: Preprocessor, input: &[u8]) -> Vec<u8> {
 ///
 /// `lzma_level` is the LZMA preset (0..=9). 6 = balanced, 9 = max
 /// ratio (apples-to-apples with 7z `-mx=9`).
-pub fn compress(files: &[(String, Vec<u8>)], lzma_level: u32) -> Result<Vec<u8>, String> {
+///
+/// `progress` is called after each file is preprocessed, with
+/// `(file_index_done, total_files, current_file_name)`. Pass `|_,_,_| {}`
+/// if you don't need progress reporting (or use `compress_with_progress`).
+pub fn compress_with_progress<P>(
+    files: &[(String, Vec<u8>)],
+    lzma_level: u32,
+    mut progress: P,
+) -> Result<Vec<u8>, String>
+where
+    P: FnMut(usize, usize, &str),
+{
     // Step 1: preprocess each file, build the uncompressed solid
     // stream and the TOC in parallel.
     let mut entries: Vec<FileEntry> = Vec::with_capacity(files.len());
     let mut solid_uncompressed: Vec<u8> = Vec::new();
+    let total = files.len();
 
-    for (name, bytes) in files {
+    for (i, (name, bytes)) in files.iter().enumerate() {
         let pre = pick_preprocessor(name);
         let pre_bytes = apply_preprocessor(pre, bytes);
         let offset = solid_uncompressed.len() as u64;
@@ -153,6 +165,8 @@ pub fn compress(files: &[(String, Vec<u8>)], lzma_level: u32) -> Result<Vec<u8>,
             preprocessor: pre,
             solid_offset: offset,
         });
+        // Report progress after each file is in the solid stream.
+        progress(i + 1, total, name);
     }
 
     // Step 2: LZMA-compress the solid stream.
@@ -188,6 +202,12 @@ pub fn compress(files: &[(String, Vec<u8>)], lzma_level: u32) -> Result<Vec<u8>,
     }
     out.extend_from_slice(&lzma_compressed);
     Ok(out)
+}
+
+/// Backward-compatible wrapper that discards progress.
+#[inline]
+pub fn compress(files: &[(String, Vec<u8>)], lzma_level: u32) -> Result<Vec<u8>, String> {
+    compress_with_progress(files, lzma_level, |_, _, _| {})
 }
 
 /// Decompress a solid v6 archive, returning the (name, preprocessed

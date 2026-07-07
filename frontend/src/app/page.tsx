@@ -3,6 +3,8 @@
 import { useState, useCallback, useEffect } from "react";
 import { Dropzone } from "@/components/Dropzone";
 import { ActionToolbar, looksLikeArchive } from "@/components/ActionToolbar";
+import { ProgressBar, type Progress } from "@/components/ProgressBar";
+import { SaveTarget, defaultOutputFilename } from "@/components/SaveTarget";
 import { EntropyMonitor, type Metrics } from "@/components/EntropyMonitor";
 import { ConfigPanel, type Mode, type Strength } from "@/components/ConfigPanel";
 
@@ -44,7 +46,6 @@ async function tauriInvoke<T>(
   return await invoke(cmd, args);
 }
 
-/// Map (mode, strength) to a Tauri-callable backend string + LZMA level.
 function resolveBackend(
   mode: Mode,
   strength: Strength
@@ -66,8 +67,12 @@ export default function Home() {
   const [strength, setStrength] = useState<Strength>("balanced");
   const [status, setStatus] = useState<string>("idle");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedIsDir, setSelectedIsDir] = useState<boolean>(false);
   const [lastOutputPath, setLastOutputPath] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [progress, setProgress] = useState<Progress | null>(null);
+  // `saveDir` overrides the "next to input" default when set.
+  const [saveDir, setSaveDir] = useState<string | null>(null);
 
   // ---- Compress (explicit, on user click) ----
   const onCompress = useCallback(async () => {
@@ -75,10 +80,25 @@ export default function Home() {
     const { backend, lzma } = resolveBackend(mode, strength);
     setStatus("working");
     setErrorMsg(null);
+    setProgress({
+      phase: "reading",
+      current_file: basename(selectedPath),
+      files_done: 0,
+      files_total: 1,
+      bytes_done: 0,
+      bytes_total: 0,
+    });
     try {
       const r = await tauriInvoke<CompressTargetRow>(
         "compress_target_cmd",
-        { req: { path: selectedPath, backend, lzma_level: lzma } }
+        {
+          req: {
+            path: selectedPath,
+            backend,
+            lzma_level: lzma,
+            output_dir: saveDir,
+          },
+        }
       );
       setMetrics({
         originalSize: r.original_size,
@@ -95,14 +115,26 @@ export default function Home() {
       console.error(e);
       setErrorMsg(String(e?.message ?? e));
       setStatus("err");
+    } finally {
+      // Keep the "done" progress visible for a beat so the user
+      // sees the 100% flash, then clear it.
+      setTimeout(() => setProgress(null), 1500);
     }
-  }, [selectedPath, mode, strength]);
+  }, [selectedPath, saveDir, mode, strength]);
 
-  // ---- Decompress (explicit) ----
+  // ---- Decompress ----
   const onDecompress = useCallback(async () => {
     if (!selectedPath) return;
     setStatus("working");
     setErrorMsg(null);
+    setProgress({
+      phase: "reading",
+      current_file: basename(selectedPath),
+      files_done: 0,
+      files_total: 1,
+      bytes_done: 0,
+      bytes_total: 0,
+    });
     try {
       const r = await tauriInvoke<DecompressTargetRow>(
         "decompress_target_cmd",
@@ -110,8 +142,8 @@ export default function Home() {
       );
       setMetrics({
         originalSize: r.restored_size,
-        compressedSize: r.restored_size, // "size after" = restored bytes
-        ratio: 1.0, // no ratio for decompress
+        compressedSize: r.restored_size,
+        ratio: 1.0,
         compressMs: r.decompress_time_ms,
         nFiles: r.n_files,
         mode,
@@ -123,26 +155,30 @@ export default function Home() {
       console.error(e);
       setErrorMsg(String(e?.message ?? e));
       setStatus("err");
+    } finally {
+      setTimeout(() => setProgress(null), 1500);
     }
   }, [selectedPath, mode, strength]);
 
-  // ---- Open the saved output in Finder ----
+  // ---- Open saved output in Finder ----
   const onOpen = useCallback(async () => {
     if (!lastOutputPath) return;
     try {
       await tauriInvoke<void>("reveal_in_finder_cmd", { path: lastOutputPath });
     } catch (e: any) {
-      console.error(e);
       setErrorMsg(String(e?.message ?? e));
     }
   }, [lastOutputPath]);
 
-  // ---- Clear all state ----
+  // ---- Reset state (CLEAR) ----
   const onClear = useCallback(() => {
     setSelectedPath(null);
+    setSelectedIsDir(false);
     setLastOutputPath(null);
     setMetrics(null);
     setErrorMsg(null);
+    setProgress(null);
+    setSaveDir(null);
     setStatus("idle");
   }, []);
 
@@ -150,7 +186,10 @@ export default function Home() {
   const onPickFile = useCallback(async () => {
     try {
       const path = await tauriInvoke<string | null>("pick_file_cmd");
-      if (path) setSelectedPath(path);
+      if (path) {
+        setSelectedPath(path);
+        setSelectedIsDir(false);
+      }
     } catch (e: any) {
       setErrorMsg(String(e?.message ?? e));
       setStatus("err");
@@ -160,14 +199,45 @@ export default function Home() {
   const onPickFolder = useCallback(async () => {
     try {
       const path = await tauriInvoke<string | null>("pick_directory_cmd");
-      if (path) setSelectedPath(path);
+      if (path) {
+        setSelectedPath(path);
+        setSelectedIsDir(true);
+      }
     } catch (e: any) {
       setErrorMsg(String(e?.message ?? e));
       setStatus("err");
     }
   }, []);
 
-  // ---- Self-test (synthetic, no I/O) ----
+  // ---- Choose a save destination folder (native dialog) ----
+  const onPickSaveFolder = useCallback(async () => {
+    try {
+      const suggested =
+        defaultOutputFilename(selectedPath, mode, selectedIsDir) ||
+        "archive.nxs6";
+      const chosen = await tauriInvoke<string | null>(
+        "pick_save_location_cmd",
+        { req: { default_filename: suggested } }
+      );
+      if (!chosen) return; // user cancelled
+      // The user chose a specific FILE. We extract the dir part and
+      // use that as the save target.
+      const lastSlash = chosen.lastIndexOf("/");
+      const dir = lastSlash > 0 ? chosen.slice(0, lastSlash) : chosen;
+      setSaveDir(dir);
+      setErrorMsg(null);
+    } catch (e: any) {
+      setErrorMsg(String(e?.message ?? e));
+    }
+  }, [selectedPath, mode, selectedIsDir]);
+
+  // ---- Reset save target to "next to input" ----
+  const onResetSave = useCallback(() => {
+    setSaveDir(null);
+    setErrorMsg(null);
+  }, []);
+
+  // ---- Self-test ----
   const onSelfTest = useCallback(async () => {
     setStatus("working");
     setErrorMsg(null);
@@ -190,8 +260,38 @@ export default function Home() {
   }, [mode, strength]);
 
   // ---- Native Tauri drag-drop listener ----
-  // Selecting via drag-drop does NOT trigger any compression; the
-  // user clicks COMPRESS after the path is in selectedPath.
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlistenDrop: (() => void) | undefined;
+    let unlistenEnter: (() => void) | undefined;
+    (async () => {
+      try {
+        const eventMod = (window as any).__TAURI__?.event;
+        if (!eventMod?.listen) return;
+        unlistenDrop = await eventMod.listen(
+          "tauri://drag-drop",
+          (e: any) => {
+            const paths: string[] = e?.payload?.paths ?? [];
+            if (paths.length > 0) {
+              setSelectedPath(paths[0]);
+              // Heuristic: if path has no extension at the end, it
+              // might be a directory. The Rust side re-detects
+              // anyway via metadata when COMPRESS is clicked.
+              setSelectedIsDir(true);
+            }
+          }
+        );
+      } catch (e) {
+        console.error("failed to attach tauri drag-drop listener:", e);
+      }
+    })();
+    return () => {
+      if (unlistenDrop) unlistenDrop();
+      if (unlistenEnter) unlistenEnter();
+    };
+  }, []);
+
+  // ---- Progress event listener from Rust ----
   useEffect(() => {
     if (!isTauri) return;
     let unlisten: (() => void) | undefined;
@@ -200,14 +300,22 @@ export default function Home() {
         const eventMod = (window as any).__TAURI__?.event;
         if (!eventMod?.listen) return;
         unlisten = await eventMod.listen(
-          "tauri://drag-drop",
+          "compress-progress",
           (e: any) => {
-            const paths: string[] = e?.payload?.paths ?? [];
-            if (paths.length > 0) setSelectedPath(paths[0]);
+            const p = e?.payload;
+            if (!p) return;
+            setProgress({
+              phase: p.phase,
+              current_file: p.current_file ?? "",
+              files_done: Number(p.files_done ?? 0),
+              files_total: Number(p.files_total ?? 1),
+              bytes_done: Number(p.bytes_done ?? 0),
+              bytes_total: Number(p.bytes_total ?? 0),
+            });
           }
         );
       } catch (e) {
-        console.error("failed to attach tauri drag-drop listener:", e);
+        console.error("failed to attach progress listener:", e);
       }
     })();
     return () => {
@@ -221,7 +329,6 @@ export default function Home() {
 
   return (
     <main className="h-screen flex flex-col bg-bg-base">
-      {/* Title bar */}
       <header
         data-tauri-drag-region
         className="no-select h-9 flex items-center justify-between px-4 border-b border-bg-border bg-bg-card shrink-0"
@@ -237,16 +344,10 @@ export default function Home() {
             className={[
               "px-2 py-0.5 border",
               status === "ok" ? "border-matrix-500 text-matrix-500" : "",
-              status === "working"
-                ? "border-cyan-500 text-cyan-400"
-                : "",
+              status === "working" ? "border-cyan-500 text-cyan-400" : "",
               status === "err" ? "border-err text-err" : "",
-              status === "saved-elsewhere"
-                ? "border-amber-500 text-amber-400"
-                : "",
-              status === "idle"
-                ? "border-zinc-700 text-zinc-500"
-                : "",
+              status === "saved-elsewhere" ? "border-amber-500 text-amber-400" : "",
+              status === "idle" ? "border-zinc-700 text-zinc-500" : "",
             ].join(" ")}
           >
             {status}
@@ -254,14 +355,14 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Main grid: dropzone (left) | metrics + actions + config (right) */}
-      <div className="flex-1 grid grid-cols-3 gap-3 p-3 min-h-0">
+      <div className="flex-1 grid grid-cols-3 gap-3 p-3 min-h-0 overflow-y-auto">
         <div className="col-span-2 min-h-0 flex flex-col gap-3">
           <Dropzone
             onPickFile={onPickFile}
             onPickFolder={onPickFolder}
           />
-          {/* Selection / output strip below the dropzone */}
+
+          {/* Selection / output strip */}
           <div className="panel p-3 font-mono text-[10px] tracking-wider">
             <div className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
               <div className="metric-label">selected</div>
@@ -270,6 +371,11 @@ export default function Home() {
                   <>
                     <span className="text-cyan-400">▸</span>{" "}
                     <span title={selectedPath}>{selectedName}</span>
+                    {selectedIsDir && (
+                      <span className="ml-2 text-[9px] px-1 border border-cyan-500 text-cyan-400">
+                        DIR
+                      </span>
+                    )}
                     {looksLikeArchive(selectedPath ?? "") && (
                       <span className="ml-2 text-[9px] px-1 border border-magenta-500 text-magenta-400">
                         ARCHIVE
@@ -298,10 +404,20 @@ export default function Home() {
               </div>
             </div>
           </div>
+
+          {/* Progress bar — only visible while compressing */}
+          {progress && <ProgressBar progress={progress} />}
         </div>
 
-        {/* Right column */}
-        <div className="col-span-1 min-h-0 flex flex-col gap-3 overflow-y-auto">
+        <div className="col-span-1 min-h-0 flex flex-col gap-3">
+          <SaveTarget
+            selectedPath={selectedPath}
+            isDirectory={selectedIsDir}
+            mode={mode}
+            outputDir={saveDir}
+            onPickFolder={onPickSaveFolder}
+            onReset={onResetSave}
+          />
           <ActionToolbar
             selectedPath={selectedPath}
             lastOutputPath={lastOutputPath}
@@ -324,7 +440,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Status bar */}
       <footer className="no-select h-7 border-t border-bg-border bg-bg-card flex items-center justify-between px-4 text-[10px] font-mono tracking-widest uppercase shrink-0 gap-4">
         <div className="text-zinc-500 truncate min-w-0">
           {lastOutputPath

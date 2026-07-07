@@ -21,6 +21,7 @@ fn main() {
             commands::compress_target_cmd,
             commands::decompress_target_cmd,
             commands::reveal_in_finder_cmd,
+            commands::pick_save_location_cmd,
             commands::backend_info_cmd,
             commands::engine_info_cmd,
             commands::self_test_cmd,

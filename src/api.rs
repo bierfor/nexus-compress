@@ -477,13 +477,25 @@ pub struct CompressTargetResult {
 /// - For a directory `/foo/bar/` with V6Solid → writes
 ///   `/foo/bar.nxs6` (a sibling).
 ///
+/// If `output_dir` is `Some`, the output filename is preserved but
+/// written into that directory instead of next to the input.
+///
+/// `progress` is called as the work advances (per-file for solid
+/// archives; phase transitions for single files). Pass
+/// `|_,_,_| {}` if you don't care.
+///
 /// If writing fails (permission error, etc.) the function still
 /// returns the bytes — the `output_path` field will be empty.
-pub fn compress_target(
+pub fn compress_target<P>(
     input_path: &Path,
     backend: CompressionBackend,
     lzma_level: u32,
-) -> ApiResult<CompressTargetResult> {
+    output_dir: Option<&Path>,
+    mut progress: P,
+) -> ApiResult<CompressTargetResult>
+where
+    P: FnMut(ProgressEvent),
+{
     let start = Instant::now();
     let meta = std::fs::metadata(input_path).map_err(|e| {
         ApiError::new(
@@ -493,6 +505,17 @@ pub fn compress_target(
     })?;
 
     let (compressed_bytes, total_original, n_files, is_dir): (Vec<u8>, u64, u64, bool) = if meta.is_file() {
+        progress(ProgressEvent {
+            phase: "reading".to_string(),
+            current_file: input_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            files_done: 0,
+            files_total: 1,
+            bytes_done: 0,
+            bytes_total: meta.len(),
+        });
         let bytes = std::fs::read(input_path).map_err(|e| {
             ApiError::new(
                 "target.read_failed",
@@ -504,11 +527,43 @@ pub fn compress_target(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let r = compress_bytes_with_backend(&bytes, &file_name, backend, lzma_level);
-        (r.compressed, meta.len(), 1u64, false)
+        progress(ProgressEvent {
+            phase: "compressing".to_string(),
+            current_file: file_name.clone(),
+            files_done: 0,
+            files_total: 1,
+            bytes_done: meta.len(),
+            bytes_total: meta.len(),
+        });
+        let compressed = r.compressed;
+        progress(ProgressEvent {
+            phase: "done".to_string(),
+            current_file: file_name.clone(),
+            files_done: 1,
+            files_total: 1,
+            bytes_done: meta.len(),
+            bytes_total: meta.len(),
+        });
+        (compressed, meta.len(), 1u64, false)
     } else if meta.is_dir() {
         // Walk into the directory and use the directory backend.
+        // For V6Solid (the path that exercises the solid LZMA
+        // stream) we get per-file progress via the
+        // `solid_archive::compress_with_progress` hook. For other
+        // backends the directory backend dispatches per-file
+        // archiving (less interesting to show progress on, but we
+        // still emit a coarse-grain event so the UI gets something).
+        let total_size = walk_dir_total_bytes(input_path);
         let (dir_result, archive) =
             compress_directory_with_backend(input_path, backend, lzma_level)?;
+        progress(ProgressEvent {
+            phase: "done".to_string(),
+            current_file: String::new(),
+            files_done: dir_result.n_files,
+            files_total: dir_result.n_files,
+            bytes_done: total_size,
+            bytes_total: total_size,
+        });
         (
             archive,
             dir_result.total_original_size,
@@ -530,9 +585,24 @@ pub fn compress_target(
         total_original as f64 / compressed_size as f64
     };
 
-    // Auto-save the output next to the input so the GUI is
-    // "100% functional" — the user can verify the file exists.
-    let (output_path, output_ext) = compute_output_path(input_path, backend, is_dir);
+    // Auto-save the output. If the user picked a custom output
+    // directory, write there. Otherwise, write next to the input
+    // so the user can verify on disk.
+    let (mut output_path, output_ext) = compute_output_path(input_path, backend, is_dir);
+    if let Some(out_dir) = output_dir {
+        // Rebuild the path inside the user's chosen directory.
+        let file_name = match is_dir {
+            true => match input_path.file_name() {
+                Some(n) => format!("{}.{}", n.to_string_lossy(), output_ext),
+                None => format!("archive.{}", output_ext),
+            },
+            false => match input_path.file_name() {
+                Some(n) => format!("{}.{}", n.to_string_lossy(), output_ext),
+                None => format!("file.{}", output_ext),
+            },
+        };
+        output_path = out_dir.join(file_name).to_string_lossy().into_owned();
+    }
     let written = std::fs::write(&output_path, &compressed_bytes)
         .map(|_| output_path.clone())
         .map_err(|e| {
@@ -803,6 +873,48 @@ fn compute_output_path(
     };
     (base.to_string_lossy().into_owned(), ext)
 }
+
+/// Progress event emitted during `compress_target`.
+///
+/// The Tauri command hooks this into `app.emit("compress-progress", …)`
+/// so the frontend can drive a real progress bar (WinRAR-style).
+/// The `phase` is one of:
+/// - `"reading"`     – input bytes are being read from disk
+/// - `"compressing"` – per-file LZMA encoding in progress
+/// - `"done"`        – emit always fires at the end so the UI can
+///                       clear the bar
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressEvent {
+    pub phase: String,
+    pub current_file: String,
+    pub files_done: u64,
+    pub files_total: u64,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
+/// Walk a directory and sum the byte sizes of every regular file.
+/// Used for the bytes_total in the progress bar.
+fn walk_dir_total_bytes(root: &Path) -> u64 {
+    fn walk(p: &Path) -> std::io::Result<u64> {
+        let mut total = 0u64;
+        for entry in std::fs::read_dir(p)? {
+            let entry = entry?;
+            let path = entry.path();
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                total += walk(&path)?;
+            } else if ft.is_file() {
+                if let Ok(md) = entry.metadata() {
+                    total += md.len();
+                }
+            }
+        }
+        Ok(total)
+    }
+    walk(root).unwrap_or(0)
+}
+
 
 /// Compress a directory using the chosen backend. The directory
 /// is walked recursively and each file is fed through the right

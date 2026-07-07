@@ -10,7 +10,8 @@
 
 use nexus_compress::api::{
     self, ApiResult, BackendInfo, CompressResult, CompressionBackend, CompressionLevel,
-    CompressTargetResult, DecompressResult, DecompressTargetResult, EngineInfo, SelfTestResult,
+    CompressTargetResult, DecompressResult, DecompressTargetResult, EngineInfo,
+    ProgressEvent, SelfTestResult,
 };
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -103,9 +104,18 @@ pub async fn compress_directory_with_backend_cmd(
 /// Args are bundled into a single JSON object `req` to avoid the
 /// Tauri 2.x arg-name conversion gotchas (camelCase vs snake_case
 /// for `lzma_level`). The frontend passes
-/// `{ req: { path, backend, lzma_level } }`.
+/// `{ req: { path, backend, lzma_level, output_dir } }`.
+///
+/// `output_dir` (optional) overrides the "next to input" default:
+/// the output filename is preserved but written into that dir.
+///
+/// Progress is emitted as `compress-progress` events for the JS
+/// progress bar.
 #[tauri::command]
-pub async fn compress_target_cmd(req: serde_json::Value) -> Result<CompressTargetResult, String> {
+pub async fn compress_target_cmd(
+    app: tauri::AppHandle,
+    req: serde_json::Value,
+) -> Result<CompressTargetResult, String> {
     let path = req
         .get("path")
         .and_then(|v| v.as_str())
@@ -119,14 +129,65 @@ pub async fn compress_target_cmd(req: serde_json::Value) -> Result<CompressTarge
         .get("lzma_level")
         .and_then(|v| v.as_u64())
         .unwrap_or(6) as u32;
+    let output_dir = req
+        .get("output_dir")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
     let backend = CompressionBackend::from_str(backend_str)
         .map_err(|e| format!("invalid_backend: {}", e))?;
     let p = PathBuf::from(path);
+
     tauri::async_runtime::spawn_blocking(move || {
-        to_ipc(api::compress_target(&p, backend, lzma_level))
+        let app_for_event = app.clone();
+        let cb = |event: ProgressEvent| {
+            use tauri::Emitter;
+            let _ = app_for_event.emit("compress-progress", &event);
+        };
+        to_ipc(api::compress_target(
+            &p,
+            backend,
+            lzma_level,
+            output_dir.as_deref(),
+            cb,
+        ))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))?
+}
+
+/// Open the native save dialog for the user to pick a destination
+/// file. Returns the chosen absolute path or `None` if cancelled.
+///
+/// Takes a single `{ req: { default_filename } }` JSON object to
+/// side-step Tauri's arg-name conversion gotchas (the user's
+/// `MISSING REQUIRED KEY DEFAULTFILENAME` error from earlier was
+/// the same camelCase/snake_case trap that bit `lzma_level`).
+#[tauri::command]
+pub async fn pick_save_location_cmd(
+    app: tauri::AppHandle,
+    req: serde_json::Value,
+) -> Result<Option<String>, String> {
+    let default_filename = req
+        .get("default_filename")
+        .and_then(|v| v.as_str())
+        .unwrap_or("archive.nxs")
+        .to_string();
+    use tauri::Manager;
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_focus();
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<Option<FilePath>>();
+    app.dialog()
+        .file()
+        .set_file_name(&default_filename)
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
+        .await
+        .map_err(|e| format!("dialog join failed: {}", e))?;
+    Ok(picked.and_then(|fp| fp.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
 }
 
 /// Decompress an archive by path. Auto-detects the format from the
