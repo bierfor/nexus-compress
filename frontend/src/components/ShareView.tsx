@@ -437,20 +437,36 @@ function ReceivePanel() {
       return resolvedDownloads!;
     }
     // 3. user typed a path with a placeholder basename — replace
-    //    just the basename with the real filename. We match a
-    //    broad set: `archivo_recibido*`, `*.bin`, `*.bin.*`, `*.*`.
-    //    We strip shell-glob trailing `.*` too.
+    //    just the basename with the real filename. We treat
+    //    these as placeholders:
+    //      * archivo_recibido* (legacy default)
+    //      * anything ending in .bin / .bin.* / .* (shell glob)
+    //      * anything matching "*.ext" or ".ext" (shell glob)
+    //      * "Untitled" / "Untitled.*" / "received" / "recibido"
+    //      * empty after stripping trailing ".*"
+    //      * "Untitled" (with or without extension/glob)
+    //
+    //    The big one the user reported: typing "Untitled.*" in the
+    //    save field was being kept literally. After this fix any
+    //    basename that ends with ".*" (a glob-style template) is
+    //    recognised as a placeholder and replaced.
     const base = await basename(p);
     const cleanedBase = base.replace(/\.\*+$/, ""); // strip trailing ".*"
+    const lower = base.toLowerCase();
+    const cleanedLower = cleanedBase.toLowerCase();
     const isPlaceholder =
-      base === "archivo_recibido" ||
-      base === "archivo_recibido.bin" ||
-      base === "received.bin" ||
-      base === "received" ||
-      cleanedBase === "" ||
-      cleanedBase === "recibido" ||
+      lower === "archivo_recibido" ||
+      lower === "archivo_recibido.bin" ||
+      lower === "received" ||
+      lower === "received.bin" ||
+      lower === "untitled" ||
+      lower === "untitled.*" ||
+      cleanedLower === "" ||
+      cleanedLower === "recibido" ||
+      cleanedLower === "untitled" ||
       base.endsWith(".bin") ||
       base.endsWith(".bin.*") ||
+      base.endsWith(".*") || // the catch-all: any glob suffix
       /^\*\.[a-z0-9]+$/i.test(cleanedBase) ||
       /^\.[a-z0-9]+$/i.test(cleanedBase);
     if (isPlaceholder && suggestedName) {
@@ -511,6 +527,11 @@ function ReceivePanel() {
       if (r.filename) setSuggestedName(r.filename);
       setStepIdx(4);
       setResult(r);
+      // Sprint 5.6.24: sync the input field with the actual
+      // path the backend wrote to. Previously the user's typed
+      // "Untitled.*" stayed in the field, confusing them after
+      // the success card appeared (which shows the new name).
+      if (r.output_path) setOutputPath(r.output_path);
     } catch (e: any) {
       setError(friendlyError(String(e?.message ?? e)));
       setStepErr(true);
