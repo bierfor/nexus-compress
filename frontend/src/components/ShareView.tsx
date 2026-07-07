@@ -29,6 +29,7 @@ interface SendStartResp {
 interface ReceiveResp {
   bytes_written: number;
   output_path: string;
+  filename?: string;
 }
 
 export function ShareView({
@@ -375,7 +376,15 @@ function SendTab({
 
 function ReceiveTab() {
   const [token, setToken] = useState("");
+  // Sprint 5.6.8: resolvedDownloads = actual filesystem path
+  // for ~/Downloads. The display value is "~/Downloads" but
+  // when we send to the backend we use resolvedDownloads +
+  // suggestedName so the mkdir + write actually works.
   const [outputPath, setOutputPath] = useState<string>("~/Downloads");
+  const [resolvedDownloads, setResolvedDownloads] = useState<string>("");
+  // Original filename from the sender. Used as the default
+  // save name so the user doesn't see "received.bin".
+  const [suggestedName, setSuggestedName] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ReceiveResp | null>(null);
@@ -388,6 +397,51 @@ function ReceiveTab() {
     if (t.startsWith("nx:3:")) return "v3" as const;
     return "unknown" as const;
   })();
+
+  // Sprint 5.6.8: resolve ~/Downloads to a real path on mount.
+  // Rust doesn't expand ~, so we MUST do it here.
+  useEffect(() => {
+    if (!isTauri) return;
+    let alive = true;
+    (async () => {
+      try {
+        const { homeDir, join } = await import("@tauri-apps/api/path");
+        const home = await homeDir();
+        if (!alive) return;
+        const dl = await join(home, "Downloads");
+        if (!alive) return;
+        setResolvedDownloads(dl);
+      } catch (e) {
+        console.error("homeDir resolve failed", e);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Sprint 5.6.8: parse the v1 token client-side to extract
+  // the original filename. v2/v3 tokens don't carry the name —
+  // the backend will fetch it from /meta during the receive
+  // and we'll display whatever name the backend returns.
+  useEffect(() => {
+    const t = token.trim();
+    if (kind !== "v1") {
+      setSuggestedName("");
+      return;
+    }
+    try {
+      const b64 = t.slice("nx:1:".length);
+      const json = JSON.parse(
+        atob(b64.replace(/-/g, "+").replace(/_/g, "/"))
+      );
+      if (typeof json.filename === "string" && json.filename) {
+        setSuggestedName(json.filename);
+      }
+    } catch {
+      // ignore — token may not be parseable yet
+    }
+  }, [token, kind]);
 
   const STEPS = kind === "v1"
     ? [
@@ -409,18 +463,43 @@ function ReceiveTab() {
     if (!isTauri) return;
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
+      // Sprint 5.6.8: default the save dialog to the actual
+      // ~/Downloads + suggested filename (from token / /meta),
+      // not the hardcoded "archivo_recibido.bin".
+      const { join } = await import("@tauri-apps/api/path");
+      let defaultPath = "archivo_recibido.bin";
+      if (resolvedDownloads && suggestedName) {
+        defaultPath = await join(resolvedDownloads, suggestedName);
+      } else if (resolvedDownloads) {
+        defaultPath = await join(resolvedDownloads, defaultPath);
+      }
       const r = await save({
-        defaultPath: "archivo_recibido.bin",
+        defaultPath,
         filters: [{ name: "All files", extensions: ["*"] }],
       });
       if (r) setOutputPath(r);
     } catch (e) {
       console.error(e);
     }
-  }, []);
+  }, [resolvedDownloads, suggestedName]);
+
+  // Sprint 5.6.8: compute the actual output_path that the
+  // backend will write to. If the user kept the default
+  // "~/Downloads" we substitute resolvedDownloads +
+  // suggestedName so we never hit the "IsADirectory /
+  // ENOENT" failure mode.
+  const computeActualOutputPath = useCallback(async (): Promise<string> => {
+    if (outputPath !== "~/Downloads") return outputPath;
+    if (!resolvedDownloads) {
+      throw new Error("home directory not resolved yet — wait a moment and retry");
+    }
+    const { join } = await import("@tauri-apps/api/path");
+    const name = suggestedName || "archivo_recibido.bin";
+    return await join(resolvedDownloads, name);
+  }, [outputPath, resolvedDownloads, suggestedName]);
 
   const onReceive = useCallback(async () => {
-    if (!token || !outputPath) return;
+    if (!token) return;
     setBusy(true);
     setError(null);
     setResult(null);
@@ -437,21 +516,33 @@ function ReceiveTab() {
     update(0, "done");
     update(1, "active");
 
+    let actualPath: string;
+    try {
+      actualPath = await computeActualOutputPath();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+      setBusy(false);
+      return;
+    }
+
     try {
       let r: ReceiveResp;
       if (kind === "v2" || kind === "v3") {
         r = await tauriInvoke<ReceiveResp>("p2p_receive_direct_cmd", {
           req: {
             token: token.trim(),
-            output_path: outputPath === "~/Downloads" ? `${outputPath}/received.bin` : outputPath,
+            output_path: actualPath,
             timeout_secs: 5,
           },
         });
       } else {
         r = await tauriInvoke<ReceiveResp>("p2p_receive_cmd", {
-          req: { token: token.trim(), output_path: outputPath },
+          req: { token: token.trim(), output_path: actualPath },
         });
       }
+      // After the receive, prefer the filename reported by the
+      // sender (it knows the truth) over what we guessed.
+      if (r.filename) setSuggestedName(r.filename);
       update(1, "done");
       update(2, "done");
       update(3, "done");
@@ -472,7 +563,7 @@ function ReceiveTab() {
     } finally {
       setBusy(false);
     }
-  }, [token, outputPath, kind, STEPS]);
+  }, [token, outputPath, kind, STEPS, computeActualOutputPath]);
 
   return (
     <div>
@@ -522,6 +613,14 @@ function ReceiveTab() {
             Cambiar
           </button>
         </div>
+        {/* Sprint 5.6.8: show the suggested filename (from token
+            or /meta) so the user knows what they'll receive and
+            where. Only relevant when outputPath is the default. */}
+        {suggestedName && outputPath === "~/Downloads" && (
+          <div className="text-zinc-500 text-[12px] mt-3">
+            Se guardará como <span className="text-zinc-300 font-medium">{suggestedName}</span> en ~/Downloads
+          </div>
+        )}
       </div>
 
       {/* Receive button */}
@@ -572,6 +671,9 @@ function ReceiveTab() {
           </div>
           <div className="text-white text-[28px] font-semibold tabular-nums mb-2">
             {prettyBytes(result.bytes_written)}
+          </div>
+          <div className="text-zinc-200 text-[15px] mb-2 font-medium">
+            {result.filename || "archivo"}
           </div>
           <div className="text-zinc-400 text-[12px] font-mono truncate">
             {result.output_path}

@@ -652,6 +652,9 @@ pub struct P2pReceiveResp {
     pub bytes_written: u64,
     /// Absolute path of the written file.
     pub output_path: String,
+    /// Sprint 5.6.8: original filename from the sender. None
+    /// if the sender didn't include it (older tokens).
+    pub filename: Option<String>,
 }
 
 #[tauri::command]
@@ -669,6 +672,7 @@ pub async fn p2p_receive_cmd(req: serde_json::Value) -> Result<P2pReceiveResp, S
     Ok(P2pReceiveResp {
         bytes_written: result.bytes_written,
         output_path: result.output_path.to_string_lossy().to_string(),
+        filename: result.filename,
     })
 }
 
@@ -702,6 +706,7 @@ pub async fn p2p_receive_direct_cmd(req: serde_json::Value) -> Result<P2pReceive
     Ok(P2pReceiveResp {
         bytes_written: result.bytes_written,
         output_path: result.output_path.to_string_lossy().to_string(),
+        filename: result.filename,
     })
 }
 

@@ -335,6 +335,12 @@ pub struct P2pToken {
     /// Hex-encoded SHA-256 of the full plaintext. Receiver
     /// verifies this at the end before declaring success.
     pub sha256: String,
+    /// Sprint 5.6.8: original filename of the file being sent.
+    /// Used by the receiver to suggest the right save name
+    /// (no more `archivo_recibido.bin`). Optional for backwards
+    /// compatibility with tokens from older senders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 impl P2pToken {
@@ -770,6 +776,10 @@ struct FileMeta {
     expected_sha256: [u8; 32],
     salt: [u8; 16],
     fhash: [u8; 32],
+    /// Sprint 5.6.8: original filename (basename of file_path).
+    /// Stored here so handle_meta can return it and the receiver
+    /// can suggest the right save name.
+    filename: String,
 }
 
 /// Result of a successful send session start: the token the
@@ -1161,6 +1171,16 @@ pub async fn start_direct_sender(
     let mut expected_sha256 = [0u8; 32];
     hex::decode_to_slice(expected_sha256_hex.as_bytes(), &mut expected_sha256)
         .map_err(|e| format!("hex decode sha256: {}", e))?;
+    // Sprint 5.6.8: pretty filename for the token + /meta.
+    // For dirs the wire filename is "dirname.nxs6" (we shipped
+    // the compressed archive); for files it's the original
+    // basename. The receiver uses this to suggest the right
+    // save name.
+    let wire_filename = if is_dir_input {
+        format!("{}.nxs6", input_label)
+    } else {
+        input_label.clone()
+    };
     let salt = random_salt();
     // fhash binds the session to the absolute path. If we
     // compressed a directory to a temp file, we want the session
@@ -1198,6 +1218,7 @@ pub async fn start_direct_sender(
             expected_sha256,
             salt,
             fhash,
+            filename: wire_filename.clone(),
         }),
         auth: auth.clone(),
     };
@@ -1248,6 +1269,7 @@ pub async fn start_direct_sender(
         fhash: hex::encode(fhash),
         size: plaintext_size,
         sha256: hex::encode(expected_sha256),
+        filename: Some(wire_filename.clone()),
     };
     // Sprint 5.5.3 Phase 2: best-effort UPnP port-forwarding.
     // If the router has UPnP enabled, the friend's device on a
@@ -1303,6 +1325,7 @@ pub async fn start_direct_sender(
         fhash: hex::encode(fhash),
         size: plaintext_size,
         sha256: hex::encode(expected_sha256),
+        filename: Some(wire_filename),
     };
 
     let (upnp_hole, _) = match upnp_outcome {
@@ -1452,6 +1475,13 @@ async fn fetch_meta_and_receive(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "/meta missing 'sha256'".to_string())?
         .to_string();
+    // Sprint 5.6.8: original filename from the sender. The
+    // receiver uses this to suggest the right save name
+    // instead of "received.bin".
+    let filename = meta
+        .get("filename")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let token_v1 = P2pToken {
         v: 3, // we accept any v in the parser
         url,
@@ -1460,6 +1490,7 @@ async fn fetch_meta_and_receive(
         fhash,
         size,
         sha256,
+        filename,
     };
     receive_send_file(token_v1, output_path).await
 }
@@ -1563,6 +1594,11 @@ pub async fn start_sender(
     let mut fhash = [0u8; 32];
     hex::decode_to_slice(fhash_hex.as_bytes(), &mut fhash)
         .map_err(|e| format!("hex decode fhash: {}", e))?;
+    // Sprint 5.6.8: filename for the token + /meta.
+    let wire_filename = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
 
     // 5. Begin SPAKE2 (sender = side B = responder).
     let kek = derive_kek(code.as_bytes(), &salt);
@@ -1580,6 +1616,7 @@ pub async fn start_sender(
             expected_sha256,
             salt,
             fhash,
+            filename: wire_filename.clone(),
         }),
         auth: auth.clone(),
     };
@@ -1629,6 +1666,7 @@ pub async fn start_sender(
         fhash: hex::encode(fhash),
         size: plaintext_size,
         sha256: hex::encode(expected_sha256),
+        filename: Some(wire_filename),
     };
     let token_compact = token.to_compact();
 
@@ -1650,6 +1688,11 @@ struct MetaResponse {
     size: u64,
     sha256: String,
     v: u8,
+    /// Sprint 5.6.8: original filename. Receiver uses this to
+    /// suggest the proper save name. None if the sender didn't
+    /// know it (older tokens).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
 }
 
 async fn handle_meta(State(state): State<SenderState>) -> Json<MetaResponse> {
@@ -1660,6 +1703,7 @@ async fn handle_meta(State(state): State<SenderState>) -> Json<MetaResponse> {
         size: meta.plaintext_size,
         sha256: hex::encode(meta.expected_sha256),
         v: 1,
+        filename: Some(meta.filename.clone()),
     })
 }
 
@@ -1818,6 +1862,10 @@ fn encrypted_file_stream(
 pub struct ReceiveResult {
     pub bytes_written: u64,
     pub output_path: PathBuf,
+    /// Sprint 5.6.8: original filename from the sender. The
+    /// UI uses this to display "Saved as: report.pdf"
+    /// instead of "Saved as: received.bin".
+    pub filename: Option<String>,
 }
 
 /// Run the receiver: parse the token, do the SPAKE2 handshake
@@ -1982,6 +2030,7 @@ pub async fn receive_send_file(
     Ok(ReceiveResult {
         bytes_written: total,
         output_path,
+        filename: token.filename.clone(),
     })
 }
 
@@ -2069,6 +2118,7 @@ mod tests {
             fhash: hex::encode([0u8; 32]),
             size: 12345,
             sha256: hex::encode([0u8; 32]),
+            filename: Some("report.pdf".to_string()),
         };
         let compact = original.to_compact();
         assert!(compact.starts_with("nx:1:"));
@@ -2178,6 +2228,7 @@ mod tests {
             expected_sha256,
             salt,
             fhash,
+            filename: "test.bin".to_string(),
         };
         let state = SenderState {
             spake: Arc::new(Mutex::new(Some((spake, t_b)))),
@@ -2207,6 +2258,7 @@ mod tests {
             fhash: hex::encode(fhash),
             size: original.len() as u64,
             sha256: hex::encode(expected_sha256),
+            filename: Some("test.bin".to_string()),
         };
         // 10. Run the receiver.
         let out_path = std::env::temp_dir().join(format!(
@@ -2346,6 +2398,7 @@ mod tests {
             expected_sha256,
             salt,
             fhash,
+            filename: "direct-test.bin".to_string(),
         };
         let state = SenderState {
             spake: Arc::new(Mutex::new(Some((spake, t_b)))),
@@ -2373,6 +2426,7 @@ mod tests {
             fhash: hex::encode(fhash),
             size: original.len() as u64,
             sha256: hex::encode(expected_sha256),
+            filename: Some("direct-test.bin".to_string()),
         };
         // 6. Receive.
         let out_path = std::env::temp_dir().join(format!(
