@@ -15,6 +15,8 @@ mod p2p_auth;
 mod p2p_config;
 #[path = "../upnp_hole.rs"]
 mod upnp_hole;
+#[path = "../archive_inspect.rs"]
+mod archive_inspect;
 
 use p2p_tunnel::{peek_filename, receive_direct_file, start_direct_sender};
 use std::time::Duration;
@@ -282,7 +284,7 @@ async fn main() {
     //     extract_entries with a subset only writes the chosen
     //     files.
     println!("[e2e] regression: archive inspection (WinRAR-style browsing)...");
-    let entries = p2p_tunnel::archive_inspect::list_entries(&out_folder)
+    let entries = crate::archive_inspect::list_entries(&out_folder)
         .expect("list entries");
     // tar archives contain directory entries alongside files,
     // and on some systems long-name entries get split into
@@ -313,7 +315,7 @@ async fn main() {
             std::process::id()
         ),
     ];
-    let written = p2p_tunnel::archive_inspect::extract_entries(
+    let written = crate::archive_inspect::extract_entries(
         &out_folder,
         &selective_dir,
         Some(selected.clone()),
@@ -338,6 +340,87 @@ async fn main() {
     );
     let _ = std::fs::remove_dir_all(&selective_dir);
     let _ = std::fs::remove_file(&out_folder);
+
+    // 12. .nxs6 (V6Solid) inspection regression (Sprint 5.6.20).
+    //     Verify list_solid_entries reads the .nxs6 TOC without
+    //     LZMA-decompressing the payload, and selective
+    //     extraction writes only the chosen entries.
+    println!("[e2e] regression: .nxs6 (V6Solid) central directory...");
+    let nxs6_src = std::env::temp_dir().join(format!(
+        "e2e_v3_nxs6_src_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&nxs6_src);
+    std::fs::create_dir(&nxs6_src).expect("mkdir nxs6 src");
+    for i in 0..4 {
+        std::fs::write(
+            nxs6_src.join(format!("binary_{}.dat", i)),
+            vec![(i as u8); 64 * 1024], // 64 KiB of deterministic data
+        )
+        .expect("write nxs6 file");
+    }
+    let (result, archive_bytes) = nexus_compress::api::compress_directory_with_backend(
+        &nxs6_src,
+        nexus_compress::api::CompressionBackend::V6Solid,
+        1,
+    )
+    .expect("v6solid compress");
+    let nxs6_path = std::env::temp_dir().join(format!(
+        "e2e_v3_solid_{}.nxs6",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&nxs6_path);
+    std::fs::write(&nxs6_path, &archive_bytes).expect("write nxs6");
+    // List
+    let entries_solid =
+        archive_inspect::list_entries(&nxs6_path).expect("list nxs6");
+    assert_eq!(
+        entries_solid.len(),
+        result.entries.len(),
+        "list_entries must match the in-memory TOC"
+    );
+    for e in &entries_solid {
+        assert!(e.size > 0);
+        assert!(!e.is_dir);
+    }
+    // Selective extract 2 of the 4
+    let selective_solid_dir = std::env::temp_dir().join(format!(
+        "e2e_v3_SOLID_OUT_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&selective_solid_dir);
+    let picks: Vec<String> = entries_solid
+        .iter()
+        .filter(|e| e.name.ends_with("binary_0.dat") || e.name.ends_with("binary_2.dat"))
+        .map(|e| e.name.clone())
+        .collect();
+    assert_eq!(picks.len(), 2);
+    let written = archive_inspect::extract_entries(
+        &nxs6_path,
+        &selective_solid_dir,
+        Some(picks.clone()),
+    )
+    .expect("extract nxs6 selective");
+    assert_eq!(written.len(), 2);
+    let mut read = std::fs::read_dir(&selective_solid_dir).expect("readdir");
+    let mut names: Vec<String> = read
+        .map(|x| x.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["binary_0.dat".to_string(), "binary_2.dat".to_string()]
+    );
+    // Verify byte content (raw preprocessor preserves bytes).
+    let b0 = std::fs::read(selective_solid_dir.join("binary_0.dat")).expect("read b0");
+    assert_eq!(b0, vec![0u8; 64 * 1024]);
+    println!(
+        "[e2e] .nxs6 inspection OK — listed {} entries, extracted 2 raw-bytes-verified",
+        entries_solid.len()
+    );
+    let _ = std::fs::remove_dir_all(&nxs6_src);
+    let _ = std::fs::remove_dir_all(&selective_solid_dir);
+    let _ = std::fs::remove_file(&nxs6_path);
     let out2 = std::env::temp_dir().join(format!(
         "e2e_v3_RECEIVED2_{}.html",
         std::process::id()

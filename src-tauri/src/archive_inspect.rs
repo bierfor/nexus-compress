@@ -25,12 +25,7 @@ pub struct ArchiveEntry {
     pub is_dir: bool,
 }
 
-/// Detect archive format by extension. Only formats with a
-/// readable central directory / TOC are supported for
-/// inspection + selective extraction. `.nxs6` and `.nxs` are
-/// V6Solid single-stream archives — they don't have a TOC,
-/// so they're returned as `solid` here and handled by the
-/// legacy single-file decompress path.
+/// Detect archive format by extension.
 pub fn detect_format(path: &Path) -> Result<&'static str, String> {
     let ext = path
         .extension()
@@ -39,9 +34,13 @@ pub fn detect_format(path: &Path) -> Result<&'static str, String> {
         .to_ascii_lowercase();
     match ext.as_str() {
         "tar" => Ok("tar"),
+        // .nxs6 / .nxs (V6Solid) carry their central directory
+        // at the FRONT of the file (MAGIC + version + count +
+        // per-entry header). parse_toc reads it without LZMA-
+        // decompressing the payload.
         "nxs6" | "nxs" => Ok("solid"),
         _ => Err(format!(
-            "unsupported archive format: .{} (supported: .tar; single-stream: .nxs6)",
+            "unsupported archive format: .{} (supported: .tar, .nxs6)",
             ext
         )),
     }
@@ -51,12 +50,7 @@ pub fn detect_format(path: &Path) -> Result<&'static str, String> {
 pub fn list_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
     match detect_format(path)? {
         "tar" => list_tar_entries(path),
-        "solid" => Err(
-            ".nxs6/.nxs are V6Solid single-stream archives — \
-             no central directory to browse. Use the legacy \
-             Decompress flow (full extraction) for these."
-                .to_string(),
-        ),
+        "solid" => list_solid_entries(path),
         other => Err(format!("unsupported format: {}", other)),
     }
 }
@@ -72,12 +66,7 @@ pub fn extract_entries(
         .map_err(|e| format!("mkdir output: {}", e))?;
     match detect_format(path)? {
         "tar" => extract_tar_entries(path, output_dir, selected),
-        "solid" => Err(
-            ".nxs6/.nxs are V6Solid single-stream archives — \
-             selective extraction not supported. Use the legacy \
-             Decompress flow (full extraction) for these."
-                .to_string(),
-        ),
+        "solid" => extract_solid_entries(path, output_dir, selected),
         other => Err(format!("unsupported format: {}", other)),
     }
 }
@@ -153,16 +142,39 @@ fn extract_tar_entries(
 }
 
 // --- nxs6 / nxs -----------------------------------------------------------
+//
+// .nxs6 (V6Solid) layout:
+//   [MAGIC "NXS6\n" 5 bytes][version 1 byte][n_entries 4 bytes]
+//   [per-entry header: name_len(2) + name + pre_size(8) +
+//                       original_size(8) + preprocessor(1) +
+//                       solid_offset(8)]
+//   [LZMA-compressed solid stream — concatenated preprocessed
+//    bytes of every file in offset order]
+//
+// Sprint 5.6.20: solid_archive::parse_toc walks the header in
+// O(entries) WITHOUT touching the LZMA stream, so we can list
+// entries instantly. For selective extraction we still need to
+// LZMA-decompress the solid block (one pass), but then we can
+// slice out only the entries the user asked for using their
+// solid_offset. This matches WinRAR/ZIP behaviour for solid
+// archives (full decompression is the only way to do selective).
 
-fn list_nxs6_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
-    let entries = nexus_compress::api::peek_archive_file(path)
-        .map_err(|e| format!("peek nxs6: {}", e))?;
+fn list_solid_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("read solid archive: {}", e))?;
+    let entries = nexus_compress::solid_archive::parse_toc(&bytes)
+        .map_err(|e| format!("parse solid toc: {}", e))?;
     Ok(entries
         .into_iter()
         .map(|e| {
-            let name = e.path.clone();
+            // The solid archive doesn't carry directories as
+            // entries — directories are implied by the path
+            // separators in file names. Mark paths ending in
+            // '/' as dirs (defensive — the producer shouldn't
+            // emit these today, but the parser tolerates them).
+            let name = e.name.clone();
             ArchiveEntry {
-                name: e.path,
+                name: e.name,
                 size: e.original_size,
                 is_dir: name.ends_with('/'),
             }
@@ -170,46 +182,62 @@ fn list_nxs6_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
         .collect())
 }
 
-fn extract_nxs6_entries(
+fn extract_solid_entries(
     path: &Path,
     output_dir: &Path,
     selected: Option<Vec<String>>,
 ) -> Result<Vec<String>, String> {
+    use nexus_compress::solid_archive::decompress as solid_decompress;
     let bytes = std::fs::read(path)
-        .map_err(|e| format!("read nxs6: {}", e))?;
-    // deserialize_nxar returns the manifest and the raw
-    // bytes of every entry in one pass. For selective
-    // extraction we only write the entries the caller asked
-    // for; for full extraction we write them all.
-    let (entries, payload_bytes) = nexus_compress::nxar::deserialize_nxar(&bytes)
-        .map_err(|e| format!("deserialize nxs6: {}", e))?;
+        .map_err(|e| format!("read solid archive: {}", e))?;
+    // Step 1: read the TOC (cheap — no LZMA).
+    let entries = nexus_compress::solid_archive::parse_toc(&bytes)
+        .map_err(|e| format!("parse solid toc: {}", e))?;
+    // Step 2: full LZMA decompression (one pass, mandatory for
+    // solid archives — same as WinRAR/ZIP). After this we
+    // have the preprocessed bytes of every entry concatenated
+    // in the order they were compressed. Per-entry offsets
+    // come from the TOC.
+    let (_entries, solid_uncompressed) = solid_decompress(&bytes)
+        .map_err(|e| format!("solid decompress: {}", e))?;
     let selected_set: Option<std::collections::HashSet<String>> =
         selected.map(|v| v.into_iter().collect());
     let mut written = Vec::new();
-    for (i, entry) in entries.iter().enumerate() {
-        let entry_path = entry.path.clone();
+    for e in &entries {
+        let entry_path = e.name.clone();
         if let Some(ref set) = selected_set {
             if !set.contains(&entry_path) {
                 continue;
             }
         }
         if entry_path.starts_with('/') || entry_path.contains("..") {
-            return Err(format!("unsafe path in nxs6: {}", entry_path));
+            return Err(format!("unsafe path in solid: {}", entry_path));
         }
+        // Directories in solid archives are implicit (carried
+        // as file paths with embedded slashes). Create the
+        // parent for each file.
         let dest = output_dir.join(&entry_path);
-        if entry_path.ends_with('/') {
-            std::fs::create_dir_all(&dest)
-                .map_err(|e| format!("mkdir: {}", e))?;
-            written.push(entry_path);
-        } else {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("mkdir parent: {}", e))?;
-            }
-            std::fs::write(&dest, &payload_bytes[i])
-                .map_err(|e| format!("write {}: {}", dest.display(), e))?;
-            written.push(entry_path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir parent: {}", e))?;
         }
+        // Slice the preprocessed bytes for this entry. For
+        // Raw files the bytes are unchanged; for Conservative /
+        // SwcAst preprocessors the extracted file is the
+        // minified version (V6's lossy step has no inverse).
+        let start = e.solid_offset as usize;
+        let end = start + e.pre_size as usize;
+        if end > solid_uncompressed.len() {
+            return Err(format!(
+                "solid entry '{}' extends past solid block ({} > {})",
+                entry_path,
+                end,
+                solid_uncompressed.len()
+            ));
+        }
+        std::fs::write(&dest, &solid_uncompressed[start..end])
+            .map_err(|e| format!("write {}: {}", dest.display(), e))?;
+        written.push(entry_path);
     }
     Ok(written)
 }
