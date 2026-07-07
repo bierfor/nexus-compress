@@ -11,6 +11,8 @@
 //! v4 format spec lives in `format.rs`. The entropy coder (`rans_v4`) is a
 //! thin wrapper over the well-tested `rans` crate (ryg_rans).
 
+pub mod api;
+pub mod ast_minify;
 pub mod cdc;
 pub mod classifier;
 pub mod codec;
@@ -25,8 +27,6 @@ pub mod minify;
 pub mod nxar;
 pub mod rans_v4;
 pub mod rle;
-
-pub mod api;
 
 pub use codec::{compress, compress_premium, decompress};
 pub use format::{BlockType, NexusHeader};
