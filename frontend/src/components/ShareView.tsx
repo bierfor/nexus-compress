@@ -360,10 +360,16 @@ function SendPanel({
 function ReceivePanel() {
   const { t } = useLocale();
   const [token, setToken] = useState("");
-  const [outputPath, setOutputPath] = useState("~/Downloads");
+  const [outputPath, setOutputPath] = useState("");
   const [resolvedDownloads, setResolvedDownloads] = useState("");
   const [resolvedHome, setResolvedHome] = useState("");
   const [suggestedName, setSuggestedName] = useState("");
+  // Sprint 5.6.25: tracks whether the user has manually typed
+  // in the destination field. While false, the field auto-syncs
+  // to `<resolvedDownloads>/<suggestedName>` whenever the
+  // filename becomes known. While true, the auto-sync is
+  // disabled so we don't clobber the user's chosen destination.
+  const [userEditedPath, setUserEditedPath] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ReceiveResp | null>(null);
@@ -392,18 +398,74 @@ function ReceivePanel() {
     })();
   }, []);
 
-  // Peek filename from v1 token
+// Peek filename from v1 token (parsed locally) and from v2/v3
+  // (probes the sender's /meta endpoint via p2p_peek_filename_cmd).
+  // Sprint 5.6.25: works for ALL token versions now, so the path
+  // field can auto-fill the moment the user pastes a token — no
+  // waiting for the receive round-trip to complete.
   useEffect(() => {
     const tk = token.trim();
-    if (!tk) { setSuggestedName(""); return; }
+    if (!tk) { setSuggestedName(""); setUserEditedPath(false); return; }
+    // Sprint 5.6.25: new token → reset the manual-edit flag so
+    // the auto-sync can populate the path field with the new
+    // file's destination. The user can re-override after.
+    setUserEditedPath(false);
     if (kind === "v1") {
       try {
         const b64 = tk.slice("nx:1:".length);
         const json = JSON.parse(atob(b64.replace(/-/g, "+").replace(/_/g, "/")));
         if (json.filename) setSuggestedName(json.filename);
       } catch {}
+      return;
+    }
+    if (kind === "v2" || kind === "v3") {
+      // Probe the sender's /meta to read the original filename.
+      // We don't wait — fire-and-forget. The path field will
+      // auto-update if the user hasn't manually edited it yet.
+      let cancelled = false;
+      (async () => {
+        try {
+          const r = await tauriInvoke<{ filename: string | null }>(
+            "p2p_peek_filename_cmd",
+            { req: { token: tk, timeout_secs: 3 } }
+          );
+          if (!cancelled && r?.filename) setSuggestedName(r.filename);
+        } catch {
+          // Sender not reachable / token stale — silently skip.
+          // The path field will still default to ~/Downloads
+          // with the suggestedName being empty (so just the dir).
+        }
+      })();
+      return () => { cancelled = true; };
     }
   }, [token, kind]);
+
+  // Sprint 5.6.25: auto-sync outputPath with the resolved final
+  // destination. The path field is ALWAYS the real final path
+  // the backend will write to — no sentinels, no placeholder
+  // detection, no exception lists. When suggestedName arrives
+  // AND the user hasn't manually overridden the destination,
+  // we populate the field with `<resolvedDownloads>/<filename>`.
+  //
+  // This is the architectural fix: instead of trying to detect
+  // "did the user type a placeholder?" (which requires a
+  // forever-growing list of patterns), we ensure the field
+  // shows the correct path from the start. The user only
+  // needs to type if they want a different destination.
+  useEffect(() => {
+    if (userEditedPath) return;       // respect manual override
+    if (!resolvedDownloads) return;   // home not resolved yet
+    if (!suggestedName) return;       // no filename known yet
+    let cancelled = false;
+    (async () => {
+      try {
+        const { join } = await import("@tauri-apps/api/path");
+        const full = await join(resolvedDownloads, suggestedName);
+        if (!cancelled && outputPath !== full) setOutputPath(full);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [resolvedDownloads, suggestedName, userEditedPath]);
 
   const STEPS = kind === "v1"
     ? [
@@ -421,84 +483,56 @@ function ReceivePanel() {
         t("share.receive.step.verifying"),
       ];
 
+  // Sprint 5.6.25: resolve the final output path. Since the
+  // `outputPath` field is ALWAYS the real final path (kept in
+  // sync via the useEffect above), this function only needs to
+  // expand a leading `~/` if present. No placeholder detection,
+  // no exception lists, no heuristics.
   const buildOutputPath = useCallback(async (): Promise<string> => {
-    const { join, dirname, basename } = await import("@tauri-apps/api/path");
+    const { join } = await import("@tauri-apps/api/path");
     let p = outputPath;
-    // 1. expand leading ~/
     if (p.startsWith("~/") && resolvedHome) {
       p = await join(resolvedHome, p.slice(2));
     } else if (p === "~" && resolvedHome) {
       p = resolvedHome;
     }
-    // 2. defaults / sentinel → use the destination dir + the
-    //    real filename (no `.bin` placeholders ever).
-    if (p === "~/Downloads" || (resolvedDownloads && p === resolvedDownloads)) {
-      if (suggestedName) return await join(resolvedDownloads!, suggestedName);
-      return resolvedDownloads!;
-    }
-    // 3. user typed a path with a placeholder basename — replace
-    //    just the basename with the real filename. We treat
-    //    these as placeholders:
-    //      * archivo_recibido* (legacy default)
-    //      * anything ending in .bin / .bin.* / .* (shell glob)
-    //      * anything matching "*.ext" or ".ext" (shell glob)
-    //      * "Untitled" / "Untitled.*" / "received" / "recibido"
-    //      * empty after stripping trailing ".*"
-    //      * "Untitled" (with or without extension/glob)
-    //
-    //    The big one the user reported: typing "Untitled.*" in the
-    //    save field was being kept literally. After this fix any
-    //    basename that ends with ".*" (a glob-style template) is
-    //    recognised as a placeholder and replaced.
-    const base = await basename(p);
-    const cleanedBase = base.replace(/\.\*+$/, ""); // strip trailing ".*"
-    const lower = base.toLowerCase();
-    const cleanedLower = cleanedBase.toLowerCase();
-    const isPlaceholder =
-      lower === "archivo_recibido" ||
-      lower === "archivo_recibido.bin" ||
-      lower === "received" ||
-      lower === "received.bin" ||
-      lower === "untitled" ||
-      lower === "untitled.*" ||
-      cleanedLower === "" ||
-      cleanedLower === "recibido" ||
-      cleanedLower === "untitled" ||
-      base.endsWith(".bin") ||
-      base.endsWith(".bin.*") ||
-      base.endsWith(".*") || // the catch-all: any glob suffix
-      /^\*\.[a-z0-9]+$/i.test(cleanedBase) ||
-      /^\.[a-z0-9]+$/i.test(cleanedBase);
-    if (isPlaceholder && suggestedName) {
-      return await join(await dirname(p), suggestedName);
-    }
     return p;
-  }, [outputPath, resolvedHome, resolvedDownloads, suggestedName]);
+  }, [outputPath, resolvedHome]);
 
   const onChangeDest = useCallback(async () => {
     if (!isTauri) return;
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
-      const { join } = await import("@tauri-apps/api/path");
-      // Sprint 5.6.23: never open the dialog with a generic
-      // "archivo_recibido.bin" placeholder. If we know the
-      // filename, pre-fill it. Otherwise default to the dir
-      // only and let the OS file dialog pick a name.
-      let defPath: string;
-      if (resolvedDownloads && suggestedName) {
-        defPath = await join(resolvedDownloads, suggestedName);
-      } else if (resolvedDownloads) {
-        defPath = resolvedDownloads;
-      } else {
-        defPath = "recibido";
+      const { join, homeDir } = await import("@tauri-apps/api/path");
+      // Sprint 5.6.25: never open the save dialog with a
+      // placeholder default like "recibido" or "archivo_recibido.bin".
+      // If we don't have resolvedDownloads yet (the mount-time
+      // useEffect hasn't fired), resolve it NOW before opening
+      // the dialog — otherwise the user could type "Untitled.*"
+      // and we'd save with that literal filename.
+      //
+      // Pre-fill strategy:
+      //   * outputPath already populated (auto-sync fired) → use it
+      //   * suggestedName known but outputPath empty (race) → dir + name
+      //   * neither → just the dir (no default filename)
+      let dir = resolvedDownloads;
+      if (!dir) {
+        try {
+          const home = await homeDir();
+          dir = await join(home, "Downloads");
+        } catch {}
       }
+      const defPath = outputPath || (dir && suggestedName ? await join(dir, suggestedName) : dir) || undefined;
       const r = await save({
         defaultPath: defPath,
         filters: [{ name: "All files", extensions: ["*"] }],
       });
-      if (r) setOutputPath(r);
+      if (r) {
+        setOutputPath(r);
+        setUserEditedPath(true);  // dialog pick = manual choice
+      }
     } catch {}
-  }, [resolvedDownloads, suggestedName]);
+  }, [outputPath, resolvedDownloads, suggestedName]);
 
   const onReceive = useCallback(async () => {
     if (!token || kind === "unknown") return;
