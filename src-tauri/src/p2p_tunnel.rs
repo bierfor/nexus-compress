@@ -1832,6 +1832,11 @@ pub async fn receive_send_file(
     let fhash = token.fhash_bytes()?;
     let expected_sha256 = token.sha256_bytes()?;
     let kek = derive_kek(token.code.as_bytes(), &salt);
+    // Sprint 5.6.7: pre-auth HMAC key. The sender's axum requires
+    // X-Nexus-Auth on /spake and /file — without it, the receiver
+    // gets a uniform 401. We derive the same key the sender
+    // computes in start_direct_sender / start_sender.
+    let pre_key = auth::derive_pre_auth_key(&kek);
     let (spake, t_a_out) =
         SpakeHandshake::start(&*kek, SpakeSide::A, "receiver", "sender")?;
 
@@ -1842,8 +1847,15 @@ pub async fn receive_send_file(
         .map_err(|e| format!("reqwest: {}", e))?;
     let base = token.url.trim_end_matches('/');
     let spake_url = format!("{}/spake", base);
+    let spake_auth = auth::build_auth_header(
+        &*pre_key,
+        auth::now_unix(),
+        "POST",
+        "/spake",
+    );
     let resp = client
         .post(&spake_url)
+        .header(auth::HEADER_NAME, spake_auth)
         .json(&SpakeRequest {
             t_a: URL_SAFE_NO_PAD.encode(&t_a_out),
         })
@@ -1866,15 +1878,27 @@ pub async fn receive_send_file(
     // 3. Derive session + mac keys.
     let (session_key, mac_key) = derive_session_keys(&*shared, &fhash);
 
-    // 4. GET /file with auth.
+    // 4. GET /file with TWO auth headers: (a) pre-auth HMAC the
+    //    middleware requires (X-Nexus-Auth, key=pre_key, signs
+    //    "ts|GET|/file"), and (b) session HMAC the handler
+    //    requires (X-P2P-Auth, key=mac_key, signs "GET/file"
+    //    — no timestamp because SPAKE2 already established
+    //    a fresh session key).
     let file_url = format!("{}/file", base);
+    let pre_auth_header = auth::build_auth_header(
+        &*pre_key,
+        auth::now_unix(),
+        "GET",
+        "/file",
+    );
     let mut mac = <HmacSha256 as Mac>::new_from_slice(&*mac_key)
         .map_err(|e| format!("hmac: {}", e))?;
     mac.update(b"GET/file");
-    let auth = hex::encode(mac.finalize().into_bytes());
+    let session_auth = hex::encode(mac.finalize().into_bytes());
     let resp = client
         .get(&file_url)
-        .header("X-P2P-Auth", auth)
+        .header(auth::HEADER_NAME, pre_auth_header)
+        .header("X-P2P-Auth", session_auth)
         .send()
         .await
         .map_err(|e| format!("file GET: {}", e))?
