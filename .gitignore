@@ -3,3 +3,8 @@ Cargo.lock.bak
 *.swp
 .DS_Store
 gen/
+
+# Next.js build cache
+frontend/.next/
+frontend/out/
+frontend/node_modules/
