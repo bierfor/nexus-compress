@@ -757,6 +757,10 @@ struct SenderState {
     keys: Arc<Mutex<Option<SenderKeys>>>,
     /// File metadata, set once at sender start.
     meta: Arc<FileMeta>,
+    /// Sprint 5.6.12: 4-word code (passphrase). Stored so
+    /// handle_spake can regenerate the spake on retry when
+    /// the state was consumed but keys were never set.
+    code: Arc<String>,
     /// Pre-auth state (Sprint 5.5). Used by the route-level
     /// HMAC middleware to filter scrapers before the
     /// expensive spake.finish group operation. The key is
@@ -1242,6 +1246,7 @@ pub async fn start_direct_sender(
             filename: wire_filename.clone(),
         }),
         auth: auth.clone(),
+        code: Arc::new(code.clone()),
     };
     let rate_limit = Arc::new(RateLimit::new());
     let app = Router::new()
@@ -1732,6 +1737,7 @@ pub async fn start_sender(
             filename: wire_filename.clone(),
         }),
         auth: auth.clone(),
+        code: Arc::new(code.clone()),
     };
 
     // 7. Build the axum app. Middleware order (outermost
@@ -1839,7 +1845,39 @@ async fn handle_spake(
     let t_a = URL_SAFE_NO_PAD
         .decode(&req.t_a)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("b64 t_a: {}", e)))?;
+    // Sprint 5.6.12: handle the "double-receive" case. If state
+    // is empty but the keys were never set, the previous
+    // /spake call probably got interrupted mid-flight
+    // (network blip, user clicked twice, etc.). Regenerate
+    // so the receiver can retry. If the keys ARE set, the
+    // previous handshake actually completed and the receiver
+    // is misbehaving — return 409 so they know to use the
+    // existing keys (re-GET /file with the saved t_b).
     let mut guard = state.spake.lock().await;
+    if guard.is_none() {
+        // Sprint 5.6.12: regenerate the spake state so a
+        // retry from the receiver works (network blip, user
+        // clicked twice, peek_filename racing with receive).
+        // The KEK + fhash are deterministic, so the new spake
+        // derives the same shared secret as the original —
+        // meaning the receiver's freshly-computed t_a still
+        // works against the new t_b.
+        eprintln!("[p2p] spake state empty, regenerating for retry");
+        let kek = derive_kek(state.code.as_bytes(), &state.meta.salt);
+        let (spake, t_b) = SpakeHandshake::start(
+            &*kek,
+            SpakeSide::B,
+            "receiver",
+            "sender",
+        )
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("spake restart: {}", e),
+            )
+        })?;
+        *guard = Some((spake, t_b));
+    }
     let (spake, t_b) = guard.take().ok_or_else(|| {
         (
             StatusCode::CONFLICT,
@@ -2365,6 +2403,7 @@ mod tests {
             keys: Arc::new(Mutex::new(None)),
             meta: Arc::new(meta),
             auth: auth::AuthState::new(&*kek),
+            code: Arc::new(code.clone()),
         };
         let app = Router::new()
             .route("/meta", get(handle_meta))
@@ -2535,6 +2574,7 @@ mod tests {
             keys: Arc::new(Mutex::new(None)),
             meta: Arc::new(meta),
             auth: auth::AuthState::new(&*kek),
+            code: Arc::new(code.clone()),
         };
         let app = Router::new()
             .route("/meta", get(handle_meta))

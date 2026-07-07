@@ -125,6 +125,32 @@ async fn main() {
     let got = std::fs::read(&out).expect("read received file");
     assert_eq!(got, original, "file bytes match");
 
+    // 8. Double-receive regression test (Sprint 5.6.12).
+    //    Send the same token through a SECOND receive call.
+    //    Previously this 409'd because handle_spake consumed
+    //    the state. Now it should succeed because the
+    //    regenerate-on-empty path kicks in.
+    println!("[e2e] regression: double-receive with same token...");
+    let out2 = std::env::temp_dir().join(format!(
+        "e2e_v3_RECEIVED2_{}.html",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&out2);
+    let result2 = timeout(
+        Duration::from_secs(15),
+        receive_direct_file(v3_token.clone(), out2.clone(), 5),
+    )
+    .await
+    .expect("second receive timed out")
+    .expect("second receive failed");
+    let got2 = std::fs::read(&out2).expect("read second file");
+    assert_eq!(got2, original, "second-receive bytes match");
+    assert_eq!(result2.bytes_written as usize, original.len());
+    println!(
+        "[e2e] double-receive OK — {} bytes",
+        result2.bytes_written
+    );
+
     // 8. Cleanup.
     drop(started);
     let _ = std::fs::remove_file(&tmp);
