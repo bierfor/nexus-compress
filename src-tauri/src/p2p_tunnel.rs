@@ -1112,17 +1112,62 @@ pub async fn start_direct_sender(
         .await
         .map_err(|e| format!("bind 0.0.0.0:{}: {}", local_port, e))?;
 
-    // 3. File metadata (same as Quick/Named).
-    let meta = std::fs::metadata(&file_path)
-        .map_err(|e| format!("stat {}: {}", file_path.display(), e))?;
-    let plaintext_size = meta.len();
-    let expected_sha256_hex = sha256_file_hex(&file_path)
-        .map_err(|e| format!("sha256 {}: {}", file_path.display(), e))?;
+    // 3. File metadata. If the user passed a directory, compress it
+    //    to a temporary .nxs6 archive first and send the archive.
+    //    The receiver gets the archive and extracts it locally.
+    let is_dir_input = std::fs::metadata(&file_path)
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    let (effective_path, plaintext_size, expected_sha256_hex, input_label) = if is_dir_input {
+        let dir_name = file_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "directory".to_string());
+        let temp_path = std::env::temp_dir().join(format!(
+            "nexus-p2p-archive-{}-{}.nxs6",
+            std::process::id(),
+            dir_name
+        ));
+        let (_dir_result, archive_bytes) =
+            nexus_compress::compress_directory_with_backend(
+                &file_path,
+                nexus_compress::CompressionBackend::V6Solid,
+                6,
+            )
+            .map_err(|e| format!("compress directory: {}", e))?;
+        std::fs::write(&temp_path, &archive_bytes)
+            .map_err(|e| format!("write temp archive: {}", e))?;
+        let sha = sha256_file_hex(&temp_path)
+            .map_err(|e| format!("sha256 temp archive: {}", e))?;
+        eprintln!(
+            "[p2p] compressed directory {} -> {} ({} bytes, sha256={})",
+            file_path.display(),
+            temp_path.display(),
+            archive_bytes.len(),
+            &sha[..16]
+        );
+        (temp_path, archive_bytes.len() as u64, sha, dir_name)
+    } else {
+        let meta = std::fs::metadata(&file_path)
+            .map_err(|e| format!("stat {}: {}", file_path.display(), e))?;
+        let sha = sha256_file_hex(&file_path)
+            .map_err(|e| format!("sha256 {}: {}", file_path.display(), e))?;
+        let label = file_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_string());
+        (file_path.clone(), meta.len(), sha, label)
+    };
     let mut expected_sha256 = [0u8; 32];
     hex::decode_to_slice(expected_sha256_hex.as_bytes(), &mut expected_sha256)
         .map_err(|e| format!("hex decode sha256: {}", e))?;
     let salt = random_salt();
-    let fhash_hex = sha256_hex(file_path.to_string_lossy().as_bytes());
+    // fhash binds the session to the absolute path. If we
+    // compressed a directory to a temp file, we want the session
+    // bound to the temp file (so a replay can't redirect the
+    // receiver to a different temp file). The temp path is unique
+    // per session, so this is fine.
+    let fhash_hex = sha256_hex(effective_path.to_string_lossy().as_bytes());
     let mut fhash = [0u8; 32];
     hex::decode_to_slice(fhash_hex.as_bytes(), &mut fhash)
         .map_err(|e| format!("hex decode fhash: {}", e))?;
@@ -1138,11 +1183,17 @@ pub async fn start_direct_sender(
     //    OBLIGATORY on /spake and /file (no Cloudflare TLS to
     //    lean on).
     let auth = auth::AuthState::new(&*kek);
+    // Sprint 5.6.5: if the user passed a directory, we already
+    // compressed it to a temp .nxs6 archive. The state uses the
+    // temp archive path so the axum handlers serve the archive
+    // bytes, not the raw directory. The original dir path is
+    // not referenced anymore — the receiver extracts the archive
+    // and gets the full directory contents.
     let state = SenderState {
         spake: Arc::new(Mutex::new(Some((spake, t_b)))),
         keys: Arc::new(Mutex::new(None)),
         meta: Arc::new(FileMeta {
-            file_path: file_path.clone(),
+            file_path: effective_path.clone(),
             plaintext_size,
             expected_sha256,
             salt,

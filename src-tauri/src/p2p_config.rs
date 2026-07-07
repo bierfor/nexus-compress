@@ -237,8 +237,31 @@ pub fn load_tunnel_config(app_data_dir: &Path) -> Result<TunnelConfig, String> {
         return Ok(TunnelConfig::default());
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("read config: {}", e))?;
-    let cfg: TunnelConfig = serde_json::from_slice(&bytes)
+    let mut cfg: TunnelConfig = serde_json::from_slice(&bytes)
         .map_err(|e| format!("parse config: {}", e))?;
+    // Sprint 5.6.5: migrate legacy Quick/Named configs to Direct
+    // when no token is saved in keyring. Quick mode is rate-limited
+    // (Error 1015) and Named mode requires the user to set up a
+    // Cloudflare account + tunnel — both are pain for the typical
+    // user. Direct mode (LAN mDNS + UPnP cross-NAT) just works.
+    if cfg.mode == TransportMode::Quick
+        || cfg.mode == TransportMode::Named
+    {
+        let has_token = default_token_store()
+            .get_token()
+            .ok()
+            .flatten()
+            .is_some();
+        if !has_token {
+            eprintln!(
+                "[p2p-config] migrating {:?} -> Direct (no token in keyring)",
+                cfg.mode
+            );
+            cfg.mode = TransportMode::Direct;
+            // Persist the migration so we don't log it on every launch.
+            let _ = save_tunnel_config(app_data_dir, &cfg);
+        }
+    }
     Ok(cfg)
 }
 

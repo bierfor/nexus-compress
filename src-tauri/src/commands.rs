@@ -584,11 +584,23 @@ pub async fn p2p_send_start_cmd(
     std::fs::create_dir_all(&app_data_dir)
         .map_err(|e| format!("mkdir app_data_dir: {}", e))?;
     let started = p2p_tunnel::start_sender(file_path.clone(), code.clone(), app_data_dir).await?;
+    // Sprint 5.6.5: if the user picked a directory, start_sender
+    // compressed it to a temp .nxs6 archive and that's what gets
+    // sent. The user sees a friendly filename on the wire:
+    // "MyFolder.nxs6" so they know what they'll receive.
     let filename = file_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("file")
         .to_string();
+    let is_dir_input = std::fs::metadata(&file_path)
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    let filename = if is_dir_input {
+        format!("{}.nxs6", filename)
+    } else {
+        filename
+    };
     let file_size = started.token.size;
     let upnp_status = started.upnp_info.as_ref().map(|info| UpnpStatusInfo {
         external_ip: info.external_ip.to_string(),

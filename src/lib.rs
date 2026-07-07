@@ -31,3 +31,4 @@ pub mod solid_archive;
 
 pub use codec::{compress, compress_premium, decompress};
 pub use format::{BlockType, NexusHeader};
+pub use api::{compress_directory_with_backend, CompressionBackend};
