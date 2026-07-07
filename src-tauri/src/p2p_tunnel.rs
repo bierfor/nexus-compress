@@ -1188,30 +1188,49 @@ pub async fn start_direct_sender(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "directory".to_string());
+        // Sprint 5.6.16: switch from .nxs6 (custom codec, slow,
+        // requires our app to extract) to plain .tar using the
+        // system tar binary. Standard Unix format — Finder
+        // double-click extracts it, no special software needed.
+        // For .app bundles and other pre-compressed game
+        // assets the .nxs6 codec barely shrunk the size anyway
+        // and could take 10+ minutes for 30+ GB.
         let temp_path = std::env::temp_dir().join(format!(
-            "nexus-p2p-archive-{}-{}.nxs6",
+            "nexus-p2p-archive-{}-{}.tar",
             std::process::id(),
             dir_name
         ));
-        let (_dir_result, archive_bytes) =
-            nexus_compress::compress_directory_with_backend(
-                &file_path,
-                nexus_compress::CompressionBackend::V6Solid,
-                6,
-            )
-            .map_err(|e| format!("compress directory: {}", e))?;
-        std::fs::write(&temp_path, &archive_bytes)
-            .map_err(|e| format!("write temp archive: {}", e))?;
+        let parent = file_path
+            .parent()
+            .ok_or_else(|| "directory has no parent path".to_string())?;
+        let tar_status = std::process::Command::new("/usr/bin/tar")
+            .arg("-cf")
+            .arg(&temp_path)
+            .arg("-C")
+            .arg(parent)
+            .arg(&dir_name)
+            .output()
+            .map_err(|e| format!("spawn tar: {}", e))?;
+        if !tar_status.status.success() {
+            return Err(format!(
+                "tar failed: exit={:?} stderr={}",
+                tar_status.status.code(),
+                String::from_utf8_lossy(&tar_status.stderr)
+            ));
+        }
+        let archive_bytes = std::fs::metadata(&temp_path)
+            .map_err(|e| format!("stat temp archive: {}", e))?
+            .len();
         let sha = sha256_file_hex(&temp_path)
             .map_err(|e| format!("sha256 temp archive: {}", e))?;
         eprintln!(
-            "[p2p] compressed directory {} -> {} ({} bytes, sha256={})",
+            "[p2p] tarred directory {} -> {} ({} bytes, sha256={})",
             file_path.display(),
             temp_path.display(),
-            archive_bytes.len(),
+            archive_bytes,
             &sha[..16]
         );
-        (temp_path, archive_bytes.len() as u64, sha, dir_name)
+        (temp_path, archive_bytes, sha, dir_name)
     } else {
         let meta = std::fs::metadata(&file_path)
             .map_err(|e| format!("stat {}: {}", file_path.display(), e))?;
@@ -1232,7 +1251,9 @@ pub async fn start_direct_sender(
     // basename. The receiver uses this to suggest the right
     // save name.
     let wire_filename = if is_dir_input {
-        format!("{}.nxs6", input_label)
+        // .tar (not .nxs6) — standard Unix archive, Finder
+        // double-click extracts it without our app.
+        format!("{}.tar", input_label)
     } else {
         input_label.clone()
     };

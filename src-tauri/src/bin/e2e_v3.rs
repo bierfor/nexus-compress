@@ -199,6 +199,82 @@ async fn main() {
     drop(started_multi);
     let _ = std::fs::remove_file(&tmp_multi);
     let _ = std::fs::remove_file(&out_multi);
+
+    // 10. Folder-send regression (Sprint 5.6.16). Sender tars
+    //     the directory using system tar. Receiver gets a .tar
+    //     that can be untarred with the standard system tool
+    //     (or by double-click in Finder).
+    println!("[e2e] regression: folder -> .tar roundtrip...");
+    let folder = std::env::temp_dir().join(format!(
+        "e2e_v3_folder_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir(&folder).expect("mkdir folder");
+    for i in 0..5 {
+        std::fs::write(
+            folder.join(format!("file_{}.txt", i)),
+            format!("content of file {}", i).as_bytes(),
+        )
+        .expect("write folder file");
+    }
+    let started_folder = start_direct_sender(
+        folder.clone(),
+        "alpha-bear-cosmic-delta".to_string(),
+        cfg_dir_a.clone(),
+    )
+    .await
+    .expect("start folder sender");
+    assert!(
+        started_folder.token.filename.as_deref() == Some("folder.tar")
+            || started_folder.token.filename.as_deref()
+                == Some(&format!(
+                    "e2e_v3_folder_{}.tar",
+                    std::process::id()
+                )),
+        "filename should be .tar not .nxs6: got {:?}",
+        started_folder.token.filename
+    );
+    let folder_token = started_folder.token_compact.clone();
+    let out_folder = std::env::temp_dir().join(format!(
+        "e2e_v3_FOLDER_RECEIVED.tar",
+    ));
+    let _ = std::fs::remove_file(&out_folder);
+    let result_folder = timeout(
+        Duration::from_secs(15),
+        receive_direct_file(folder_token, out_folder.clone(), 5),
+    )
+    .await
+    .expect("folder receive timed out")
+    .expect("folder receive failed");
+    // Verify the received file is a valid tar archive by
+    // listing it with /usr/bin/tar.
+    let listing = std::process::Command::new("/usr/bin/tar")
+        .arg("-tf")
+        .arg(&out_folder)
+        .output()
+        .expect("tar list");
+    assert!(
+        listing.status.success(),
+        "received file is not a valid tar: stderr={}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    let listing_stdout = String::from_utf8_lossy(&listing.stdout);
+    for i in 0..5 {
+        assert!(
+            listing_stdout.contains(&format!("file_{}.txt", i)),
+            "tar missing file_{}.txt. Listing:\n{}",
+            i,
+            listing_stdout
+        );
+    }
+    println!(
+        "[e2e] folder OK — received .tar with {} bytes, 5 entries verified",
+        result_folder.bytes_written
+    );
+    drop(started_folder);
+    let _ = std::fs::remove_dir_all(&folder);
+    let _ = std::fs::remove_file(&out_folder);
     let out2 = std::env::temp_dir().join(format!(
         "e2e_v3_RECEIVED2_{}.html",
         std::process::id()

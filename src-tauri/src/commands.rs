@@ -593,10 +593,13 @@ pub async fn p2p_send_start_cmd(
     std::fs::create_dir_all(&app_data_dir)
         .map_err(|e| format!("mkdir app_data_dir: {}", e))?;
     let started = p2p_tunnel::start_sender(file_path.clone(), code.clone(), app_data_dir).await?;
-    // Sprint 5.6.5: if the user picked a directory, start_sender
-    // compressed it to a temp .nxs6 archive and that's what gets
-    // sent. The user sees a friendly filename on the wire:
-    // "MyFolder.nxs6" so they know what they'll receive.
+    // Sprint 5.6.16: if the user picked a directory, start_sender
+    // tars it to a .tar archive (system /usr/bin/tar, fast,
+    // universal). The user sees "FolderName.tar" on the wire
+    // — receiver can double-click in Finder to extract, no
+    // special software needed. Previous behavior was .nxs6
+    // which required our app to decompress and took forever
+    // for game-sized inputs that don't compress much.
     let filename = file_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -606,7 +609,7 @@ pub async fn p2p_send_start_cmd(
         .map(|m| m.is_dir())
         .unwrap_or(false);
     let filename = if is_dir_input {
-        format!("{}.nxs6", filename)
+        format!("{}.tar", filename)
     } else {
         filename
     };
