@@ -10,7 +10,7 @@
 
 use nexus_compress::api::{
     self, ApiResult, BackendInfo, CompressResult, CompressionBackend, CompressionLevel,
-    CompressTargetResult, DecompressResult, EngineInfo, SelfTestResult,
+    CompressTargetResult, DecompressResult, DecompressTargetResult, EngineInfo, SelfTestResult,
 };
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -127,6 +127,75 @@ pub async fn compress_target_cmd(req: serde_json::Value) -> Result<CompressTarge
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))?
+}
+
+/// Decompress an archive by path. Auto-detects the format from the
+/// file's magic bytes (NXS6 / NXAR / v4 / v5-v6 single) and restores
+/// the contents next to the input. The frontend passes
+/// `{ path }`.
+#[tauri::command]
+pub async fn decompress_target_cmd(
+    req: serde_json::Value,
+) -> Result<DecompressTargetResult, String> {
+    let path = req
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'path' in req".to_string())?
+        .to_string();
+    let p = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || to_ipc(api::decompress_target(&p)))
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {}", e))?
+}
+
+/// Reveal `path` in Finder (macOS) / File Manager (Linux/Windows).
+/// Pass a path to a FILE — Finder will select it. Pass a path to a
+/// DIRECTORY — Finder will open it.
+#[tauri::command]
+pub async fn reveal_in_finder_cmd(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || reveal_in_finder(&path))
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {}", e))?
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_in_finder(path: &str) -> Result<(), String> {
+    // `-R` flag tells `open` to REVEAL the file in its parent dir.
+    let status = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .status()
+        .map_err(|e| format!("open -R failed: {}", e))?;
+    if !status.success() {
+        return Err(format!("open exited with {:?}", status.code()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn reveal_in_finder(path: &str) -> Result<(), String> {
+    // xdg-open opens the parent if `path` is a file.
+    let status = std::process::Command::new("xdg-open")
+        .arg(path)
+        .status()
+        .map_err(|e| format!("xdg-open failed: {}", e))?;
+    if !status.success() {
+        return Err(format!("xdg-open exited with {:?}", status.code()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_in_finder(path: &str) -> Result<(), String> {
+    // `explorer /select,<path>` reveals in Explorer.
+    let status = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path))
+        .status()
+        .map_err(|e| format!("explorer failed: {}", e))?;
+    if !status.success() {
+        return Err(format!("explorer exited with {:?}", status.code()));
+    }
+    Ok(())
 }
 
 #[tauri::command]

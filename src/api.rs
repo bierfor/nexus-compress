@@ -557,6 +557,211 @@ pub fn compress_target(
     })
 }
 
+/// Result of decompressing an archive by path. Mirrors the compress
+/// flow's uniform shape so the GUI doesn't have to branch on the
+/// archive kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecompressTargetResult {
+    /// What kind of archive we detected from the file's magic.
+    /// One of `nxs6`, `nxar`, `v4`, `v5-v6-single`.
+    pub archive_kind: &'static str,
+    /// Total bytes restored to disk (recursive for archives).
+    pub restored_size: u64,
+    /// Number of files written. 1 for a single-file archive.
+    pub n_files: u64,
+    /// Whether the output is a directory (multi-file archive) or
+    /// a single file. The GUI picks the right reveal/open affordance.
+    pub is_directory: bool,
+    /// Path the output was written to (a directory for archives, a
+    /// file for single-file decompression).
+    pub output_path: String,
+    /// Wall-clock time of the decompress + write, milliseconds.
+    pub decompress_time_ms: f64,
+}
+
+/// Decompress an archive by path. Auto-detects the format from the
+/// file's magic bytes and dispatches:
+///
+/// - `NXS6\n` → SOLID v6 archive. Restores all files to
+///   `<parent>/<archive_stem>.extracted/`.
+///
+/// - `NXAR\n` → per-file nxar (lossless v4 codec). Restores all
+///   files to `<parent>/<archive_stem>/`.
+///
+/// - `NXS\x00` → single-file v4 stream. Restores the bytes to
+///   `<parent>/<archive_stem>.out`.
+///
+/// - `0x05` → single-file v5/v6 LZMA stream. Restores to
+///   `<parent>/<archive_stem>.out`.
+///
+/// The first 8 bytes of the file are read to dispatch; the full
+/// file is then read and decompressed. For directories (NXS6 /
+/// NXAR) the contents are written next to the archive so the user
+/// can browse the result in Finder.
+pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult> {
+    use std::io::Read;
+    let start = Instant::now();
+
+    // Read the first 8 bytes to dispatch on magic.
+    let mut file = std::fs::File::open(input_path).map_err(|e| {
+        ApiError::new(
+            "decompress.open_failed",
+            format!("open {}: {}", input_path.display(), e),
+        )
+    })?;
+    let mut head = [0u8; 8];
+    let n = file.read(&mut head).map_err(|e| {
+        ApiError::new(
+            "decompress.read_failed",
+            format!("read header: {}", e),
+        )
+    })?;
+    if n < 5 {
+        return Err(ApiError::new(
+            "decompress.too_short",
+            format!("file too short ({} bytes)", n),
+        ));
+    }
+
+    let parent = input_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let stem = input_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive".to_string());
+
+    // Dispatch on magic.
+    let (kind, output_path, restored_size, n_files, is_dir) =
+        if &head[..5] == crate::solid_archive::MAGIC {
+            // NXS6: SOLID v6.
+            let bytes = std::fs::read(input_path).map_err(|e| {
+                ApiError::new("decompress.read_failed", format!("read: {}", e))
+            })?;
+            let (entries, solid) = crate::solid_archive::decompress(&bytes).map_err(|e| {
+                ApiError::new("solid.decompress_failed", e)
+            })?;
+            // Restore to <parent>/<stem>.extracted/
+            let out_dir = parent.join(format!("{}.extracted", stem));
+            std::fs::create_dir_all(&out_dir).map_err(|e| {
+                ApiError::new(
+                    "decompress.mkdir_failed",
+                    format!("mkdir {}: {}", out_dir.display(), e),
+                )
+            })?;
+            let mut restored: u64 = 0;
+            for e in &entries {
+                let start = e.solid_offset as usize;
+                let end = start + e.pre_size as usize;
+                let file_bytes = &solid[start..end];
+                let target = out_dir.join(&e.name);
+                if let Some(p) = target.parent() {
+                    std::fs::create_dir_all(p).map_err(|err| {
+                        ApiError::new(
+                            "decompress.mkdir_failed",
+                            format!("mkdir {}: {}", p.display(), err),
+                        )
+                    })?;
+                }
+                std::fs::write(&target, file_bytes).map_err(|err| {
+                    ApiError::new(
+                        "decompress.write_failed",
+                        format!("write {}: {}", target.display(), err),
+                    )
+                })?;
+                restored += file_bytes.len() as u64;
+            }
+            (
+                "nxs6",
+                out_dir.to_string_lossy().into_owned(),
+                restored,
+                entries.len() as u64,
+                true,
+            )
+        } else if &head[..4] == b"NXAR" {
+            // NXAR: per-file v4 archive.
+            let bytes = std::fs::read(input_path).map_err(|e| {
+                ApiError::new("decompress.read_failed", format!("read: {}", e))
+            })?;
+            let out_dir = parent.join(&stem);
+            std::fs::create_dir_all(&out_dir).map_err(|e| {
+                ApiError::new(
+                    "decompress.mkdir_failed",
+                    format!("mkdir {}: {}", out_dir.display(), e),
+                )
+            })?;
+            let result = decompress_directory(&bytes, &out_dir).map_err(|e| {
+                ApiError::new("nxar.decompress_failed", format!("{}/{}", e.code, e.message))
+            })?;
+            (
+                "nxar",
+                out_dir.to_string_lossy().into_owned(),
+                result.total_original_size,
+                result.n_files,
+                true,
+            )
+        } else if &head[..4] == b"NXS\x00" {
+            // Single-file v4 stream.
+            let bytes = std::fs::read(input_path).map_err(|e| {
+                ApiError::new("decompress.read_failed", format!("read: {}", e))
+            })?;
+            let out = decompress_bytes(&bytes)?;
+            let out_path = parent.join(format!("{}.out", stem));
+            std::fs::write(&out_path, &out.data).map_err(|e| {
+                ApiError::new(
+                    "decompress.write_failed",
+                    format!("write {}: {}", out_path.display(), e),
+                )
+            })?;
+            (
+                "v4",
+                out_path.to_string_lossy().into_owned(),
+                out.data.len() as u64,
+                1,
+                false,
+            )
+        } else if head[0] == 0x05 {
+            // Single-file v5/v6 LZMA stream.
+            let bytes = std::fs::read(input_path).map_err(|e| {
+                ApiError::new("decompress.read_failed", format!("read: {}", e))
+            })?;
+            let out = decompress_bytes(&bytes)?;
+            let out_path = parent.join(format!("{}.out", stem));
+            std::fs::write(&out_path, &out.data).map_err(|e| {
+                ApiError::new(
+                    "decompress.write_failed",
+                    format!("write {}: {}", out_path.display(), e),
+                )
+            })?;
+            (
+                "v5-v6-single",
+                out_path.to_string_lossy().into_owned(),
+                out.data.len() as u64,
+                1,
+                false,
+            )
+        } else {
+            return Err(ApiError::new(
+                "decompress.unknown_format",
+                format!(
+                    "unknown archive format (magic: {:02x}{:02x}{:02x}{:02x}…)",
+                    head[0], head[1], head[2], head[3]
+                ),
+            ));
+        };
+
+    let decompress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+    Ok(DecompressTargetResult {
+        archive_kind: kind,
+        restored_size,
+        n_files,
+        is_directory: is_dir,
+        output_path,
+        decompress_time_ms,
+    })
+}
+
 /// Compute the output path for an auto-saved compressed file.
 ///
 /// - Single file input `/foo/bar.txt` →

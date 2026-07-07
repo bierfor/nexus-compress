@@ -19,6 +19,8 @@ fn main() {
             commands::compress_bytes_with_backend_cmd,
             commands::compress_directory_with_backend_cmd,
             commands::compress_target_cmd,
+            commands::decompress_target_cmd,
+            commands::reveal_in_finder_cmd,
             commands::backend_info_cmd,
             commands::engine_info_cmd,
             commands::self_test_cmd,
