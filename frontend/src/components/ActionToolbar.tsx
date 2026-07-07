@@ -28,6 +28,8 @@ export function ActionToolbar({
   onDecompress,
   onOpen,
   onClear,
+  forceCompressActive,
+  forceDecompressActive,
 }: {
   selectedPath: string | null;
   lastOutputPath: string | null;
@@ -36,9 +38,25 @@ export function ActionToolbar({
   onDecompress: () => void;
   onOpen: () => void;
   onClear: () => void;
+  /**
+   * The page owns the "intent" radio (compress vs decompress),
+   * so the buttons light up only when their intent matches.
+   * Undefined falls back to the local heuristic.
+   */
+  forceCompressActive?: boolean;
+  forceDecompressActive?: boolean;
 }) {
-  const canCompress = !!selectedPath && !working;
-  const canDecompress = !!selectedPath && looksLikeArchive(selectedPath) && !working;
+  const localCompress = !!selectedPath && !working;
+  const localDecompress =
+    !!selectedPath && looksLikeArchive(selectedPath) && !working;
+  const canCompress =
+    forceCompressActive !== undefined
+      ? forceCompressActive
+      : localCompress;
+  const canDecompress =
+    forceDecompressActive !== undefined
+      ? forceDecompressActive
+      : localDecompress;
   const canOpen = !!lastOutputPath && !working;
 
   return (

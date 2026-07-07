@@ -10,7 +10,7 @@
 
 use nexus_compress::api::{
     self, ApiResult, BackendInfo, CompressResult, CompressionBackend, CompressionLevel,
-    CompressTargetResult, DecompressResult, DecompressTargetResult, EngineInfo,
+    CompressTargetResult, DecompressResult, DecompressTargetResult, EngineInfo, PeekResult,
     ProgressEvent, SelfTestResult,
 };
 use std::path::PathBuf;
@@ -193,9 +193,16 @@ pub async fn pick_save_location_cmd(
 /// Decompress an archive by path. Auto-detects the format from the
 /// file's magic bytes (NXS6 / NXAR / v4 / v5-v6 single) and restores
 /// the contents next to the input. The frontend passes
-/// `{ path }`.
+/// `{ req: { path, output_dir } }`.
+///
+/// `output_dir` (optional) overrides the auto-generated restore
+/// location: extracted contents go there instead.
+///
+/// Progress is emitted as `compress-progress` events (same channel
+/// as compress; the GUI already listens for them).
 #[tauri::command]
 pub async fn decompress_target_cmd(
+    app: tauri::AppHandle,
     req: serde_json::Value,
 ) -> Result<DecompressTargetResult, String> {
     let path = req
@@ -203,8 +210,43 @@ pub async fn decompress_target_cmd(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing 'path' in req".to_string())?
         .to_string();
+    let output_dir = req
+        .get("output_dir")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
     let p = PathBuf::from(path);
-    tauri::async_runtime::spawn_blocking(move || to_ipc(api::decompress_target(&p)))
+
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Emitter;
+        let app_for_event = app.clone();
+        let cb = |event: ProgressEvent| {
+            let _ = app_for_event.emit("compress-progress", &event);
+        };
+        to_ipc(api::decompress_target_with_progress(
+            &p,
+            output_dir.as_deref(),
+            cb,
+        ))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {}", e))?
+}
+
+/// Peek at an archive's contents WITHOUT decompressing. Returns
+/// the file list, total uncompressed size, and archive kind.
+/// The frontend uses this to render a WinRAR-style preview
+/// before the user commits to extracting.
+#[tauri::command]
+pub async fn peek_archive_target_cmd(
+    req: serde_json::Value,
+) -> Result<PeekResult, String> {
+    let path = req
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'path' in req".to_string())?
+        .to_string();
+    let p = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || to_ipc(api::peek_archive_target(&p)))
         .await
         .map_err(|e| format!("spawn_blocking failed: {}", e))?
 }

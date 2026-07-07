@@ -653,25 +653,30 @@ pub struct DecompressTargetResult {
 /// file's magic bytes and dispatches:
 ///
 /// - `NXS6\n` → SOLID v6 archive. Restores all files to
-///   `<parent>/<archive_stem>.extracted/`.
+///   `<parent>/<archive_stem>.extracted/` (or `output_dir` if
+///   given).
 ///
 /// - `NXAR\n` → per-file nxar (lossless v4 codec). Restores all
-///   files to `<parent>/<archive_stem>/`.
+///   files to `<parent>/<archive_stem>/` (or `output_dir`).
 ///
 /// - `NXS\x00` → single-file v4 stream. Restores the bytes to
-///   `<parent>/<archive_stem>.out`.
+///   `<parent>/<archive_stem>.out` (or `output_dir`).
 ///
 /// - `0x05` → single-file v5/v6 LZMA stream. Restores to
-///   `<parent>/<archive_stem>.out`.
+///   `<parent>/<archive_stem>.out` (or `output_dir`).
 ///
-/// The first 8 bytes of the file are read to dispatch; the full
-/// file is then read and decompressed. For directories (NXS6 /
-/// NXAR) the contents are written next to the archive so the user
-/// can browse the result in Finder.
-pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult> {
+/// `progress` is called per-file as the restore lands on disk so
+/// the GUI can drive a WinRAR-style progress bar.
+pub fn decompress_target_with_progress<P>(
+    input_path: &Path,
+    output_dir: Option<&Path>,
+    mut progress: P,
+) -> ApiResult<DecompressTargetResult>
+where
+    P: FnMut(ProgressEvent),
+{
     use std::io::Read;
     let start = Instant::now();
-
     // Read the first 8 bytes to dispatch on magic.
     let mut file = std::fs::File::open(input_path).map_err(|e| {
         ApiError::new(
@@ -712,16 +717,28 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
             let (entries, solid) = crate::solid_archive::decompress(&bytes).map_err(|e| {
                 ApiError::new("solid.decompress_failed", e)
             })?;
-            // Restore to <parent>/<stem>.extracted/
-            let out_dir = parent.join(format!("{}.extracted", stem));
+            // Output dir: user override or sibling <stem>.extracted/.
+            let out_dir = output_dir
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| parent.join(format!("{}.extracted", stem)));
             std::fs::create_dir_all(&out_dir).map_err(|e| {
                 ApiError::new(
                     "decompress.mkdir_failed",
                     format!("mkdir {}: {}", out_dir.display(), e),
                 )
             })?;
+            let total: u64 = entries.iter().map(|e| e.original_size).sum();
+            let n = entries.len() as u64;
+            progress(ProgressEvent {
+                phase: "compressing".to_string(),
+                current_file: String::new(),
+                files_done: 0,
+                files_total: n,
+                bytes_done: 0,
+                bytes_total: total,
+            });
             let mut restored: u64 = 0;
-            for e in &entries {
+            for (i, e) in entries.iter().enumerate() {
                 let start = e.solid_offset as usize;
                 let end = start + e.pre_size as usize;
                 let file_bytes = &solid[start..end];
@@ -741,12 +758,20 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
                     )
                 })?;
                 restored += file_bytes.len() as u64;
+                progress(ProgressEvent {
+                    phase: "compressing".to_string(),
+                    current_file: e.name.clone(),
+                    files_done: (i + 1) as u64,
+                    files_total: n,
+                    bytes_done: restored,
+                    bytes_total: total,
+                });
             }
             (
                 "nxs6",
                 out_dir.to_string_lossy().into_owned(),
                 restored,
-                entries.len() as u64,
+                n,
                 true,
             )
         } else if &head[..4] == b"NXAR" {
@@ -754,7 +779,9 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
             let bytes = std::fs::read(input_path).map_err(|e| {
                 ApiError::new("decompress.read_failed", format!("read: {}", e))
             })?;
-            let out_dir = parent.join(&stem);
+            let out_dir = output_dir
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| parent.join(&stem));
             std::fs::create_dir_all(&out_dir).map_err(|e| {
                 ApiError::new(
                     "decompress.mkdir_failed",
@@ -764,6 +791,14 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
             let result = decompress_directory(&bytes, &out_dir).map_err(|e| {
                 ApiError::new("nxar.decompress_failed", format!("{}/{}", e.code, e.message))
             })?;
+            progress(ProgressEvent {
+                phase: "compressing".to_string(),
+                current_file: String::new(),
+                files_done: result.n_files,
+                files_total: result.n_files,
+                bytes_done: result.total_original_size,
+                bytes_total: result.total_original_size,
+            });
             (
                 "nxar",
                 out_dir.to_string_lossy().into_owned(),
@@ -777,13 +812,24 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
                 ApiError::new("decompress.read_failed", format!("read: {}", e))
             })?;
             let out = decompress_bytes(&bytes)?;
-            let out_path = parent.join(format!("{}.out", stem));
+            let out_path = match output_dir {
+                Some(d) => d.join(format!("{}.out", stem)),
+                None => parent.join(format!("{}.out", stem)),
+            };
             std::fs::write(&out_path, &out.data).map_err(|e| {
                 ApiError::new(
                     "decompress.write_failed",
                     format!("write {}: {}", out_path.display(), e),
                 )
             })?;
+            progress(ProgressEvent {
+                phase: "done".to_string(),
+                current_file: stem.clone(),
+                files_done: 1,
+                files_total: 1,
+                bytes_done: out.data.len() as u64,
+                bytes_total: out.data.len() as u64,
+            });
             (
                 "v4",
                 out_path.to_string_lossy().into_owned(),
@@ -797,13 +843,24 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
                 ApiError::new("decompress.read_failed", format!("read: {}", e))
             })?;
             let out = decompress_bytes(&bytes)?;
-            let out_path = parent.join(format!("{}.out", stem));
+            let out_path = match output_dir {
+                Some(d) => d.join(format!("{}.out", stem)),
+                None => parent.join(format!("{}.out", stem)),
+            };
             std::fs::write(&out_path, &out.data).map_err(|e| {
                 ApiError::new(
                     "decompress.write_failed",
                     format!("write {}: {}", out_path.display(), e),
                 )
             })?;
+            progress(ProgressEvent {
+                phase: "done".to_string(),
+                current_file: stem.clone(),
+                files_done: 1,
+                files_total: 1,
+                bytes_done: out.data.len() as u64,
+                bytes_total: out.data.len() as u64,
+            });
             (
                 "v5-v6-single",
                 out_path.to_string_lossy().into_owned(),
@@ -821,6 +878,15 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
             ));
         };
 
+    progress(ProgressEvent {
+        phase: "done".to_string(),
+        current_file: String::new(),
+        files_done: n_files,
+        files_total: n_files,
+        bytes_done: restored_size,
+        bytes_total: restored_size,
+    });
+
     let decompress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
     Ok(DecompressTargetResult {
         archive_kind: kind,
@@ -830,6 +896,126 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
         output_path,
         decompress_time_ms,
     })
+}
+
+/// Backward-compatible no-progress wrapper.
+pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult> {
+    decompress_target_with_progress(input_path, None, |_| {})
+}
+
+/// One entry in the archive preview — a file or directory inside
+/// the archive, with its uncompressed size.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchivePreviewEntry {
+    pub path: String,
+    pub size: u64,
+    /// True if this entry is a directory (folder entry); false for
+    /// a regular file. Multi-file archives may have directory
+    /// entries for free, but most don't — we infer from the
+    /// entry size being 0 or from a trailing slash on the path.
+    pub is_dir: bool,
+}
+
+/// Result of peeking at an archive. Lets the GUI render a file
+/// list (WinRAR-style) before the user commits to extracting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeekResult {
+    pub archive_kind: &'static str,
+    pub n_files: u64,
+    pub total_uncompressed: u64,
+    pub compressed_size: u64,
+    pub files: Vec<ArchivePreviewEntry>,
+}
+
+/// Peek at an archive's contents without decompressing. Reads just
+/// enough of the file to discover the TOC:
+///
+/// - `NXS6\n` → parses the solid header + TOC. Does NOT
+///   decompress the LZMA block.
+/// - `NXAR\n` → reuses the existing per-file peek.
+/// - `NXS\x00` (single v4) / `0x05` (single v5/v6) → returns a
+///   synthetic "1 file" entry with no path.
+///
+/// Unknown formats return an error.
+pub fn peek_archive_target(input_path: &Path) -> ApiResult<PeekResult> {
+    let meta = std::fs::metadata(input_path).map_err(|e| {
+        ApiError::new(
+            "peek.not_found",
+            format!("cannot stat {}: {}", input_path.display(), e),
+        )
+    })?;
+    let compressed_size = meta.len();
+    let bytes = std::fs::read(input_path).map_err(|e| {
+        ApiError::new("peek.read_failed", format!("read: {}", e))
+    })?;
+
+    if &bytes[..5] == crate::solid_archive::MAGIC {
+        // NXS6: parse the TOC inline (no LZMA decode).
+        let (entries, total) = crate::solid_archive::peek_toc(&bytes).map_err(|e| {
+            ApiError::new("solid.peek_failed", e)
+        })?;
+        let files: Vec<ArchivePreviewEntry> = entries
+            .into_iter()
+            .map(|e| ArchivePreviewEntry {
+                path: e.name,
+                size: e.original_size,
+                is_dir: false,
+            })
+            .collect();
+        Ok(PeekResult {
+            archive_kind: "nxs6",
+            n_files: files.len() as u64,
+            total_uncompressed: total,
+            compressed_size,
+            files,
+        })
+    } else if &bytes[..4] == b"NXAR" {
+        let result = peek_archive(&bytes).map_err(|e| {
+            ApiError::new("nxar.peek_failed", e.message)
+        })?;
+        let total = result.total_original_size;
+        let files: Vec<ArchivePreviewEntry> = result
+            .entries
+            .into_iter()
+            .map(|e| ArchivePreviewEntry {
+                path: e.path,
+                size: e.original_size,
+                is_dir: false,
+            })
+            .collect();
+        let n = files.len() as u64;
+        Ok(PeekResult {
+            archive_kind: "nxar",
+            n_files: n,
+            total_uncompressed: total,
+            compressed_size,
+            files,
+        })
+    } else if &bytes[..4] == b"NXS\x00" || bytes[0] == 0x05 {
+        // Single-file archives: no TOC, no file list.
+        Ok(PeekResult {
+            archive_kind: if bytes[0] == 0x05 { "v5-v6-single" } else { "v4" },
+            n_files: 1,
+            total_uncompressed: compressed_size, // best guess = compressed size
+            compressed_size,
+            files: vec![ArchivePreviewEntry {
+                path: input_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "output".to_string()),
+                size: compressed_size,
+                is_dir: false,
+            }],
+        })
+    } else {
+        Err(ApiError::new(
+            "peek.unknown_format",
+            format!(
+                "unknown archive format (magic: {:02x}{:02x}{:02x}{:02x}…)",
+                bytes[0], bytes[1], bytes[2], bytes[3]
+            ),
+        ))
+    }
 }
 
 /// Compute the output path for an auto-saved compressed file.

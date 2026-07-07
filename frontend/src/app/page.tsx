@@ -5,12 +5,10 @@ import { Dropzone } from "@/components/Dropzone";
 import { ActionToolbar, looksLikeArchive } from "@/components/ActionToolbar";
 import { ProgressBar, type Progress } from "@/components/ProgressBar";
 import { SaveTarget, defaultOutputFilename } from "@/components/SaveTarget";
+import { ArchivePreview, type Preview } from "@/components/ArchivePreview";
 import { EntropyMonitor, type Metrics } from "@/components/EntropyMonitor";
 import { ConfigPanel, type Mode, type Strength } from "@/components/ConfigPanel";
 
-// Tauri APIs are only available inside the Tauri Webview. In the
-// browser (dev mode outside Tauri) we stub them so the UI can be
-// developed independently.
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -32,6 +30,14 @@ interface DecompressTargetRow {
   is_directory: boolean;
   output_path: string;
   decompress_time_ms: number;
+}
+
+interface PeekRow {
+  archive_kind: string;
+  n_files: number;
+  total_uncompressed: number;
+  compressed_size: number;
+  files: { path: string; size: number; is_dir: boolean }[];
 }
 
 async function tauriInvoke<T>(
@@ -71,10 +77,49 @@ export default function Home() {
   const [lastOutputPath, setLastOutputPath] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
-  // `saveDir` overrides the "next to input" default when set.
+  // COMPRESS → save destination dir.
   const [saveDir, setSaveDir] = useState<string | null>(null);
+  // DECOMPRESS → extract destination dir.
+  const [extractDir, setExtractDir] = useState<string | null>(null);
+  // Archive preview (shown when user picks an archive).
+  const [preview, setPreview] = useState<Preview | null>(null);
+  // What the user wants to do with the selection: compress or decompress.
+  // Auto-detected from the file extension but the buttons can override.
+  const [intent, setIntent] = useState<"compress" | "decompress">(
+    "compress"
+  );
 
-  // ---- Compress (explicit, on user click) ----
+  // When selectedPath changes, decide if it's an archive and fetch
+  // a preview. Also reset preview when the path clears.
+  useEffect(() => {
+    if (!selectedPath) {
+      setPreview(null);
+      return;
+    }
+    if (!looksLikeArchive(selectedPath)) {
+      setPreview(null);
+      setIntent("compress");
+      return;
+    }
+    // It's an archive — peek and switch intent to decompress.
+    setIntent("decompress");
+    tauriInvoke<PeekRow>("peek_archive_target_cmd", { path: selectedPath })
+      .then((r) => {
+        setPreview({
+          archive_kind: r.archive_kind,
+          n_files: r.n_files,
+          total_uncompressed: r.total_uncompressed,
+          compressed_size: r.compressed_size,
+          files: r.files,
+        });
+      })
+      .catch((e) => {
+        console.error("peek failed:", e);
+        setPreview(null);
+      });
+  }, [selectedPath]);
+
+  // ---- Compress (explicit) ----
   const onCompress = useCallback(async () => {
     if (!selectedPath) return;
     const { backend, lzma } = resolveBackend(mode, strength);
@@ -112,12 +157,9 @@ export default function Home() {
       setLastOutputPath(r.output_path || null);
       setStatus(r.output_path ? "ok" : "saved-elsewhere");
     } catch (e: any) {
-      console.error(e);
       setErrorMsg(String(e?.message ?? e));
       setStatus("err");
     } finally {
-      // Keep the "done" progress visible for a beat so the user
-      // sees the 100% flash, then clear it.
       setTimeout(() => setProgress(null), 1500);
     }
   }, [selectedPath, saveDir, mode, strength]);
@@ -138,7 +180,9 @@ export default function Home() {
     try {
       const r = await tauriInvoke<DecompressTargetRow>(
         "decompress_target_cmd",
-        { path: selectedPath }
+        {
+          req: { path: selectedPath, output_dir: extractDir },
+        }
       );
       setMetrics({
         originalSize: r.restored_size,
@@ -152,13 +196,12 @@ export default function Home() {
       setLastOutputPath(r.output_path);
       setStatus("ok");
     } catch (e: any) {
-      console.error(e);
       setErrorMsg(String(e?.message ?? e));
       setStatus("err");
     } finally {
       setTimeout(() => setProgress(null), 1500);
     }
-  }, [selectedPath, mode, strength]);
+  }, [selectedPath, extractDir, mode, strength]);
 
   // ---- Open saved output in Finder ----
   const onOpen = useCallback(async () => {
@@ -170,7 +213,7 @@ export default function Home() {
     }
   }, [lastOutputPath]);
 
-  // ---- Reset state (CLEAR) ----
+  // ---- Clear ----
   const onClear = useCallback(() => {
     setSelectedPath(null);
     setSelectedIsDir(false);
@@ -179,10 +222,13 @@ export default function Home() {
     setErrorMsg(null);
     setProgress(null);
     setSaveDir(null);
+    setExtractDir(null);
+    setPreview(null);
+    setIntent("compress");
     setStatus("idle");
   }, []);
 
-  // ---- Pick handlers ----
+  // ---- Pickers ----
   const onPickFile = useCallback(async () => {
     try {
       const path = await tauriInvoke<string | null>("pick_file_cmd");
@@ -192,7 +238,6 @@ export default function Home() {
       }
     } catch (e: any) {
       setErrorMsg(String(e?.message ?? e));
-      setStatus("err");
     }
   }, []);
 
@@ -205,12 +250,11 @@ export default function Home() {
       }
     } catch (e: any) {
       setErrorMsg(String(e?.message ?? e));
-      setStatus("err");
     }
   }, []);
 
-  // ---- Choose a save destination folder (native dialog) ----
-  const onPickSaveFolder = useCallback(async () => {
+  // ---- Choose COMPRESS destination folder (native save dialog) ----
+  const onPickCompressFolder = useCallback(async () => {
     try {
       const suggested =
         defaultOutputFilename(selectedPath, mode, selectedIsDir) ||
@@ -219,22 +263,23 @@ export default function Home() {
         "pick_save_location_cmd",
         { req: { default_filename: suggested } }
       );
-      if (!chosen) return; // user cancelled
-      // The user chose a specific FILE. We extract the dir part and
-      // use that as the save target.
+      if (!chosen) return;
       const lastSlash = chosen.lastIndexOf("/");
-      const dir = lastSlash > 0 ? chosen.slice(0, lastSlash) : chosen;
-      setSaveDir(dir);
+      setSaveDir(lastSlash > 0 ? chosen.slice(0, lastSlash) : chosen);
       setErrorMsg(null);
     } catch (e: any) {
       setErrorMsg(String(e?.message ?? e));
     }
   }, [selectedPath, mode, selectedIsDir]);
 
-  // ---- Reset save target to "next to input" ----
-  const onResetSave = useCallback(() => {
-    setSaveDir(null);
-    setErrorMsg(null);
+  // ---- Choose EXTRACT destination folder (native dir picker) ----
+  const onPickExtractFolder = useCallback(async () => {
+    try {
+      const path = await tauriInvoke<string | null>("pick_directory_cmd");
+      if (path) setExtractDir(path);
+    } catch (e: any) {
+      setErrorMsg(String(e?.message ?? e));
+    }
   }, []);
 
   // ---- Self-test ----
@@ -263,7 +308,6 @@ export default function Home() {
   useEffect(() => {
     if (!isTauri) return;
     let unlistenDrop: (() => void) | undefined;
-    let unlistenEnter: (() => void) | undefined;
     (async () => {
       try {
         const eventMod = (window as any).__TAURI__?.event;
@@ -274,9 +318,6 @@ export default function Home() {
             const paths: string[] = e?.payload?.paths ?? [];
             if (paths.length > 0) {
               setSelectedPath(paths[0]);
-              // Heuristic: if path has no extension at the end, it
-              // might be a directory. The Rust side re-detects
-              // anyway via metadata when COMPRESS is clicked.
               setSelectedIsDir(true);
             }
           }
@@ -287,7 +328,6 @@ export default function Home() {
     })();
     return () => {
       if (unlistenDrop) unlistenDrop();
-      if (unlistenEnter) unlistenEnter();
     };
   }, []);
 
@@ -326,6 +366,10 @@ export default function Home() {
   const working = status === "working";
   const selectedName = selectedPath ? basename(selectedPath) : null;
   const outputName = lastOutputPath ? basename(lastOutputPath) : null;
+  const showingPreview =
+    !!selectedPath && looksLikeArchive(selectedPath) && preview !== null;
+  const compressDisabled = !selectedPath || intent !== "compress" || working;
+  const decompressDisabled = !selectedPath || intent !== "decompress" || working;
 
   return (
     <main className="h-screen flex flex-col bg-bg-base">
@@ -346,7 +390,9 @@ export default function Home() {
               status === "ok" ? "border-matrix-500 text-matrix-500" : "",
               status === "working" ? "border-cyan-500 text-cyan-400" : "",
               status === "err" ? "border-err text-err" : "",
-              status === "saved-elsewhere" ? "border-amber-500 text-amber-400" : "",
+              status === "saved-elsewhere"
+                ? "border-amber-500 text-amber-400"
+                : "",
               status === "idle" ? "border-zinc-700 text-zinc-500" : "",
             ].join(" ")}
           >
@@ -362,7 +408,6 @@ export default function Home() {
             onPickFolder={onPickFolder}
           />
 
-          {/* Selection / output strip */}
           <div className="panel p-3 font-mono text-[10px] tracking-wider">
             <div className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
               <div className="metric-label">selected</div>
@@ -388,6 +433,49 @@ export default function Home() {
                   </span>
                 )}
               </div>
+              <div className="metric-label">action</div>
+              <div className="flex items-center gap-3">
+                <label className="flex items-center gap-1 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="intent"
+                    checked={intent === "compress"}
+                    onChange={() => setIntent("compress")}
+                    disabled={!selectedPath || working}
+                  />
+                  <span
+                    className={
+                      intent === "compress"
+                        ? "text-cyan-400"
+                        : "text-zinc-500"
+                    }
+                  >
+                    compress
+                  </span>
+                </label>
+                <label className="flex items-center gap-1 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="intent"
+                    checked={intent === "decompress"}
+                    onChange={() => setIntent("decompress")}
+                    disabled={!selectedPath || working}
+                  />
+                  <span
+                    className={
+                      intent === "decompress"
+                        ? "text-magenta-400"
+                        : "text-zinc-500"
+                    }
+                  >
+                    decompress
+                  </span>
+                </label>
+                <span className="text-zinc-700">—</span>
+                <span className="text-amber-400 text-[9px]">
+                  {intent === "compress" ? "input → archive" : "archive → output"}
+                </span>
+              </div>
               <div className="metric-label">output</div>
               <div className="text-zinc-300 truncate">
                 {lastOutputPath ? (
@@ -398,14 +486,17 @@ export default function Home() {
                   </>
                 ) : (
                   <span className="text-zinc-600">
-                    (no output yet — click COMPRESS or DECOMPRESS)
+                    (no output yet — click {intent === "compress" ? "COMPRESS" : "DECOMPRESS"})
                   </span>
                 )}
               </div>
             </div>
           </div>
 
-          {/* Progress bar — only visible while compressing */}
+          {/* Archive preview (only when an archive is selected) */}
+          {showingPreview && <ArchivePreview preview={preview} />}
+
+          {/* Progress bar */}
           {progress && <ProgressBar progress={progress} />}
         </div>
 
@@ -414,9 +505,14 @@ export default function Home() {
             selectedPath={selectedPath}
             isDirectory={selectedIsDir}
             mode={mode}
-            outputDir={saveDir}
-            onPickFolder={onPickSaveFolder}
-            onReset={onResetSave}
+            outputDir={intent === "compress" ? saveDir : extractDir}
+            onPickFolder={
+              intent === "compress" ? onPickCompressFolder : onPickExtractFolder
+            }
+            onReset={() => {
+              if (intent === "compress") setSaveDir(null);
+              else setExtractDir(null);
+            }}
           />
           <ActionToolbar
             selectedPath={selectedPath}
@@ -426,6 +522,11 @@ export default function Home() {
             onDecompress={onDecompress}
             onOpen={onOpen}
             onClear={onClear}
+            // Override the per-mode disable since we now have an
+            // intent radio: each button only runs when its intent
+            // matches.
+            forceCompressActive={!compressDisabled}
+            forceDecompressActive={!decompressDisabled}
           />
           <div className="flex-1 min-h-0">
             <EntropyMonitor metrics={metrics} />
@@ -449,6 +550,7 @@ export default function Home() {
             : "· awaiting input"}
         </div>
         <div className="flex gap-3 text-zinc-600 shrink-0">
+          <span>intent: {intent}</span>
           <span>mode: {mode}</span>
           <span>str: {strength}</span>
           <span>dict: 5348</span>

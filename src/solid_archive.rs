@@ -217,7 +217,21 @@ pub fn compress(files: &[(String, Vec<u8>)], lzma_level: u32) -> Result<Vec<u8>,
 /// originals. To get the original back you would need to feed each
 /// returned file through a formatter, which is not what this module
 /// does (and not what the v6 backend ever claimed to do).
-pub fn decompress(archive: &[u8]) -> Result<(Vec<FileEntry>, Vec<u8>), String> {
+/// Read just the TOC of a solid archive, WITHOUT touching the
+/// LZMA block. Returns the file entries (with uncompressed sizes)
+/// and the sum of those sizes. Used by the GUI preview so the
+/// user can browse a `.nxs6` archive without paying full
+/// decompression cost.
+pub fn peek_toc(archive: &[u8]) -> Result<(Vec<FileEntry>, u64), String> {
+    let entries = parse_toc(archive)?;
+    let total: u64 = entries.iter().map(|e| e.original_size).sum();
+    Ok((entries, total))
+}
+
+/// Parse the TOC portion of a solid archive (header + entry list)
+/// and return the entries. Shared between `peek_toc` and
+/// `decompress`.
+pub fn parse_toc(archive: &[u8]) -> Result<Vec<FileEntry>, String> {
     if archive.len() < MAGIC.len() + 1 + 4 {
         return Err("solid archive: too short for header".into());
     }
@@ -270,7 +284,12 @@ pub fn decompress(archive: &[u8]) -> Result<(Vec<FileEntry>, Vec<u8>), String> {
                 .map_err(|_| "solid archive: bad pre_size".to_string())?,
         );
         pos += 8;
-        let preprocessor = Preprocessor::from_u8(archive[pos])?;
+        let preprocessor = match archive[pos] {
+            0 => Preprocessor::Raw,
+            1 => Preprocessor::Conservative,
+            2 => Preprocessor::SwcAst,
+            other => return Err(format!("unknown preprocessor id: {}", other)),
+        };
         pos += 1;
         let solid_offset = u64::from_le_bytes(
             archive[pos..pos + 8]
@@ -285,6 +304,21 @@ pub fn decompress(archive: &[u8]) -> Result<(Vec<FileEntry>, Vec<u8>), String> {
             preprocessor,
             solid_offset,
         });
+    }
+    Ok(entries)
+}
+
+pub fn decompress(archive: &[u8]) -> Result<(Vec<FileEntry>, Vec<u8>), String> {
+    // Reuse parse_toc for the header + entry walk, then walk
+    // through the entries manually a second time to compute `pos`
+    // (the byte offset just past the TOC) — the LZMA solid block
+    // begins there. We don't try to be clever about avoiding the
+    // second walk because the TOC entries are tens of bytes each
+    // and the user pays for one LZMA stream either way.
+    let entries = parse_toc(archive)?;
+    let mut pos = MAGIC.len() + 1 + 4;
+    for e in &entries {
+        pos += 2 + e.name.len() + 8 + 8 + 1 + 8;
     }
 
     // Step 2: LZMA-decompress the rest of the file.

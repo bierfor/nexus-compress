@@ -20,6 +20,7 @@ fn main() {
             commands::compress_directory_with_backend_cmd,
             commands::compress_target_cmd,
             commands::decompress_target_cmd,
+            commands::peek_archive_target_cmd,
             commands::reveal_in_finder_cmd,
             commands::pick_save_location_cmd,
             commands::backend_info_cmd,
