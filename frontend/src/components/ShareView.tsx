@@ -364,12 +364,22 @@ function ReceivePanel() {
   const [resolvedDownloads, setResolvedDownloads] = useState("");
   const [resolvedHome, setResolvedHome] = useState("");
   const [suggestedName, setSuggestedName] = useState("");
-  // Sprint 5.6.25: tracks whether the user has manually typed
-  // in the destination field. While false, the field auto-syncs
-  // to `<resolvedDownloads>/<suggestedName>` whenever the
-  // filename becomes known. While true, the auto-sync is
+  // Sprint 5.6.25: tracks whether the user has manually picked
+  // a destination via the save dialog. While false, the field
+  // auto-syncs to `<resolvedDownloads>/<suggestedName>` whenever
+  // the filename becomes known. While true, the auto-sync is
   // disabled so we don't clobber the user's chosen destination.
+  // Reset to false whenever the user changes the token (handled
+  // by a dedicated useEffect that watches [token] only).
   const [userEditedPath, setUserEditedPath] = useState(false);
+
+  // Sprint 5.6.26: true while the v2/v3 filename probe is in
+  // flight. While true, the "Cambiar" button is disabled so the
+  // user can't open the save dialog with a fallback default and
+  // pick a path before the real filename is known. Prevents the
+  // race: "user clicks Cambiar → probe resolves → user has a
+  // path with the wrong filename and we can't auto-fix it".
+  const [probing, setProbing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ReceiveResp | null>(null);
@@ -398,6 +408,17 @@ function ReceivePanel() {
     })();
   }, []);
 
+// Sprint 5.6.26: separate effect for the manual-edit reset.
+// Triggered ONLY by the user's actual onChange action (typing,
+// pasting, clearing the token field). Decoupled from the
+// probe logic so the behaviour is predictable regardless of
+// probe timing — clearing the token resets the flag, pasting a
+// new token resets the flag, no probe race can ever leak an
+// unwanted reset.
+  useEffect(() => {
+    setUserEditedPath(false);
+  }, [token]);
+
 // Peek filename from v1 token (parsed locally) and from v2/v3
   // (probes the sender's /meta endpoint via p2p_peek_filename_cmd).
   // Sprint 5.6.25: works for ALL token versions now, so the path
@@ -405,11 +426,7 @@ function ReceivePanel() {
   // waiting for the receive round-trip to complete.
   useEffect(() => {
     const tk = token.trim();
-    if (!tk) { setSuggestedName(""); setUserEditedPath(false); return; }
-    // Sprint 5.6.25: new token → reset the manual-edit flag so
-    // the auto-sync can populate the path field with the new
-    // file's destination. The user can re-override after.
-    setUserEditedPath(false);
+    if (!tk) { setSuggestedName(""); setProbing(false); return; }
     if (kind === "v1") {
       try {
         const b64 = tk.slice("nx:1:".length);
@@ -422,6 +439,13 @@ function ReceivePanel() {
       // Probe the sender's /meta to read the original filename.
       // We don't wait — fire-and-forget. The path field will
       // auto-update if the user hasn't manually edited it yet.
+      //
+      // Sprint 5.6.26: while probing, the "Cambiar" button is
+      // disabled and a subtle spinner shows next to the path.
+      // This kills the race "user clicks Cambiar → opens dialog
+      // with fallback → picks dir → probe resolves → user has
+      // a path with the wrong filename".
+      setProbing(true);
       let cancelled = false;
       (async () => {
         try {
@@ -429,11 +453,15 @@ function ReceivePanel() {
             "p2p_peek_filename_cmd",
             { req: { token: tk, timeout_secs: 3 } }
           );
-          if (!cancelled && r?.filename) setSuggestedName(r.filename);
+          if (!cancelled) {
+            if (r?.filename) setSuggestedName(r.filename);
+            setProbing(false);
+          }
         } catch {
           // Sender not reachable / token stale — silently skip.
           // The path field will still default to ~/Downloads
           // with the suggestedName being empty (so just the dir).
+          if (!cancelled) setProbing(false);
         }
       })();
       return () => { cancelled = true; };
@@ -615,8 +643,25 @@ function ReceivePanel() {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-zinc-500">📁</span>
-          <span className="flex-1 text-zinc-300 text-[12px] font-mono truncate">{outputPath}</span>
-          <button onClick={onChangeDest} className="text-zinc-500 hover:text-zinc-300 text-[11px] transition-colors shrink-0">
+          <span className="flex-1 text-zinc-300 text-[12px] font-mono truncate">
+            {outputPath || (
+              <span className="text-zinc-600 italic">
+                {probing ? t("share.receive.dest.probing") : t("share.receive.dest.empty")}
+              </span>
+            )}
+          </span>
+          {/* Sprint 5.6.26: subtle spinner while probing, to
+              signal that the system is fetching the real
+              filename and the field will auto-fill shortly. */}
+          {probing && (
+            <span className="inline-block w-3 h-3 border border-cyan-500/40 border-t-cyan-400 rounded-full animate-spin shrink-0" />
+          )}
+          <button
+            onClick={onChangeDest}
+            disabled={probing}
+            title={probing ? t("share.receive.dest.change.waiting") : undefined}
+            className="text-zinc-500 hover:text-zinc-300 disabled:text-zinc-700 disabled:cursor-not-allowed text-[11px] transition-colors shrink-0"
+          >
             {t("share.receive.dest.change")}
           </button>
         </div>

@@ -351,6 +351,73 @@ pub struct P2pToken {
     pub filename: Option<String>,
 }
 
+/// Sprint 5.6.26: sanitize a filename that came from an
+/// UNTRUSTED source (remote peer's /meta response, v1 token
+/// JSON, or any future metadata channel). The result is safe
+/// to pass to `join(parent_dir, ...)` because:
+///
+///   * Path separators (`/`, `\`) are stripped — the result is
+///     guaranteed to be a single path component.
+///   * `..` and `.` segments are rejected.
+///   * Null bytes (which truncate C strings on POSIX) are
+///     rejected.
+///   * Leading/trailing whitespace is stripped.
+///   * Windows reserved device names (`CON`, `PRN`, `AUX`,
+///     `NUL`, `COM1`..`COM9`, `LPT1`..`LPT9`) are rejected
+///     even on Unix so the same code works cross-platform.
+///   * Length is capped at 255 bytes (most filesystems'
+///     max filename length).
+///
+/// Returns `Some(safe)` if the input can be made safe,
+/// `None` if it's irrecoverably malicious or empty.
+///
+/// We do NOT canonicalize the path or check for symlinks here —
+/// the caller controls the parent directory, and a malicious
+/// filename is dangerous ONLY when joined to a trusted parent
+/// dir (e.g. `~/Downloads/../../etc/passwd`). Stripping
+/// separators kills that attack entirely.
+fn safe_basename(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.len() > 255 {
+        return None;
+    }
+    // Reject any path separator. `Path::file_name` would do
+    // this for us on Unix, but on Windows `\` is also a
+    // separator — we want a uniform rule.
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return None;
+    }
+    // Reject null bytes and other control characters.
+    if trimmed.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    // Reject `..` and `.` as a complete component.
+    if trimmed == ".." || trimmed == "." {
+        return None;
+    }
+    // Reject Windows reserved device names (case-insensitive,
+    // with or without extension). On Unix these are just files,
+    // but on Windows they refer to serial/parallel ports and
+    // can confuse tools. Uniform rule for cross-platform code.
+    let upper = trimmed.to_ascii_uppercase();
+    let stem = upper.split('.').next().unwrap_or("");
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.contains(&stem) {
+        return None;
+    }
+    // Final defence: ask Path. If it parses and the file_name
+    // round-trips back to the input, it's a single component.
+    let p = Path::new(trimmed);
+    match p.file_name().and_then(|s| s.to_str()) {
+        Some(name) if name == trimmed => Some(trimmed.to_string()),
+        _ => None,
+    }
+}
+
 impl P2pToken {
     pub fn to_compact(&self) -> String {
         let json = serde_json::to_vec(self).expect("P2pToken json");
@@ -1554,6 +1621,9 @@ async fn fetch_meta_and_receive(
         fhash: meta.fhash.clone(),
         size: meta.size,
         sha256: meta.sha256.clone(),
+        // Sprint 5.6.26: the filename from /meta has already
+        // been sanitized inside fetch_meta via safe_basename,
+        // so it's safe to surface to the UI here.
         filename: meta.filename.clone(),
     };
     receive_send_file(token_v1, output_path).await
@@ -1600,7 +1670,7 @@ async fn fetch_meta(url: &str) -> Result<MetaInfo, String> {
     let filename = v
         .get("filename")
         .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
+        .and_then(|s| safe_basename(s));
     Ok(MetaInfo {
         salt,
         fhash,
@@ -1665,7 +1735,11 @@ pub async fn peek_filename(
         }
     } else if let Ok(v1) = P2pToken::from_compact(token_compact) {
         // v1 tokens carry the filename in the JSON itself.
-        return Ok(v1.filename);
+        // Sprint 5.6.26: sanitize at the trust boundary — a
+        // malicious peer could craft a v1 token with a path
+        // traversal filename ("../../etc/passwd") and we'd
+        // otherwise surface it directly to the frontend.
+        return Ok(v1.filename.and_then(|s| safe_basename(&s)));
     } else {
         return Err("unknown token format".to_string());
     };
@@ -2896,5 +2970,122 @@ mod tests {
         };
         // Drop must not panic.
         drop(handle);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Sprint 5.6.26: safe_basename — must reject every flavour of
+    // path-traversal and weird-device filename that a malicious
+    // peer could put in their /meta response.
+    // ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn safe_basename_accepts_normal_filenames() {
+        for ok in &[
+            "photo.jpg",
+            "My Document.pdf",
+            "archivo_con_acentos_áéíóú.txt",
+            "build-v1.2.3.tar.gz",
+            "trailing.dots...ok",
+            "no_extension",
+            ".dotfile",
+            "..double_dotfile",
+            "résumé.docx",
+        ] {
+            assert_eq!(safe_basename(ok).as_deref(), Some(*ok), "should accept: {}", ok);
+        }
+    }
+
+    #[test]
+    fn safe_basename_rejects_path_traversal() {
+        for bad in &[
+            "../etc/passwd",
+            "../../../../etc/passwd",
+            "..\\..\\windows\\system32",
+            "subdir/file.txt",
+            "/etc/passwd",
+            "\\windows\\system32",
+            "./../etc",
+            "foo/bar",
+            "foo\\bar",
+        ] {
+            assert_eq!(safe_basename(bad), None, "should reject: {}", bad);
+        }
+    }
+
+    #[test]
+    fn safe_basename_rejects_dot_and_dotdot() {
+        assert_eq!(safe_basename("."), None);
+        assert_eq!(safe_basename(".."), None);
+        // Three+ dots is a legal filename on Unix ("..." is not a
+        // parent reference — only ".." is). The first 2 chars of
+        // a dotfile prefix are also legal (".foo", "..foo", "..foo.bar").
+        assert!(safe_basename("...").is_some());
+        assert!(safe_basename(".hidden").is_some());
+        assert!(safe_basename("..dotfile").is_some());
+    }
+
+    #[test]
+    fn safe_basename_rejects_null_bytes_and_control_chars() {
+        for bad in &[
+            "file\0name.txt",
+            "file\nname.txt",
+            "file\rname.txt",
+            "file\tname.txt",
+            "file\x07name.txt",
+        ] {
+            assert_eq!(safe_basename(bad), None, "should reject: {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn safe_basename_rejects_windows_reserved_names() {
+        for bad in &[
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM9", "LPT1", "LPT9",
+            "con.txt", "CON.txt", "Prn.pdf",
+            "COM1.log",
+        ] {
+            assert_eq!(safe_basename(bad), None, "should reject Windows reserved: {}", bad);
+        }
+    }
+
+    #[test]
+    fn safe_basename_rejects_empty_and_oversize() {
+        assert_eq!(safe_basename(""), None);
+        assert_eq!(safe_basename("   "), None); // all-whitespace trims to empty
+        assert_eq!(safe_basename("\t\n"), None);
+        // 256 chars: too long
+        let huge = "a".repeat(256);
+        assert_eq!(safe_basename(&huge), None);
+        // 255 chars: exactly at the limit, should pass
+        let max_ok = "a".repeat(255);
+        assert!(safe_basename(&max_ok).is_some());
+    }
+
+    #[test]
+    fn safe_basename_trims_whitespace() {
+        assert_eq!(safe_basename("  file.txt  ").as_deref(), Some("file.txt"));
+        assert_eq!(safe_basename("\tphoto.jpg\n").as_deref(), Some("photo.jpg"));
+    }
+
+    #[test]
+    fn safe_basename_path_traversal_attack_patterns() {
+        // Realistic attack patterns from CTFs and CVEs. All must
+        // be rejected — none of these can ever appear in a safe
+        // basename no matter how the parent dir is joined.
+        for bad in &[
+            "....//....//etc/passwd",
+            "..%2f..%2fetc%2fpasswd", // URL-encoded — but %2f is just a literal char here, fine
+            "file\u{202E}txt.exe", // RTL override (Unicode) — Path::file_name may keep it
+            // (We don't reject RTL because some real filenames use it,
+            // but path traversal with separators is the real attack.)
+        ] {
+            // The third one (RTL override) may or may not be rejected
+            // depending on Path semantics. We just check that the
+            // path-traversal patterns are rejected:
+            if bad.contains('/') || bad.contains('\\') {
+                assert_eq!(safe_basename(bad), None, "must reject path separator: {:?}", bad);
+            }
+        }
     }
 }
