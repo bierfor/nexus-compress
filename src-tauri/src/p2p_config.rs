@@ -29,6 +29,7 @@
 //! interchangeable from the call site.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -85,6 +86,26 @@ impl Default for TunnelConfig {
 const TUNNEL_CONFIG_FILE: &str = "nexus_config.json";
 const KEYRING_SERVICE: &str = "com.nexus-rar.tunnel";
 const KEYRING_USER: &str = "tunnel-token";
+
+// ============================================================================
+//  mDNS service constants (Sprint 5.5.2 Direct Mode)
+// ============================================================================
+
+/// mDNS service type for Direct Mode. Browsers filter by this
+/// (`_nexus-share._tcp.local`) to avoid noise from other mDNS
+/// services on the LAN.
+pub const SERVICE_TYPE: &str = "_nexus-share._tcp.local";
+
+/// Wire prefix for v2 tokens. v1 uses `nx:1:` + base64url JSON
+/// (Quick/Named Tunnel URL). v2 uses `nx:2:` + a colon-delimited
+/// payload (Direct Mode mDNS coordinates). The receiver reads
+/// the prefix to decide which decode path to take.
+pub const TOKEN_PREFIX_V2: &str = "nx:2:";
+
+/// Length (in hex chars) of the service-name hash. 6 hex chars
+/// = 24 bits = ~16M unique codes — collision probability for
+/// one sender session is effectively zero.
+pub const SERVICE_HASH_LEN: usize = 6;
 
 // ============================================================================
 //  TokenStore trait + production impl
@@ -296,6 +317,140 @@ pub fn validate_hostname(hostname: &str) -> Result<String, String> {
 }
 
 // ============================================================================
+//  v2 token + service-name derivation (Sprint 5.5.2 Direct Mode)
+// ============================================================================
+//
+// v1 tokens (`nx:1:<base64url-json>`) carry a Cloudflare URL.
+// v2 tokens (`nx:2:direct:<service_hash>:<code>`) carry mDNS
+// coordinates — no URL, no Cloudflare, no public IP. The
+// receiver browses mDNS for the service name derived from the
+// hash and gets the sender's IP+port via the SRV record.
+//
+// Design choice (from the pre-flight discussion):
+//   - Service hash is derived from the 4-word code itself
+//     (no separate random string for the user to type).
+//   - Hash is `SHA-256(code)` truncated to 6 hex chars
+//     (24 bits — collision-free for one sender session).
+//   - Token format is plain colon-delimited text, NOT base64.
+//     Easier for humans to eyeball, easier to grep in logs.
+
+/// Derive the short service-name from a 4-word code. Returns
+/// `nx-<6hexchars>`, suitable for use as an mDNS service name
+/// (`nx-abc123._nexus-share._tcp.local`).
+pub fn derive_service_short_name(code: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(code.as_bytes());
+    let hash = h.finalize();
+    // Take the first 3 bytes = 6 hex chars.
+    let hex: String = hash[..3]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    format!("nx-{}", hex)
+}
+
+/// Derive the full mDNS service name (with type suffix). The
+/// receiver uses this string to filter browse results.
+pub fn derive_mdns_service_name(code: &str) -> String {
+    format!(
+        "{}.{}",
+        derive_service_short_name(code),
+        SERVICE_TYPE
+    )
+}
+
+/// v2 token, parsed. `service_hash` is the 6-hex-char hash and
+/// `code` is the 4-word passphrase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct P2pTokenV2 {
+    pub service_hash: String,
+    pub code: String,
+}
+
+/// Format a v2 token from its parts. Pure constructor — no
+/// validation. Use `parse_v2_token` if you need validation.
+pub fn format_v2_token(service_hash: &str, code: &str) -> String {
+    format!("{}direct:{}:{}", TOKEN_PREFIX_V2, service_hash, code)
+}
+
+/// Parse a v2 token string. Returns the parsed parts on success
+/// or a human-readable error on failure.
+pub fn parse_v2_token(s: &str) -> Result<P2pTokenV2, String> {
+    let body = s
+        .strip_prefix(TOKEN_PREFIX_V2)
+        .ok_or_else(|| {
+            format!(
+                "P2P v2 token must start with '{}', got: {}",
+                TOKEN_PREFIX_V2,
+                &s.chars().take(8).collect::<String>()
+            )
+        })?;
+    // nx:2:direct:<hash>:<code>
+    // The code can contain ':' in theory (4-word codes don't
+    // but defense in depth), so we splitn(3, ':') after the
+    // prefix and treat the last segment as the full code.
+    let parts: Vec<&str> = body.splitn(3, ':').collect();
+    if parts.len() != 3 {
+        return Err(format!(
+            "P2P v2 token must have format 'nx:2:<mode>:<hash>:<code>' (got {} parts)",
+            parts.len()
+        ));
+    }
+    let mode = parts[0];
+    if mode != "direct" {
+        return Err(format!(
+            "P2P v2 token mode must be 'direct' (got '{}')",
+            mode
+        ));
+    }
+    let service_hash = parts[1];
+    if service_hash.len() != SERVICE_HASH_LEN
+        || !service_hash.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(format!(
+            "P2P v2 service_hash must be {} hex chars (got '{}')",
+            SERVICE_HASH_LEN, service_hash
+        ));
+    }
+    let code = parts[2];
+    validate_v2_code(code)?;
+    Ok(P2pTokenV2 {
+        service_hash: service_hash.to_string(),
+        code: code.to_string(),
+    })
+}
+
+/// Validate the 4-word code in a v2 token. We don't constrain
+/// to CODE_WORDS here (the dictionary is in `p2p_tunnel`) —
+/// just the format: exactly 4 lowercase-alpha segments joined
+/// by `-`. The receiver will use the code to derive the KEK
+/// for SPAKE2; if it's wrong, the SPAKE2 handshake fails.
+fn validate_v2_code(code: &str) -> Result<(), String> {
+    if code.is_empty() {
+        return Err("P2P v2 code is empty".to_string());
+    }
+    let parts: Vec<&str> = code.split('-').collect();
+    if parts.len() != 4 {
+        return Err(format!(
+            "P2P v2 code must be 4 words separated by '-' (got {} segments)",
+            parts.len()
+        ));
+    }
+    for w in &parts {
+        if w.is_empty() {
+            return Err("P2P v2 code contains empty word".to_string());
+        }
+        if !w.chars().all(|c| c.is_ascii_lowercase()) {
+            return Err(format!(
+                "P2P v2 code word '{}' contains non-lowercase chars",
+                w
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ============================================================================
 //  Tests
 // ============================================================================
 
@@ -438,5 +593,122 @@ mod tests {
         assert_eq!(json, "\"Named\"");
         let round: TransportMode = serde_json::from_str("\"Direct\"").unwrap();
         assert_eq!(round, TransportMode::Direct);
+    }
+
+    // --- v2 token format (Sprint 5.5.2 Direct Mode) -------------------
+
+    #[test]
+    fn derive_service_short_name_is_six_hex() {
+        let name = derive_service_short_name("alpha-bear-cosmic-delta");
+        assert!(name.starts_with("nx-"));
+        let hex = name.strip_prefix("nx-").unwrap();
+        assert_eq!(hex.len(), 6);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn derive_service_short_name_is_deterministic() {
+        // Same code → same service name. The receiver's
+        // derived name must match the sender's exactly or the
+        // mDNS browse filter rejects all results.
+        let code = "alpha-bear-cosmic-delta";
+        let n1 = derive_service_short_name(code);
+        let n2 = derive_service_short_name(code);
+        assert_eq!(n1, n2);
+    }
+
+    #[test]
+    fn derive_service_short_name_differs_per_code() {
+        // Different code → different service name. Hash
+        // collisions are possible but extremely unlikely for
+        // 6-hex-char (24-bit) output on a small input space.
+        // We don't assert uniqueness exhaustively — we just
+        // check that two different codes produce different
+        // outputs in practice (the SHA-256 first 3 bytes of
+        // these two inputs are virtually never equal).
+        let n1 = derive_service_short_name("alpha-bear-cosmic-delta");
+        let n2 = derive_service_short_name("delta-cosmic-bear-alpha");
+        assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn derive_mdns_service_name_appends_type() {
+        let full = derive_mdns_service_name("alpha-bear-cosmic-delta");
+        assert!(full.ends_with("._nexus-share._tcp.local"));
+        assert!(full.starts_with("nx-"));
+    }
+
+    #[test]
+    fn parse_v2_token_accepts_well_formed() {
+        let token = format_v2_token("abc123", "alpha-bear-cosmic-delta");
+        assert!(token.starts_with("nx:2:direct:abc123:"));
+        let parsed = parse_v2_token(&token).expect("parse");
+        assert_eq!(parsed.service_hash, "abc123");
+        assert_eq!(parsed.code, "alpha-bear-cosmic-delta");
+    }
+
+    #[test]
+    fn parse_v2_token_roundtrip() {
+        let token = format_v2_token("deadbe", "tiger-river-mountain-cloud");
+        let parsed = parse_v2_token(&token).expect("parse");
+        let reserialized = format_v2_token(&parsed.service_hash, &parsed.code);
+        assert_eq!(token, reserialized);
+    }
+
+    #[test]
+    fn parse_v2_token_rejects_wrong_prefix() {
+        assert!(parse_v2_token("nx:1:foo").is_err());
+        assert!(parse_v2_token("garbage").is_err());
+        assert!(parse_v2_token("").is_err());
+    }
+
+    #[test]
+    fn parse_v2_token_rejects_wrong_mode() {
+        // Only "direct" is supported in v2 right now.
+        let bad = format!("nx:2:quick:abc123:alpha-bear-cosmic-delta");
+        assert!(parse_v2_token(&bad).is_err());
+    }
+
+    #[test]
+    fn parse_v2_token_rejects_bad_hash() {
+        // Too short.
+        let bad = format!("nx:2:direct:abc:alpha-bear-cosmic-delta");
+        assert!(parse_v2_token(&bad).is_err());
+        // Too long.
+        let bad = format!("nx:2:direct:abcdef12:alpha-bear-cosmic-delta");
+        assert!(parse_v2_token(&bad).is_err());
+        // Non-hex chars.
+        let bad = format!("nx:2:direct:zzzzzz:alpha-bear-cosmic-delta");
+        assert!(parse_v2_token(&bad).is_err());
+    }
+
+    #[test]
+    fn parse_v2_token_rejects_bad_code() {
+        // Not 4 words.
+        assert!(parse_v2_token("nx:2:direct:abc123:alpha-bear").is_err());
+        assert!(parse_v2_token("nx:2:direct:abc123:alpha-bear-cosmic").is_err());
+        // Empty word.
+        assert!(parse_v2_token("nx:2:direct:abc123:alpha--cosmic-delta").is_err());
+        // Uppercase.
+        assert!(parse_v2_token("nx:2:direct:abc123:Alpha-Bear-Cosmic-Delta").is_err());
+    }
+
+    #[test]
+    fn derive_and_parse_match() {
+        // End-to-end: derive service hash from a code, format a
+        // token from those parts, parse it back, and verify the
+        // receiver would look up the same mDNS name.
+        let code = "alpha-bear-cosmic-delta";
+        let service_short = derive_service_short_name(code);
+        let hash = service_short.strip_prefix("nx-").unwrap();
+        let token = format_v2_token(hash, code);
+        let parsed = parse_v2_token(&token).expect("parse");
+        let recovered_short = derive_service_short_name(&parsed.code);
+        assert_eq!(service_short, recovered_short);
+        // And the mDNS fullname matches what the receiver expects.
+        assert_eq!(
+            derive_mdns_service_name(&parsed.code),
+            format!("{}.{}", recovered_short, SERVICE_TYPE)
+        );
     }
 }

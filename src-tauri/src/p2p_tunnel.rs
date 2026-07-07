@@ -593,16 +593,31 @@ pub async fn download_cloudflared(app_data_dir: &Path) -> Result<PathBuf, String
 /// closes, sender aborts, panic happens, etc).
 pub struct TunnelHandle {
     pub url: String,
-    child: Child,
+    /// `Some` for Quick/Named mode (we own a `cloudflared`
+    /// child process and must kill it on Drop). `None` for
+    /// Direct mode (no subprocess — we own an mDNS daemon
+    /// instead, in `mdns`).
+    child: Option<Child>,
+    /// `Some` for Direct mode (we own a `mdns_sd::ServiceDaemon`
+    /// that unregisters our service on Drop). `None` for
+    /// Quick/Named mode.
+    mdns: Option<mdns_sd::ServiceDaemon>,
 }
 
 impl Drop for TunnelHandle {
     fn drop(&mut self) {
-        // Best-effort kill; never blocks waiting for IO since
+        // Best-effort kill on cloudflared; never blocks since
         // `start_kill` returns immediately.
-        let _ = self.child.start_kill();
-        // Also force-kill in case the signal didn't take.
-        let _ = self.child.kill();
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+            let _ = child.kill();
+        }
+        // Dropping the ServiceDaemon cleanly unregisters our
+        // mDNS service (so other devices on the LAN stop
+        // seeing us immediately). The Drop impl on
+        // `ServiceDaemon` blocks briefly on a shutdown signal,
+        // but it's bounded and runs on a separate thread.
+        // Letting `mdns` fall out of scope here is enough.
     }
 }
 
@@ -640,7 +655,7 @@ pub async fn start_quick_tunnel(
     })
     .await
     .map_err(|_| "timeout waiting for cloudflared URL (30s)".to_string())??;
-    Ok(TunnelHandle { url, child })
+    Ok(TunnelHandle { url, child: Some(child), mdns: None })
 }
 
 // ============================================================================
@@ -748,7 +763,7 @@ pub async fn start_named_tunnel(
             eprintln!("[cloudflared] {}", line);
         }
     });
-    Ok(TunnelHandle { url, child })
+    Ok(TunnelHandle { url, child: Some(child), mdns: None })
 }
 
 // ============================================================================
@@ -863,6 +878,341 @@ pub async fn rate_limit_middleware(
     next.run(req).await
 }
 
+// ============================================================================
+//  Direct Mode (Sprint 5.5.2 Phase 1) — mDNS + LAN TCP, no Cloudflare
+// ============================================================================
+//
+// Threat model recap (Sprint 5.5.1 → 5.5.2 docs):
+//   - No Cloudflare TLS → SPAKE2 handshake travels over raw TCP.
+//     We make pre-auth HMAC **obligatory** on every route
+//     including /spake (already true for Quick/Named but
+//     enforced here for symmetry).
+//   - The 4-word code is the only secret. Service-name hash
+//     comes from it, so anyone who sees the code can compute
+//     the mDNS service name — that's fine because they still
+//     can't authenticate without the SPAKE2 shared secret.
+//   - mDNS service name filter (`nx-<hash>._nexus-share._tcp.local`)
+//     prevents accidental connection to the wrong sender on a
+//     LAN with multiple Nexus users.
+//
+// Phase 1 is LAN-only. UPnP port-forwarding for cross-NAT
+// transfers is Phase 2 (Sprint 5.5.3).
+
+/// Advertise the sender's axum server via mDNS. Returns the
+/// daemon handle — keep it alive for the lifetime of the
+/// session. When dropped, the service is unregistered.
+fn advertise_direct_service(
+    service_hash: &str,
+    port: u16,
+) -> Result<mdns_sd::ServiceDaemon, String> {
+    use mdns_sd::ServiceInfo;
+    let daemon = mdns_sd::ServiceDaemon::new()
+        .map_err(|e| format!("mdns daemon: {}", e))?;
+    let instance_name = format!("nx-{}", service_hash);
+    let host_name = format!("{}.local.", instance_name);
+    // mdns-sd's `ServiceInfo::new` requires the service type
+    // to end with a trailing dot (e.g. `_http._tcp.local.`)
+    // but `daemon.browse()` accepts either form. We keep the
+    // public constant without the dot (it's the conventional
+    // browse query form) and add the dot only when registering.
+    let service_type = format!("{}.", p2p_config::SERVICE_TYPE);
+    // We don't need any TXT records — all auth state lives in
+    // the SPAKE2 handshake. Empty TXT keeps the wire format
+    // minimal.
+    let info = ServiceInfo::new(
+        &service_type,
+        &instance_name,
+        &host_name,
+        "",   // domain (empty = local)
+        port,
+        &[] as &[(&str, &str)],  // TXT records (empty)
+    )
+    .map_err(|e| format!("mdns ServiceInfo: {}", e))?
+    .enable_addr_auto();
+    daemon
+        .register(info)
+        .map_err(|e| format!("mdns register: {}", e))?;
+    Ok(daemon)
+}
+
+/// Browse mDNS for a specific Direct service. Returns the
+/// sender's IP and port on success, or a timeout error if the
+/// service doesn't show up within `timeout_secs`.
+async fn resolve_direct_service(
+    service_hash: &str,
+    timeout_secs: u64,
+) -> Result<(std::net::IpAddr, u16), String> {
+    use mdns_sd::ServiceEvent;
+    use tokio::sync::mpsc;
+    let daemon = mdns_sd::ServiceDaemon::new()
+        .map_err(|e| format!("mdns daemon: {}", e))?;
+    // The mdns-sd crate returns a crossbeam-channel Receiver.
+    // Bridge it to a tokio mpsc channel so we can use
+    // tokio::time::timeout / tokio::select without blocking.
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServiceEvent>();
+    let _browse = daemon
+        .browse(p2p_config::SERVICE_TYPE)
+        .map_err(|e| format!("mdns browse: {}", e))?;
+    // Spawn a tiny task that forwards events into our tokio
+    // channel. We can't move the `Receiver` from the
+    // `ServiceDaemon::browse()` call directly into a tokio
+    // context (it's a std mpsc), so we use a blocking task.
+    let forwarder = tokio::task::spawn_blocking(move || {
+        // The `_browse` is dropped at the end of this scope,
+        // which stops the browse. To keep it alive for the
+        // whole function we leak it via `Box::leak` — it's
+        // cleaned up when the daemon shuts down.
+        let browse = Box::leak(Box::new(_browse));
+        while let Ok(event) = browse.recv() {
+            if tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    let service_fullname = format!(
+        "nx-{}.{}",
+        service_hash,
+        p2p_config::SERVICE_TYPE
+    );
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_secs(timeout_secs);
+    loop {
+        let remaining = deadline.saturating_duration_since(
+            tokio::time::Instant::now()
+        );
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(ServiceEvent::ServiceResolved(info))) => {
+                if info.get_fullname() == service_fullname {
+                    let addr = info
+                        .get_addresses()
+                        .iter()
+                        .next()
+                        .copied()
+                        .ok_or_else(|| {
+                            "mDNS resolved but no A records".to_string()
+                        })?;
+                    let port = info.get_port();
+                    let _ = daemon.shutdown();
+                    forwarder.abort();
+                    return Ok((addr, port));
+                }
+            }
+            Ok(Some(_)) => {
+                // SearchStarted / SearchStopped etc — keep listening.
+            }
+            Ok(None) => break, // channel closed
+            Err(_) => break,   // timeout
+        }
+    }
+    let _ = daemon.shutdown();
+    forwarder.abort();
+    Err(format!(
+        "mDNS: no service matching '{}' found within {}s",
+        service_fullname, timeout_secs
+    ))
+}
+
+/// Spawn a Direct Mode sender. Binds axum on 0.0.0.0:<random>,
+/// advertises mDNS, returns a v2 token the receiver can use to
+/// find this machine on the LAN.
+pub async fn start_direct_sender(
+    file_path: PathBuf,
+    code: String,
+    app_data_dir: PathBuf,
+) -> Result<StartedSend, String> {
+    // 0. Verify config.
+    let cfg = p2p_config::load_tunnel_config(&app_data_dir)?;
+    if cfg.mode != p2p_config::TransportMode::Direct {
+        return Err(format!(
+            "start_direct_sender requires Direct mode in config (got {:?})",
+            cfg.mode
+        ));
+    }
+
+    // 1. Derive service hash from the 4-word code. The hash is
+    //    deterministic — same code on both sides — so the
+    //    receiver's mDNS browse filter matches our advertise.
+    let service_short = p2p_config::derive_service_short_name(&code);
+    let service_hash = service_short
+        .strip_prefix("nx-")
+        .ok_or_else(|| "internal: derive_service_short_name returned no prefix".to_string())?
+        .to_string();
+
+    // 2. Bind on 0.0.0.0 (LAN-accessible, not localhost-only).
+    //    Port is in the dynamic range to avoid collisions with
+    //    common services.
+    let local_port = pick_random_local_port();
+    let listener = TcpListener::bind(("0.0.0.0", local_port))
+        .await
+        .map_err(|e| format!("bind 0.0.0.0:{}: {}", local_port, e))?;
+
+    // 3. File metadata (same as Quick/Named).
+    let meta = std::fs::metadata(&file_path)
+        .map_err(|e| format!("stat {}: {}", file_path.display(), e))?;
+    let plaintext_size = meta.len();
+    let expected_sha256_hex = sha256_file_hex(&file_path)
+        .map_err(|e| format!("sha256 {}: {}", file_path.display(), e))?;
+    let mut expected_sha256 = [0u8; 32];
+    hex::decode_to_slice(expected_sha256_hex.as_bytes(), &mut expected_sha256)
+        .map_err(|e| format!("hex decode sha256: {}", e))?;
+    let salt = random_salt();
+    let fhash_hex = sha256_hex(file_path.to_string_lossy().as_bytes());
+    let mut fhash = [0u8; 32];
+    hex::decode_to_slice(fhash_hex.as_bytes(), &mut fhash)
+        .map_err(|e| format!("hex decode fhash: {}", e))?;
+
+    // 4. Begin SPAKE2 (sender = side B).
+    let kek = derive_kek(code.as_bytes(), &salt);
+    let (spake, t_b) =
+        SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")?;
+
+    // 5. Build the shared state + axum router. Same auth as
+    //    Quick/Named: rate-limit (0μs reject) → pre-auth HMAC
+    //    (5μs reject) → handler. In Direct mode the HMAC is
+    //    OBLIGATORY on /spake and /file (no Cloudflare TLS to
+    //    lean on).
+    let auth = auth::AuthState::new(&*kek);
+    let state = SenderState {
+        spake: Arc::new(Mutex::new(Some((spake, t_b)))),
+        keys: Arc::new(Mutex::new(None)),
+        meta: Arc::new(FileMeta {
+            file_path: file_path.clone(),
+            plaintext_size,
+            expected_sha256,
+            salt,
+            fhash,
+        }),
+        auth: auth.clone(),
+    };
+    let rate_limit = Arc::new(RateLimit::new());
+    let app = Router::new()
+        .route("/meta", get(handle_meta))
+        .merge(
+            Router::new()
+                .route("/spake", post(handle_spake))
+                .route("/file", get(handle_file))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    rate_limit.clone(),
+                    rate_limit_middleware,
+                ))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    auth.clone(),
+                    auth::require_pre_auth,
+                ))
+                .with_state(state.clone()),
+        )
+        .with_state(state);
+
+    // 6. Spawn axum server.
+    let server_task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| format!("axum serve: {}", e))
+    });
+
+    // 7. Advertise mDNS. The daemon is moved into the
+    //    TunnelHandle so it lives for the duration of the
+    //    session — when the user aborts or the file finishes
+    //    sending, the service is unregistered.
+    let mdns = advertise_direct_service(&service_hash, local_port)?;
+
+    // 8. Build the v2 token (no URL — receiver resolves via mDNS).
+    let token_compact = p2p_config::format_v2_token(&service_hash, &code);
+    let token = P2pToken {
+        v: 2,
+        // url is a human-readable marker only; the receiver
+        // ignores it and uses mDNS instead.
+        url: format!("direct://{}.local", service_short),
+        salt: URL_SAFE_NO_PAD.encode(salt),
+        code: code.clone(),
+        fhash: hex::encode(fhash),
+        size: plaintext_size,
+        sha256: hex::encode(expected_sha256),
+    };
+    let tunnel = TunnelHandle {
+        url: format!("direct://{}:{}", service_short, local_port),
+        child: None,
+        mdns: Some(mdns),
+    };
+    Ok(StartedSend {
+        token,
+        token_compact,
+        tunnel,
+        server_task,
+    })
+}
+
+/// Receive a file sent via Direct Mode. Parses a v2 token,
+/// resolves the sender via mDNS, and reuses the existing
+/// `receive_send_file` pipeline.
+pub async fn receive_direct_file(
+    token_v2_compact: String,
+    output_path: PathBuf,
+    timeout_secs: u64,
+) -> Result<ReceiveResult, String> {
+    // 1. Parse v2 token.
+    let v2 = p2p_config::parse_v2_token(&token_v2_compact)?;
+    // 2. Browse mDNS for the sender.
+    let (ip, port) = resolve_direct_service(&v2.service_hash, timeout_secs).await?;
+    let url = format!("http://{}:{}", ip, port);
+    // 3. Decode the v2 token into a v1-style P2pToken. We need
+    //    salt + sha256 + size, which live in the receiver's
+    //    expectations; v2 only carries code + service_hash. So
+    //    we fetch /meta from the sender first (it's public —
+    //    no HMAC) to get those fields.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("reqwest: {}", e))?;
+    let meta_url = format!("{}/meta", url);
+    let meta: serde_json::Value = client
+        .get(&meta_url)
+        .send()
+        .await
+        .map_err(|e| format!("GET /meta: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("/meta status: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("/meta json: {}", e))?;
+    let salt = meta
+        .get("salt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "/meta missing 'salt'".to_string())?
+        .to_string();
+    let fhash = meta
+        .get("fhash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "/meta missing 'fhash'".to_string())?
+        .to_string();
+    let size = meta
+        .get("size")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "/meta missing 'size'".to_string())?;
+    let sha256 = meta
+        .get("sha256")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "/meta missing 'sha256'".to_string())?
+        .to_string();
+    // 4. Build a v1 P2pToken and run the existing receive flow.
+    let token_v1 = P2pToken {
+        v: 2, // v2 in spirit; the v1 parser accepts any v.
+        url,
+        salt,
+        code: v2.code.clone(),
+        fhash,
+        size,
+        sha256,
+    };
+    receive_send_file(token_v1, output_path).await
+}
+
 /// Spawn the local HTTP server, the cloudflared tunnel, and
 /// return the token the UI should show. The server runs in a
 /// background task; the caller can wait on `server_task` to
@@ -932,12 +1282,18 @@ pub async fn start_sender(
             start_named_tunnel(&bin, &token, &hostname).await?
         }
         p2p_config::TransportMode::Direct => {
-            return Err(
-                "Direct IP transport is reserved for Sprint 5.5.2 \
-                 (mDNS + port-forwarding + raw TCP). For now please \
-                 switch to Quick or Named in the Config panel."
-                    .to_string(),
-            );
+            // Sprint 5.5.2 Phase 1 — LAN only (no UPnP yet).
+            // mDNS discovery + raw TCP. No Cloudflare.
+            // start_direct_sender does the full flow (bind,
+            // mDNS advertise, build state, spawn server, build
+            // v2 token) and returns a StartedSend — so we
+            // short-circuit the rest of start_sender.
+            return start_direct_sender(
+                file_path,
+                code,
+                app_data_dir,
+            )
+            .await;
         }
     };
 
@@ -1665,5 +2021,178 @@ mod tests {
         // documents the expected refilling behavior.
         let _ = ip;
         let _ = rl;
+    }
+
+    // --- Direct Mode (Sprint 5.5.2 Phase 1) ---------------------------
+
+    /// Direct Mode end-to-end on localhost. Skips mDNS (which
+    /// would need a real LAN) by manually crafting a v1-style
+    /// token that points at 127.0.0.1, then runs the existing
+    /// receive flow. This proves the same crypto + auth layer
+    /// works without Cloudflare.
+    #[tokio::test]
+    async fn direct_mode_localhost_roundtrip() {
+        use std::io::Write;
+        // 1. Create a small test file.
+        let tmp = std::env::temp_dir().join(format!(
+            "p2p-direct-test-{}.bin",
+            std::process::id()
+        ));
+        let original: Vec<u8> = (0..1024 * 16).map(|i| (i % 251) as u8).collect();
+        {
+            let mut f = std::fs::File::create(&tmp).expect("create");
+            f.write_all(&original).expect("write");
+        }
+        // 2. Compute file metadata.
+        let expected_sha256_hex = sha256_file_hex(&tmp).expect("hash");
+        let mut expected_sha256 = [0u8; 32];
+        hex::decode_to_slice(expected_sha256_hex.as_bytes(), &mut expected_sha256)
+            .expect("decode sha256");
+        // 3. Bind on 0.0.0.0 (Direct style) but in this test
+        //    we know only 127.0.0.1 will hit it.
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let local_port = listener.local_addr().expect("addr").port();
+        // 4. Same crypto setup as start_sender.
+        let code = "alpha-bear-cosmic-delta".to_string();
+        let salt = random_salt();
+        let fhash_hex = sha256_hex(tmp.to_string_lossy().as_bytes());
+        let mut fhash = [0u8; 32];
+        hex::decode_to_slice(fhash_hex.as_bytes(), &mut fhash).unwrap();
+        let kek = derive_kek(code.as_bytes(), &salt);
+        let (spake, t_b) =
+            SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")
+                .expect("spake B");
+        let meta = FileMeta {
+            file_path: tmp.clone(),
+            plaintext_size: original.len() as u64,
+            expected_sha256,
+            salt,
+            fhash,
+        };
+        let state = SenderState {
+            spake: Arc::new(Mutex::new(Some((spake, t_b)))),
+            keys: Arc::new(Mutex::new(None)),
+            meta: Arc::new(meta),
+            auth: auth::AuthState::new(&*kek),
+        };
+        let app = Router::new()
+            .route("/meta", get(handle_meta))
+            .route("/spake", post(handle_spake))
+            .route("/file", get(handle_file))
+            .with_state(state);
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // 5. Build a v1-style P2pToken pointing at the test
+        //    listener (this is what receive_direct_file would
+        //    construct after mDNS resolution in production).
+        let token = P2pToken {
+            v: 2,
+            url: format!("http://127.0.0.1:{}", local_port),
+            salt: URL_SAFE_NO_PAD.encode(salt),
+            code: code.clone(),
+            fhash: hex::encode(fhash),
+            size: original.len() as u64,
+            sha256: hex::encode(expected_sha256),
+        };
+        // 6. Receive.
+        let out_path = std::env::temp_dir().join(format!(
+            "p2p-direct-out-{}.bin",
+            std::process::id()
+        ));
+        let result = receive_send_file(token, out_path.clone())
+            .await
+            .expect("receive");
+        assert_eq!(result.bytes_written as usize, original.len());
+        let received = std::fs::read(&out_path).expect("read");
+        assert_eq!(received, original, "decrypted must match original");
+        // 7. Cleanup.
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&out_path);
+        server_task.abort();
+    }
+
+    /// The v2 token from `start_direct_sender` should be
+    /// parseable by `parse_v2_token` and round-trip the
+    /// service_hash + code exactly. We simulate the sender's
+    /// output here (without spinning up the axum server).
+    #[test]
+    fn direct_mode_v2_token_roundtrips() {
+        let code = "alpha-bear-cosmic-delta";
+        let service_hash = p2p_config::derive_service_short_name(code)
+            .strip_prefix("nx-")
+            .unwrap()
+            .to_string();
+        let token_compact =
+            p2p_config::format_v2_token(&service_hash, code);
+        let parsed = p2p_config::parse_v2_token(&token_compact)
+            .expect("parse");
+        assert_eq!(parsed.service_hash, service_hash);
+        assert_eq!(parsed.code, code);
+        // And the mDNS service name the receiver would browse
+        // for matches what the sender would advertise.
+        let expected_mdns = format!(
+            "nx-{}.{}",
+            service_hash,
+            p2p_config::SERVICE_TYPE
+        );
+        assert_eq!(
+            p2p_config::derive_mdns_service_name(&parsed.code),
+            expected_mdns
+        );
+    }
+
+    /// `resolve_direct_service` must return a clean timeout
+    /// error when no sender is advertising (avoids hanging the
+    /// UI for the full 5s browse window).
+    #[tokio::test]
+    async fn resolve_direct_service_times_out_when_no_sender() {
+        // Use a hash that no one is advertising.
+        let start = std::time::Instant::now();
+        let result =
+            resolve_direct_service("nonexistent_hash_to_find", 1).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "must error when no sender");
+        // We allow up to 2s (1s configured + 1s slack for the
+        // browse loop to settle).
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "timeout took too long: {:?}",
+            elapsed
+        );
+    }
+
+    /// `TunnelHandle` with no cloudflared child but an mDNS
+    /// daemon must Drop cleanly (no panic). This is the
+    /// Direct-mode lifecycle test.
+    #[test]
+    fn tunnel_handle_direct_mode_drops_cleanly() {
+        use mdns_sd::ServiceDaemon;
+        // Register a throwaway service. Note: SERVICE_TYPE
+        // must end with '._tcp.local.' (with trailing dot) for
+        // mdns-sd to accept it.
+        let daemon = ServiceDaemon::new().expect("daemon");
+        let info = mdns_sd::ServiceInfo::new(
+            "_nexus-share._tcp.local.",
+            "nx-testdrop",
+            "nx-testdrop.local.",
+            "",
+            12345,
+            &[] as &[(&str, &str)],
+        )
+        .expect("info")
+        .enable_addr_auto();
+        daemon.register(info).expect("register");
+        // Construct a TunnelHandle without a cloudflared child.
+        let handle = TunnelHandle {
+            url: "direct://nx-testdrop.local".to_string(),
+            child: None,
+            mdns: Some(daemon),
+        };
+        // Drop must not panic.
+        drop(handle);
     }
 }

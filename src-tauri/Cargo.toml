@@ -40,6 +40,7 @@ hmac = "0.12"                 # HMAC-SHA256 challenge-response auth header
 tokio = { version = "1", features = ["full"] }
 flate2 = "1"                  # gzip decompression for cloudflared .tgz
 tar = "0.4"                   # tar extraction for cloudflared tarball
+mdns-sd = "0.11"              # mDNS service discovery for Direct Mode (Sprint 5.5.2)
 # The `custom-protocol` feature activates production mode: instead
 # of fetching from `devUrl`, the `frontendDist` directory is embedded
 # into the binary at compile time. Without this, the Tauri build
