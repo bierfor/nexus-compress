@@ -314,9 +314,17 @@ pub async fn pick_file_cmd(app: tauri::AppHandle) -> Result<Option<String>, Stri
         let _ = win.set_focus();
     }
     let (tx, rx) = std::sync::mpsc::channel::<Option<FilePath>>();
+    // Cover EVERY suffix the codebase can produce. Critically, the
+    // "Nexus archive" filter is NOT made the default — the
+    // default "All files" filter lets the user pick a single
+    // source file (e.g. an uncompressed `.ts`) without having to
+    // dig into a filter dropdown.
     app.dialog()
         .file()
-        .add_filter("NexusRAR archive", &["nxar", "nxr"])
+        .add_filter(
+            "Nexus archive (.nxs/.nxs6/.lz)",
+            &["nxs", "nxs6", "lz", "nxar", "nxr"],
+        )
         .add_filter("All files", &["*"])
         .pick_file(move |path| {
             let _ = tx.send(path);
