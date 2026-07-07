@@ -426,6 +426,179 @@ pub fn compress_bytes_with_backend(
     }
 }
 
+/// Unified result returned by `compress_target` — covers BOTH
+/// single-file inputs and directory inputs under the same shape so
+/// the UI doesn't have to branch on `is_directory`.
+///
+/// The compressed bytes are always included, so the frontend can
+/// save them to disk (or stream them to the user) without an extra
+/// round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompressTargetResult {
+    /// `true` if `input` was a directory, `false` if a single file.
+    pub is_directory: bool,
+    /// Size of the input on disk, in bytes (recursive for dirs).
+    pub original_size: u64,
+    /// Size of the compressed output, in bytes.
+    pub compressed_size: u64,
+    /// `original_size / compressed_size`. 0.0 if no compression.
+    pub ratio: f64,
+    /// Wall-clock time of the compress call, in milliseconds.
+    pub compress_time_ms: f64,
+    /// The compressed payload. For files this is a single-stream
+    /// v4/v5/v6 output. For directories it's an NXS6 (SOLID v6) or
+    /// NXAR archive depending on the backend.
+    pub compressed_bytes: Vec<u8>,
+    /// Number of files in the archive (1 for a single-file input).
+    pub n_files: u64,
+    /// Path the compressed output was written to (next to the input
+    /// file or inside the input directory). Empty if auto-save was
+    /// skipped (e.g. permission error).
+    pub output_path: String,
+    /// Suggested extension for the compressed output (`.nxs` for
+    /// v4, `.lz` for v5/v5-min, `.nxs6` for SOLID v6).
+    pub output_ext: &'static str,
+}
+
+/// Compress a single file or directory by path. Auto-detects whether
+/// `path` is a file or directory and dispatches accordingly. This
+/// is the entry point the Tauri GUI uses when the user drops a file
+/// or picks one via the native dialog — it doesn't need to know the
+/// type ahead of time.
+///
+/// `lzma_level` is the LZMA preset (0..=9). Ignored by `V4`. For
+/// directories the LZMA level still applies to the underlying v6
+/// solid LZMA block.
+///
+/// The compressed bytes are **auto-saved** next to the input so the
+/// user can verify the output exists on disk:
+/// - For a file `/foo/bar.txt` with backend V4 → writes
+///   `/foo/bar.txt.nxs` (or `.lz` / `.nxs6` for v5 / v6-solid).
+/// - For a directory `/foo/bar/` with V6Solid → writes
+///   `/foo/bar.nxs6` (a sibling).
+///
+/// If writing fails (permission error, etc.) the function still
+/// returns the bytes — the `output_path` field will be empty.
+pub fn compress_target(
+    input_path: &Path,
+    backend: CompressionBackend,
+    lzma_level: u32,
+) -> ApiResult<CompressTargetResult> {
+    let start = Instant::now();
+    let meta = std::fs::metadata(input_path).map_err(|e| {
+        ApiError::new(
+            "target.not_found",
+            format!("cannot stat {}: {}", input_path.display(), e),
+        )
+    })?;
+
+    let (compressed_bytes, total_original, n_files, is_dir): (Vec<u8>, u64, u64, bool) = if meta.is_file() {
+        let bytes = std::fs::read(input_path).map_err(|e| {
+            ApiError::new(
+                "target.read_failed",
+                format!("read failed: {}", e),
+            )
+        })?;
+        let file_name = input_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let r = compress_bytes_with_backend(&bytes, &file_name, backend, lzma_level);
+        (r.compressed, meta.len(), 1u64, false)
+    } else if meta.is_dir() {
+        // Walk into the directory and use the directory backend.
+        let (dir_result, archive) =
+            compress_directory_with_backend(input_path, backend, lzma_level)?;
+        (
+            archive,
+            dir_result.total_original_size,
+            dir_result.n_files,
+            true,
+        )
+    } else {
+        return Err(ApiError::new(
+            "target.not_file_or_dir",
+            format!("{} is neither file nor directory", input_path.display()),
+        ));
+    };
+
+    let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let compressed_size = compressed_bytes.len() as u64;
+    let ratio = if compressed_size == 0 {
+        0.0
+    } else {
+        total_original as f64 / compressed_size as f64
+    };
+
+    // Auto-save the output next to the input so the GUI is
+    // "100% functional" — the user can verify the file exists.
+    let (output_path, output_ext) = compute_output_path(input_path, backend, is_dir);
+    let written = std::fs::write(&output_path, &compressed_bytes)
+        .map(|_| output_path.clone())
+        .map_err(|e| {
+            // Surface as a warning rather than a hard error — the
+            // bytes are still returned in the response.
+            eprintln!("warn: could not write output to {}: {}", output_path, e);
+            e
+        })
+        .ok()
+        .unwrap_or_default();
+
+    Ok(CompressTargetResult {
+        is_directory: is_dir,
+        original_size: total_original,
+        compressed_size,
+        ratio,
+        compress_time_ms,
+        compressed_bytes,
+        n_files,
+        output_path: written,
+        output_ext,
+    })
+}
+
+/// Compute the output path for an auto-saved compressed file.
+///
+/// - Single file input `/foo/bar.txt` →
+///   `/foo/bar.txt.nxs` (v4) / `.lz` (v5) / `.nxs6` (v6-solid)
+/// - Directory input `/foo/bar/` →
+///   `/foo/bar.nxs6` (v6-solid) or `/foo/bar.nxs` (v4 per-file)
+fn compute_output_path(
+    input_path: &Path,
+    backend: CompressionBackend,
+    is_dir: bool,
+) -> (String, &'static str) {
+    let ext = match backend {
+        CompressionBackend::V4 => "nxs",
+        CompressionBackend::V5Min | CompressionBackend::V6 => "lz",
+        CompressionBackend::V6Solid => "nxs6",
+    };
+    let parent = input_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let stem = if is_dir {
+        // /foo/bar → /foo/bar.nxs6
+        input_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "archive".to_string())
+    } else {
+        // /foo/bar.txt → /foo/bar.txt.nxs (stems off the original name)
+        input_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_string())
+    };
+    let base = if is_dir {
+        parent.join(format!("{}.{}", stem, ext))
+    } else {
+        // /foo/bar.txt → /foo/bar.txt.nxs (append ext to full name)
+        parent.join(format!("{}.{}", stem, ext))
+    };
+    (base.to_string_lossy().into_owned(), ext)
+}
+
 /// Compress a directory using the chosen backend. The directory
 /// is walked recursively and each file is fed through the right
 /// preprocessor. For `V6Solid` the preprocessed bytes are

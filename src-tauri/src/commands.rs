@@ -10,7 +10,7 @@
 
 use nexus_compress::api::{
     self, ApiResult, BackendInfo, CompressResult, CompressionBackend, CompressionLevel,
-    DecompressResult, EngineInfo, SelfTestResult,
+    CompressTargetResult, DecompressResult, EngineInfo, SelfTestResult,
 };
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -87,6 +87,43 @@ pub async fn compress_directory_with_backend_cmd(
             api::compress_directory_with_backend(&path, backend, lzma_level)
                 .map(|(r, a)| (r, a.to_vec())),
         )
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {}", e))?
+}
+
+/// Compress any path by reference — auto-detects file vs directory.
+/// This is the entry point the GUI uses when the user drops a file
+/// or folder onto the dropzone (the OS gives us the path, not the
+/// bytes) or when they pick via the native dialog. Reads the file
+/// from disk on the Rust side, so we never have to ship large bytes
+/// through the Tauri IPC boundary. The compressed output is
+/// auto-saved next to the input so the user can verify on disk.
+///
+/// Args are bundled into a single JSON object `req` to avoid the
+/// Tauri 2.x arg-name conversion gotchas (camelCase vs snake_case
+/// for `lzma_level`). The frontend passes
+/// `{ req: { path, backend, lzma_level } }`.
+#[tauri::command]
+pub async fn compress_target_cmd(req: serde_json::Value) -> Result<CompressTargetResult, String> {
+    let path = req
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'path' in req".to_string())?
+        .to_string();
+    let backend_str = req
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'backend' in req".to_string())?;
+    let lzma_level = req
+        .get("lzma_level")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(6) as u32;
+    let backend = CompressionBackend::from_str(backend_str)
+        .map_err(|e| format!("invalid_backend: {}", e))?;
+    let p = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || {
+        to_ipc(api::compress_target(&p, backend, lzma_level))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))?

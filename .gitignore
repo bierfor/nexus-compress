@@ -17,3 +17,6 @@ src-tauri/target/release/incremental/
 src-tauri/target/release/*.d
 src-tauri/target/release/nexus-rar
 src-tauri/target/release/nexus-rar.d
+
+# ad-hoc example tests
+examples/
