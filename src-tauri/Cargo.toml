@@ -14,6 +14,29 @@ default-run = "nexus-rar"
 nexus-compress = { path = "..", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Sprint 5.0 — P2P tunnel (Quick Cloudflare) + Argon2id + SPAKE2 + AES-GCM
+spake2 = "0.4"        # SPAKE2 password-authenticated key exchange
+aes-gcm = "0.10"      # AES-256-GCM chunked authenticated encryption
+argon2 = "0.5"        # Argon2id passphrase stretching (modest profile)
+zeroize = { version = "1.7", features = ["zeroize_derive"] } # secure memory wipe
+axum = { version = "0.7", features = ["http2"] } # local HTTP server (SPAKE2 endpoints)
+http-body-util = "0.1"        # chunked streaming response bodies
+regex = "1"                   # parse cloudflared stderr for the trycloudflare URL
+rand = "0.8"                  # SP-style nonce, cloudflared-port pick
+base64 = "0.22"               # P2pToken encoding
+thiserror = "1"               # ergonomic error types
+bytes = "1"                   # for axum::body::Body::from_stream frames
+futures-util = "0.3"          # stream::unfold for chunked file encryption
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# Crypto building blocks (re-declared because the src-tauri crate
+# is a separate compilation unit from the parent nexus-compress).
+hex = "0.4"                   # hex::encode / hex::decode for SHA-256 + filename hash
+sha2 = "0.10"                 # SHA-256 (keyed)
+hkdf = "0.12"                 # HKDF-SHA256 for session key derivation
+hmac = "0.12"                 # HMAC-SHA256 challenge-response auth header
+tokio = { version = "1", features = ["full"] }
 # The `custom-protocol` feature activates production mode: instead
 # of fetching from `devUrl`, the `frontendDist` directory is embedded
 # into the binary at compile time. Without this, the Tauri build

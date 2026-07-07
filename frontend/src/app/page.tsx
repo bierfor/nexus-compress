@@ -8,6 +8,8 @@ import { SaveTarget, defaultOutputFilename } from "@/components/SaveTarget";
 import { ArchivePreview, type Preview } from "@/components/ArchivePreview";
 import { EntropyMonitor, type Metrics } from "@/components/EntropyMonitor";
 import { ConfigPanel, type Mode, type Strength } from "@/components/ConfigPanel";
+import { SendPanel } from "@/components/SendPanel";
+import { ReceivePanel } from "@/components/ReceivePanel";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -539,6 +541,12 @@ export default function Home() {
             onSelfTest={onSelfTest}
           />
         </div>
+      </div>
+
+      {/* P2P tunnel — Sprint 5.0 demo */}
+      <div className="grid grid-cols-2 gap-3 p-3 pt-0 border-t border-bg-border">
+        <SendPanel />
+        <ReceivePanel />
       </div>
 
       <footer className="no-select h-7 border-t border-bg-border bg-bg-card flex items-center justify-between px-4 text-[10px] font-mono tracking-widest uppercase shrink-0 gap-4">

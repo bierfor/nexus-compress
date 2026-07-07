@@ -465,3 +465,150 @@ pub async fn read_file_cmd(path: String) -> Result<Vec<u8>, String> {
 pub async fn open_path_cmd(path: String) -> Result<(), String> {
     to_ipc(api::open_path(&path))
 }
+
+// ============================================================================
+//  P2P tunnel — Sprint 5.0 demo
+// ============================================================================
+//
+// The P2P module exposes three Tauri commands:
+//   * `p2p_send_start` — pick a local port, spawn cloudflared,
+//     run the axum server, and return the token. The started
+//     send session is stored in `P2pState` so the UI can cancel
+//     it.
+//   * `p2p_send_abort` — kill the tunnel + abort the server
+//     task. Returns Ok(()) always (idempotent).
+//   * `p2p_receive` — connect to the URL in the token, do
+//     SPAKE2, download + decrypt + verify the file.
+//
+// All three use the single-JSON-arg pattern (Tauri 2.x arg-name
+// gotcha — see MEMORY.md).
+use crate::p2p_tunnel;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tauri::State;
+use tokio::sync::Mutex;
+
+/// Holds the currently-active send session (if any). There's
+/// at most one at a time — the UI's intent switch resets the
+/// other side.
+pub struct P2pState {
+    pub active: Mutex<Option<p2p_tunnel::StartedSend>>,
+}
+
+#[derive(Deserialize)]
+pub struct P2pSendStartReq {
+    /// Absolute path of the file to send.
+    pub file_path: String,
+    /// User-supplied code, or None to let the server generate one.
+    pub code: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct P2pSendStartResp {
+    /// base64url-encoded token (the thing to share with the
+    /// receiver). Includes URL, code, salt, file size, sha256.
+    pub token: String,
+    /// The code we used, regardless of whether the user
+    /// supplied it or we generated it. The UI shows this in
+    /// big letters under the QR / token box.
+    pub code: String,
+    /// Pretty-printed name of the file.
+    pub filename: String,
+    /// Plaintext size in bytes (so the UI can show
+    /// "Sending 5.3 MB" before the connection starts).
+    pub file_size: u64,
+}
+
+#[tauri::command]
+pub async fn p2p_send_start_cmd(
+    req: serde_json::Value,
+    state: State<'_, Arc<P2pState>>,
+) -> Result<P2pSendStartResp, String> {
+    let req: P2pSendStartReq = serde_json::from_value(req)
+        .map_err(|e| format!("invalid p2p_send_start request: {}", e))?;
+    let file_path = PathBuf::from(&req.file_path);
+    if !file_path.exists() {
+        return Err(format!("file not found: {}", req.file_path));
+    }
+    let code = match req.code {
+        Some(c) if !c.trim().is_empty() => c.trim().to_string(),
+        _ => p2p_tunnel::random_code_phrase(4),
+    };
+    // Refuse if a send is already in flight. The UI's intent
+    // switch should call p2p_send_abort first; this is a
+    // safety net.
+    {
+        let active = state.active.lock().await;
+        if active.is_some() {
+            return Err("a p2p send is already in progress — abort it first".to_string());
+        }
+    }
+    let app_data_dir = std::env::temp_dir().join("nexus-rar-p2p");
+    std::fs::create_dir_all(&app_data_dir)
+        .map_err(|e| format!("mkdir app_data_dir: {}", e))?;
+    let started = p2p_tunnel::start_sender(file_path.clone(), code.clone(), app_data_dir).await?;
+    let filename = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let file_size = started.token.size;
+    let resp = P2pSendStartResp {
+        token: started.token_compact.clone(),
+        code: started.token.code.clone(),
+        filename,
+        file_size,
+    };
+    *state.active.lock().await = Some(started);
+    Ok(resp)
+}
+
+#[tauri::command]
+pub async fn p2p_send_abort_cmd(
+    state: State<'_, Arc<P2pState>>,
+) -> Result<(), String> {
+    let mut active = state.active.lock().await;
+    if let Some(started) = active.take() {
+        // Dropping StartedSend kills the tunnel child (Drop on
+        // TunnelHandle) and aborts the server task (Drop on
+        // JoinHandle, well, JoinHandle doesn't abort on drop
+        // — we need to explicitly abort).
+        started.server_task.abort();
+        drop(started.tunnel);
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct P2pReceiveReq {
+    /// base64url-encoded token from the sender.
+    pub token: String,
+    /// Where to write the decrypted file.
+    pub output_path: String,
+}
+
+#[derive(Serialize)]
+pub struct P2pReceiveResp {
+    /// Plaintext bytes received.
+    pub bytes_written: u64,
+    /// Absolute path of the written file.
+    pub output_path: String,
+}
+
+#[tauri::command]
+pub async fn p2p_receive_cmd(req: serde_json::Value) -> Result<P2pReceiveResp, String> {
+    let req: P2pReceiveReq = serde_json::from_value(req)
+        .map_err(|e| format!("invalid p2p_receive request: {}", e))?;
+    let token = p2p_tunnel::P2pToken::from_compact(&req.token)
+        .map_err(|e| format!("invalid token: {}", e))?;
+    let output_path = PathBuf::from(&req.output_path);
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir output parent: {}", e))?;
+    }
+    let result = p2p_tunnel::receive_send_file(token, output_path).await?;
+    Ok(P2pReceiveResp {
+        bytes_written: result.bytes_written,
+        output_path: result.output_path.to_string_lossy().to_string(),
+    })
+}

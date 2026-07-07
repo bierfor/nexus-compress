@@ -8,10 +8,16 @@
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 mod commands;
+mod p2p_tunnel;
+
+use std::sync::Arc;
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(Arc::new(commands::P2pState {
+            active: tokio::sync::Mutex::new(None),
+        }))
         .invoke_handler(tauri::generate_handler![
             commands::compress_bytes_cmd,
             commands::decompress_bytes_cmd,
@@ -37,6 +43,9 @@ fn main() {
             commands::peek_and_extract_file_cmd,
             commands::read_file_cmd,
             commands::open_path_cmd,
+            commands::p2p_send_start_cmd,
+            commands::p2p_send_abort_cmd,
+            commands::p2p_receive_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusRAR Tauri app");

@@ -17,6 +17,14 @@ src-tauri/target/release/incremental/
 src-tauri/target/release/*.d
 src-tauri/target/release/nexus-rar
 src-tauri/target/release/nexus-rar.d
+src-tauri/target/debug/.fingerprint/
+src-tauri/target/debug/build/
+src-tauri/target/debug/deps/
+src-tauri/target/debug/incremental/
+src-tauri/target/debug/*.d
+src-tauri/target/debug/.cargo-lock
+src-tauri/target/nexus-rar
+src-tauri/target/nexus-rar.d
 
 # ad-hoc example tests
 examples/
