@@ -25,7 +25,12 @@ pub struct ArchiveEntry {
     pub is_dir: bool,
 }
 
-/// Detect archive format by extension.
+/// Detect archive format by extension. Only formats with a
+/// readable central directory / TOC are supported for
+/// inspection + selective extraction. `.nxs6` and `.nxs` are
+/// V6Solid single-stream archives — they don't have a TOC,
+/// so they're returned as `solid` here and handled by the
+/// legacy single-file decompress path.
 pub fn detect_format(path: &Path) -> Result<&'static str, String> {
     let ext = path
         .extension()
@@ -34,9 +39,9 @@ pub fn detect_format(path: &Path) -> Result<&'static str, String> {
         .to_ascii_lowercase();
     match ext.as_str() {
         "tar" => Ok("tar"),
-        "nxs6" | "nxs" => Ok("nxs6"),
+        "nxs6" | "nxs" => Ok("solid"),
         _ => Err(format!(
-            "unsupported archive format: .{} (supported: .tar, .nxs6)",
+            "unsupported archive format: .{} (supported: .tar; single-stream: .nxs6)",
             ext
         )),
     }
@@ -46,7 +51,12 @@ pub fn detect_format(path: &Path) -> Result<&'static str, String> {
 pub fn list_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
     match detect_format(path)? {
         "tar" => list_tar_entries(path),
-        "nxs6" => list_nxs6_entries(path),
+        "solid" => Err(
+            ".nxs6/.nxs are V6Solid single-stream archives — \
+             no central directory to browse. Use the legacy \
+             Decompress flow (full extraction) for these."
+                .to_string(),
+        ),
         other => Err(format!("unsupported format: {}", other)),
     }
 }
@@ -62,7 +72,12 @@ pub fn extract_entries(
         .map_err(|e| format!("mkdir output: {}", e))?;
     match detect_format(path)? {
         "tar" => extract_tar_entries(path, output_dir, selected),
-        "nxs6" => extract_nxs6_entries(path, output_dir, selected),
+        "solid" => Err(
+            ".nxs6/.nxs are V6Solid single-stream archives — \
+             selective extraction not supported. Use the legacy \
+             Decompress flow (full extraction) for these."
+                .to_string(),
+        ),
         other => Err(format!("unsupported format: {}", other)),
     }
 }

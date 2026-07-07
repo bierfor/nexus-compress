@@ -44,7 +44,7 @@ interface ArchiveListResp {
 }
 
 interface ArchiveInspectInfo {
-  archive_kind: string; // "tar" or "nxs6"
+  archive_kind: string; // "TAR" or legacy single-stream format name
   n_files: number;
   total_bytes: number;
   entries: ArchiveEntry[];
@@ -72,11 +72,13 @@ interface ArchiveExtractResp {
   total_bytes: number;
 }
 
-function isInspectable(name: string | null): "tar" | "nxs6" | null {
+function isInspectable(name: string | null): "tar" | null {
   if (!name) return null;
   const lower = name.toLowerCase();
+  // Only .tar has a central directory we can browse without
+  // extracting. .nxs6/.nxs are V6Solid single-stream archives —
+  // no TOC, so they fall through to the legacy decompress flow.
   if (lower.endsWith(".tar")) return "tar";
-  if (lower.endsWith(".nxs6") || lower.endsWith(".nxs")) return "nxs6";
   return null;
 }
 
@@ -143,7 +145,7 @@ export function DecompressView({
       })
         .then((r) => {
           const inspect: ArchiveInspectInfo = {
-            archive_kind: inspectable === "tar" ? "TAR" : "NXS6",
+            archive_kind: inspectable ? "TAR" : "Legacy single-stream",
             n_files: r.total_files,
             total_bytes: r.total_bytes,
             entries: r.entries,
@@ -222,8 +224,8 @@ export function DecompressView({
         multiple: false,
         directory: false,
         filters: [
-          { name: "Archive (WinRAR-style)", extensions: ["tar", "nxs", "nxs6"] },
-          { name: "Nexus legacy", extensions: ["lz", "nxar", "nxr"] },
+          { name: "Archive (WinRAR-style browse)", extensions: ["tar"] },
+          { name: "Nexus legacy", extensions: ["nxs", "nxs6", "lz", "nxar", "nxr"] },
           { name: "All files", extensions: ["*"] },
         ],
       });
@@ -351,10 +353,9 @@ export function DecompressView({
             Descomprimir
           </h1>
           <p className="text-zinc-400 text-[14px] leading-relaxed max-w-2xl">
-            Arrastra un archivo <code className="text-amber-300">.tar</code> o{" "}
-            <code className="text-amber-300">.nxs6</code> — la app lee el directorio
-            central sin descomprimir nada y te deja elegir qué archivos querés
-            sacar (estilo WinRAR).
+            Arrastra un archivo <code className="text-amber-300">.tar</code> — la app lee el
+            directorio central sin descomprimir nada y te deja elegir qué
+            archivos querés sacar (estilo WinRAR).
           </p>
         </div>
 
@@ -371,7 +372,7 @@ export function DecompressView({
               {dragOver ? "⤓" : "📂"}
             </div>
             <h3 className="text-white text-[20px] font-medium mb-2">
-              {dragOver ? "Suelta el archivo" : "Arrastra un archivo .tar o .nxs6"}
+              {dragOver ? "Suelta el archivo" : "Arrastra un archivo .tar"}
             </h3>
             <p className="text-zinc-500 text-[13px] mb-6">
               o escribe la ruta absoluta
