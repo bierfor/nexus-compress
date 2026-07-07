@@ -10,10 +10,23 @@
 mod commands;
 mod p2p_config;
 mod p2p_tunnel;
+mod upnp_hole;
 
 use std::sync::Arc;
 
 fn main() {
+    // Sprint 5.5.3 Phase 2: panic recovery for UPnP port
+    // mappings. If the sender process panics while a UPnP
+    // hole is open, this hook drains the global registry
+    // and removes every mapping it can. Best-effort —
+    // SIGKILL bypasses everything, but panic-unwind hits
+    // this hook.
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("[nexus-rar] PANIC: {}", info);
+        upnp_hole::emergency_cleanup_all();
+        eprintln!("[nexus-rar] emergency UPnP cleanup done");
+    }));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(commands::P2pState {

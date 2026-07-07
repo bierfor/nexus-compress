@@ -41,6 +41,8 @@ tokio = { version = "1", features = ["full"] }
 flate2 = "1"                  # gzip decompression for cloudflared .tgz
 tar = "0.4"                   # tar extraction for cloudflared tarball
 mdns-sd = "0.11"              # mDNS service discovery for Direct Mode (Sprint 5.5.2)
+igd = "0.12"                  # UPnP IGD port-forwarding for cross-NAT Direct Mode (Sprint 5.5.3)
+local-ip-address = "0.6"      # discover the sender's LAN IP for UPnP internal_client field
 # The `custom-protocol` feature activates production mode: instead
 # of fetching from `devUrl`, the `frontendDist` directory is embedded
 # into the binary at compile time. Without this, the Tauri build
@@ -77,3 +79,6 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+mock-igd = "0.2"  # mock UPnP IGD server for unit tests (avoids real-router dependency)

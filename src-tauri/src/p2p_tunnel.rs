@@ -602,6 +602,10 @@ pub struct TunnelHandle {
     /// that unregisters our service on Drop). `None` for
     /// Quick/Named mode.
     mdns: Option<mdns_sd::ServiceDaemon>,
+    /// `Some` for Direct mode when UPnP port-forwarding
+    /// succeeded (Sprint 5.5.3 Phase 2). Drop removes the
+    /// port mapping on the router.
+    upnp: Option<crate::upnp_hole::UpnpHole>,
 }
 
 impl Drop for TunnelHandle {
@@ -655,7 +659,7 @@ pub async fn start_quick_tunnel(
     })
     .await
     .map_err(|_| "timeout waiting for cloudflared URL (30s)".to_string())??;
-    Ok(TunnelHandle { url, child: Some(child), mdns: None })
+    Ok(TunnelHandle { url, child: Some(child), mdns: None, upnp: None })
 }
 
 // ============================================================================
@@ -763,7 +767,7 @@ pub async fn start_named_tunnel(
             eprintln!("[cloudflared] {}", line);
         }
     });
-    Ok(TunnelHandle { url, child: Some(child), mdns: None })
+    Ok(TunnelHandle { url, child: Some(child), mdns: None, upnp: None })
 }
 
 // ============================================================================
@@ -1135,10 +1139,37 @@ pub async fn start_direct_sender(
         size: plaintext_size,
         sha256: hex::encode(expected_sha256),
     };
+    // Sprint 5.5.3 Phase 2: best-effort UPnP port-forwarding.
+    // If the router has UPnP enabled, the friend's device on a
+    // different network can reach us via our public IP. If
+    // UPnP is disabled or the search fails, we silently fall
+    // back to LAN-only mDNS — the receiver on the same Wi-Fi
+    // still works.
+    let upnp_hole = match crate::upnp_hole::UpnpHole::open(local_port) {
+        Ok((hole, info)) => {
+            eprintln!(
+                "[p2p] UPnP hole opened: external={}:{} -> internal={}:{}",
+                info.external_ip,
+                info.external_port,
+                info.internal_ip,
+                info.internal_port
+            );
+            Some(hole)
+        }
+        Err(e) => {
+            eprintln!(
+                "[p2p] UPnP unavailable, falling back to LAN-only: {}",
+                e
+            );
+            None
+        }
+    };
+
     let tunnel = TunnelHandle {
         url: format!("direct://{}:{}", service_short, local_port),
         child: None,
         mdns: Some(mdns),
+        upnp: upnp_hole,
     };
     Ok(StartedSend {
         token,
@@ -2191,6 +2222,7 @@ mod tests {
             url: "direct://nx-testdrop.local".to_string(),
             child: None,
             mdns: Some(daemon),
+            upnp: None,
         };
         // Drop must not panic.
         drop(handle);

@@ -69,6 +69,8 @@ mod p2p_tunnel;
 mod p2p_auth;
 #[path = "../p2p_config.rs"]
 mod p2p_config;
+#[path = "../upnp_hole.rs"]
+mod upnp_hole;
 
 use std::path::PathBuf;
 use std::process::Command;
