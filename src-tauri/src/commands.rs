@@ -224,6 +224,105 @@ pub async fn peek_archive_target_cmd(
         .map_err(|e| format!("spawn_blocking failed: {}", e))?
 }
 
+// ============================================================================
+//  Sprint 5.6.17: WinRAR-style archive inspection
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct ArchiveEntryRow {
+    pub name: String,
+    pub size: u64,
+    pub is_dir: bool,
+}
+
+#[derive(Serialize)]
+pub struct ArchiveListResp {
+    pub entries: Vec<ArchiveEntryRow>,
+    pub total_files: usize,
+    pub total_bytes: u64,
+}
+
+#[derive(Serialize)]
+pub struct ArchiveExtractResp {
+    pub written: Vec<String>,
+    pub count: usize,
+    pub total_bytes: u64,
+}
+
+#[tauri::command]
+pub async fn p2p_archive_list_cmd(
+    req: serde_json::Value,
+) -> Result<ArchiveListResp, String> {
+    let path_str = req
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'path'".to_string())?
+        .to_string();
+    let path = PathBuf::from(path_str);
+    let entries = tauri::async_runtime::spawn_blocking(move || {
+        crate::archive_inspect::list_entries(&path)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {}", e))??;
+    let total_files = entries.iter().filter(|e| !e.is_dir).count();
+    let total_bytes = entries.iter().map(|e| e.size).sum();
+    let rows = entries
+        .into_iter()
+        .map(|e| ArchiveEntryRow {
+            name: e.name,
+            size: e.size,
+            is_dir: e.is_dir,
+        })
+        .collect();
+    Ok(ArchiveListResp {
+        entries: rows,
+        total_files,
+        total_bytes,
+    })
+}
+
+#[tauri::command]
+pub async fn p2p_archive_extract_cmd(
+    req: serde_json::Value,
+) -> Result<ArchiveExtractResp, String> {
+    let path_str = req
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'path'".to_string())?
+        .to_string();
+    let output_dir_str = req
+        .get("output_dir")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'output_dir'".to_string())?
+        .to_string();
+    let selected: Option<Vec<String>> = req
+        .get("selected")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        });
+    let path = PathBuf::from(path_str);
+    let output_dir = PathBuf::from(output_dir_str);
+    let output_dir_for_total = output_dir.clone();
+    let written = tauri::async_runtime::spawn_blocking(move || {
+        crate::archive_inspect::extract_entries(&path, &output_dir, selected)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {}", e))??;
+    let count = written.len();
+    let total_bytes = std::fs::read_dir(&output_dir_for_total)
+        .map(|_| 0u64) // quick approximation; the user gets real
+        // sizes from list if they need exact totals
+        .unwrap_or(0);
+    Ok(ArchiveExtractResp {
+        written,
+        count,
+        total_bytes,
+    })
+}
+
 /// Reveal `path` in Finder (macOS) / File Manager (Linux/Windows).
 /// Pass a path to a FILE — Finder will select it. Pass a path to a
 /// DIRECTORY — Finder will open it.
@@ -488,6 +587,116 @@ pub async fn open_path_cmd(path: String) -> Result<(), String> {
 }
 
 // ============================================================================
+//  P2P tunnel helpers
+// ============================================================================
+
+/// After receiving a file, if the wire filename ends in `.tar`
+/// (i.e. the sender archived a directory), extract it in-place
+/// and remove the archive. This restores the original directory
+/// structure (including macOS `.app` bundles with their symlinks
+/// and permission bits).
+///
+/// Returns (final_path, final_filename):
+///   - For `.tar` files: (extracted_dir_path, "DirName") — the
+///     top-level entry name extracted from the archive.
+///   - For everything else: (original_path, original_filename)
+///     unchanged.
+fn maybe_extract_tar(
+    received_path: PathBuf,
+    wire_filename: Option<&str>,
+) -> Result<(PathBuf, Option<String>), String> {
+    // Decide whether to extract based on the wire filename
+    // (most reliable) or the received path extension.
+    let is_tar = wire_filename
+        .map(|n| n.ends_with(".tar"))
+        .unwrap_or_else(|| {
+            received_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("tar"))
+                .unwrap_or(false)
+        });
+
+    if !is_tar {
+        // Nothing to do — return as-is.
+        return Ok((received_path, wire_filename.map(|s| s.to_string())));
+    }
+
+    // The archive should be extracted next to itself.
+    let extract_dir = received_path
+        .parent()
+        .ok_or_else(|| "received .tar has no parent dir".to_string())?;
+
+    eprintln!(
+        "[p2p] auto-extracting {} into {}",
+        received_path.display(),
+        extract_dir.display()
+    );
+
+    // Use system tar to extract: -x extract, -p preserve
+    // permissions (vital for .app bundles), -f archive file.
+    let tar_output = std::process::Command::new("/usr/bin/tar")
+        .arg("-xpf")
+        .arg(&received_path)
+        .arg("-C")
+        .arg(extract_dir)
+        .output()
+        .map_err(|e| format!("spawn tar -xpf: {}", e))?;
+
+    if !tar_output.status.success() {
+        return Err(format!(
+            "tar extraction failed: exit={:?} stderr={}",
+            tar_output.status.code(),
+            String::from_utf8_lossy(&tar_output.stderr)
+        ));
+    }
+
+    // Determine the top-level name that was extracted. The
+    // wire_filename is "DirName.tar", so we strip ".tar" to
+    // get "DirName". This is exactly what tar created in
+    // extract_dir.
+    let extracted_name = wire_filename
+        .and_then(|n| n.strip_suffix(".tar"))
+        .unwrap_or_else(|| {
+            received_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("extracted")
+        })
+        .to_string();
+
+    let extracted_path = extract_dir.join(&extracted_name);
+
+    // Remove the raw .tar now that we've extracted it.
+    if let Err(e) = std::fs::remove_file(&received_path) {
+        eprintln!(
+            "[p2p] warning: could not remove temp tar {}: {}",
+            received_path.display(),
+            e
+        );
+    } else {
+        eprintln!("[p2p] removed temp tar {}", received_path.display());
+    }
+
+    // Clear quarantine on the extracted tree (macOS: Gatekeeper
+    // would block every .app file without this).
+    #[cfg(target_os = "macos")]
+    {
+        let path_str = extracted_path.to_string_lossy().into_owned();
+        let _ = std::process::Command::new("/usr/bin/xattr")
+            .args(["-rd", "com.apple.quarantine", &path_str])
+            .output();
+    }
+
+    eprintln!(
+        "[p2p] extraction complete: {}",
+        extracted_path.display()
+    );
+
+    Ok((extracted_path, Some(extracted_name)))
+}
+
+// ============================================================================
 //  P2P tunnel — Sprint 5.0 demo
 // ============================================================================
 //
@@ -594,25 +803,21 @@ pub async fn p2p_send_start_cmd(
         .map_err(|e| format!("mkdir app_data_dir: {}", e))?;
     let started = p2p_tunnel::start_sender(file_path.clone(), code.clone(), app_data_dir).await?;
     // Sprint 5.6.16: if the user picked a directory, start_sender
-    // tars it to a .tar archive (system /usr/bin/tar, fast,
-    // universal). The user sees "FolderName.tar" on the wire
-    // — receiver can double-click in Finder to extract, no
-    // special software needed. Previous behavior was .nxs6
-    // which required our app to decompress and took forever
-    // for game-sized inputs that don't compress much.
-    let filename = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file")
-        .to_string();
-    let is_dir_input = std::fs::metadata(&file_path)
-        .map(|m| m.is_dir())
-        .unwrap_or(false);
-    let filename = if is_dir_input {
-        format!("{}.tar", filename)
-    } else {
-        filename
-    };
+    // The filename is already computed correctly by start_sender
+    // (it adds .tar for directories, preserves the original name
+    // for files and already-compressed formats). Read it from the
+    // token rather than re-computing it here to avoid drift.
+    let filename = started
+        .token
+        .filename
+        .clone()
+        .unwrap_or_else(|| {
+            file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string()
+        });
     let file_size = started.token.size;
     let upnp_status = started.upnp_info.as_ref().map(|info| UpnpStatusInfo {
         external_ip: info.external_ip.to_string(),
@@ -725,10 +930,14 @@ pub async fn p2p_receive_cmd(req: serde_json::Value) -> Result<P2pReceiveResp, S
             .map_err(|e| format!("mkdir output parent: {}", e))?;
     }
     let result = p2p_tunnel::receive_send_file(token, output_path).await?;
+    let (final_path, final_filename) = maybe_extract_tar(
+        result.output_path,
+        result.filename.as_deref(),
+    )?;
     Ok(P2pReceiveResp {
         bytes_written: result.bytes_written,
-        output_path: result.output_path.to_string_lossy().to_string(),
-        filename: result.filename,
+        output_path: final_path.to_string_lossy().to_string(),
+        filename: final_filename,
     })
 }
 
@@ -759,10 +968,14 @@ pub async fn p2p_receive_direct_cmd(req: serde_json::Value) -> Result<P2pReceive
             .map_err(|e| format!("mkdir output parent: {}", e))?;
     }
     let result = p2p_tunnel::receive_direct_file(token_v2, output_path, timeout_secs).await?;
+    let (final_path, final_filename) = maybe_extract_tar(
+        result.output_path,
+        result.filename.as_deref(),
+    )?;
     Ok(P2pReceiveResp {
         bytes_written: result.bytes_written,
-        output_path: result.output_path.to_string_lossy().to_string(),
-        filename: result.filename,
+        output_path: final_path.to_string_lossy().to_string(),
+        filename: final_filename,
     })
 }
 

@@ -7,11 +7,11 @@
 
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
+mod archive_inspect;
 mod commands;
 mod p2p_config;
 mod p2p_tunnel;
 mod upnp_hole;
-pub mod archive_inspect;
 
 use std::sync::Arc;
 
@@ -66,6 +66,8 @@ fn main() {
             commands::p2p_peek_filename_cmd,
             commands::p2p_get_tunnel_config_cmd,
             commands::p2p_save_tunnel_config_cmd,
+            commands::p2p_archive_list_cmd,
+            commands::p2p_archive_extract_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusRAR Tauri app");

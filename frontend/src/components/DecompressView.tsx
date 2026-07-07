@@ -1,13 +1,26 @@
 "use client";
 
 /**
- * DecompressView — dedicated screen for decompression (Sprint 5.6).
+ * DecompressView — Sprint 5.6.17 WinRAR-style browsing.
  *
- * User drops an archive → app detects format, shows what's inside,
- * user picks a destination, presses the big EXTRACT button.
+ * Flow:
+ *   1. User drops/picks an archive (.tar, .nxs6, .nxs, .lz, .nxar)
+ *   2. App detects the format and reads the central directory
+ *      (without extracting payload bytes).
+ *   3. UI lists every entry with a checkbox. Default: all checked.
+ *   4. User picks a destination folder.
+ *   5. Click "Extract all" or "Extract N selected" → backend
+ *      streams only the chosen entries from the archive.
+ *
+ * Two backend paths:
+ *   - p2p_archive_list_cmd / p2p_archive_extract_cmd for .tar /
+ *     .nxs6 (uses src-tauri/src/archive_inspect.rs).
+ *   - peek_archive_target_cmd / decompress_target_cmd for
+ *     legacy .lz / .nxar / .nxr (single-file, no central dir).
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { type View } from "@/components/NeoTopBar";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -18,7 +31,26 @@ async function tauriInvoke<T>(cmd: string, args: Record<string, unknown> = {}): 
   return await invoke(cmd, args);
 }
 
-interface ArchiveInfo {
+interface ArchiveEntry {
+  name: string;
+  size: number;
+  is_dir: boolean;
+}
+
+interface ArchiveListResp {
+  entries: ArchiveEntry[];
+  total_files: number;
+  total_bytes: number;
+}
+
+interface ArchiveInspectInfo {
+  archive_kind: string; // "tar" or "nxs6"
+  n_files: number;
+  total_bytes: number;
+  entries: ArchiveEntry[];
+}
+
+interface LegacyArchiveInfo {
   archive_kind: string;
   n_files: number;
   total_uncompressed: number;
@@ -34,8 +66,23 @@ interface DecompressResult {
   decompress_time_ms: number;
 }
 
+interface ArchiveExtractResp {
+  written: string[];
+  count: number;
+  total_bytes: number;
+}
+
+function isInspectable(name: string | null): "tar" | "nxs6" | null {
+  if (!name) return null;
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".tar")) return "tar";
+  if (lower.endsWith(".nxs6") || lower.endsWith(".nxs")) return "nxs6";
+  return null;
+}
+
 export function DecompressView({
   onComplete,
+  onNavigate,
 }: {
   onComplete: (op: {
     kind: "decompress";
@@ -44,18 +91,23 @@ export function DecompressView({
     restoredBytes: number;
     durationMs: number;
   }) => void;
+  onNavigate: (v: View) => void;
 }) {
   const [archivePath, setArchivePath] = useState<string | null>(null);
-  const [info, setInfo] = useState<ArchiveInfo | null>(null);
+  const [info, setInfo] = useState<ArchiveInspectInfo | null>(null);
+  const [legacyInfo, setLegacyInfo] = useState<LegacyArchiveInfo | null>(null);
   const [destDir, setDestDir] = useState<string>("");
   const [destInitialized, setDestInitialized] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [pathInput, setPathInput] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Resolve homeDir on mount (with proper slash handling)
+  const inspectable = isInspectable(archivePath);
+
+  // Resolve homeDir on mount
   useEffect(() => {
     if (!isTauri || destInitialized) return;
     (async () => {
@@ -76,19 +128,48 @@ export function DecompressView({
   useEffect(() => {
     if (!archivePath) {
       setInfo(null);
+      setLegacyInfo(null);
+      setSelected(new Set());
       return;
     }
-    // Tauri 2.x single-JSON-arg pattern: backend expects
-    // `{ req: { path } }`, not `{ path }` directly.
-    tauriInvoke<ArchiveInfo>("peek_archive_target_cmd", {
-      req: { path: archivePath },
-    })
-      .then(setInfo)
-      .catch((e) => {
-        setError(String(e?.message ?? e));
-        setInfo(null);
-      });
-  }, [archivePath]);
+    setError(null);
+    setInfo(null);
+    setLegacyInfo(null);
+    setSelected(new Set());
+    if (inspectable) {
+      // New path: read central directory, no extraction.
+      tauriInvoke<ArchiveListResp>("p2p_archive_list_cmd", {
+        req: { path: archivePath },
+      })
+        .then((r) => {
+          const inspect: ArchiveInspectInfo = {
+            archive_kind: inspectable === "tar" ? "TAR" : "NXS6",
+            n_files: r.total_files,
+            total_bytes: r.total_bytes,
+            entries: r.entries,
+          };
+          setInfo(inspect);
+          // Default: all files checked.
+          const initial = new Set<string>();
+          for (const e of r.entries) {
+            if (!e.is_dir) initial.add(e.name);
+          }
+          setSelected(initial);
+        })
+        .catch((e) => {
+          setError(String(e?.message ?? e));
+        });
+    } else {
+      // Legacy path: peek for legacy formats (.lz, .nxar, .nxr).
+      tauriInvoke<LegacyArchiveInfo>("peek_archive_target_cmd", {
+        req: { path: archivePath },
+      })
+        .then(setLegacyInfo)
+        .catch((e) => {
+          setError(String(e?.message ?? e));
+        });
+    }
+  }, [archivePath, inspectable]);
 
   const acceptPath = useCallback((path: string | null) => {
     if (path) {
@@ -104,12 +185,15 @@ export function DecompressView({
     setDragOver(true);
   }, []);
   const onDragLeave = useCallback(() => setDragOver(false), []);
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    const tauriPaths = (e as any).detail?.paths ?? null;
-    if (tauriPaths?.length) acceptPath(tauriPaths[0]);
-  }, [acceptPath]);
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragOver(false);
+      const tauriPaths = (e as any).detail?.paths ?? null;
+      if (tauriPaths?.length) acceptPath(tauriPaths[0]);
+    },
+    [acceptPath],
+  );
 
   useEffect(() => {
     if (!isTauri) return;
@@ -129,8 +213,7 @@ export function DecompressView({
     return () => unlisten?.();
   }, [acceptPath]);
 
-  // Sprint 5.6.3: use plugin dialog directly. HTML5 file input
-  // doesn't give us absolute paths on Tauri 2.x.
+  // File picker — show all supported archive extensions.
   const onBrowse = useCallback(async () => {
     if (!isTauri) return;
     try {
@@ -139,7 +222,8 @@ export function DecompressView({
         multiple: false,
         directory: false,
         filters: [
-          { name: "Nexus archive", extensions: ["nxs", "nxs6", "lz", "nxar", "nxr"] },
+          { name: "Archive (WinRAR-style)", extensions: ["tar", "nxs", "nxs6"] },
+          { name: "Nexus legacy", extensions: ["lz", "nxar", "nxr"] },
           { name: "All files", extensions: ["*"] },
         ],
       });
@@ -148,6 +232,7 @@ export function DecompressView({
       console.error("file picker:", e);
     }
   }, [acceptPath]);
+
   const onAddPath = useCallback(() => {
     const trimmed = pathInput.trim();
     if (trimmed) {
@@ -166,33 +251,81 @@ export function DecompressView({
     }
   }, []);
 
+  const toggleEntry = useCallback((name: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }, []);
+
+  const selectAll = useCallback(() => {
+    if (!info) return;
+    setSelected(new Set(info.entries.filter((e) => !e.is_dir).map((e) => e.name)));
+  }, [info]);
+
+  const selectNone = useCallback(() => setSelected(new Set()), []);
+
+  // Extract the chosen entries (or all, for legacy formats).
   const onExtract = useCallback(async () => {
     if (!archivePath) return;
     setBusy(true);
     setError(null);
     const startTime = Date.now();
     try {
-      const r = await tauriInvoke<DecompressResult>("decompress_target_cmd", {
-        req: {
-          path: archivePath,
-          output_dir: destDir || null,
-        },
-      });
-      onComplete({
-        kind: "decompress",
-        filename: archivePath.split("/").pop() || "archive",
-        originalBytes: info?.total_uncompressed ?? r.restored_size,
-        restoredBytes: r.restored_size,
-        durationMs: Date.now() - startTime,
-      });
-      setArchivePath(null);
-      setInfo(null);
+      if (inspectable && info) {
+        // New selective path.
+        const selectedArr = Array.from(selected);
+        const r = await tauriInvoke<ArchiveExtractResp>(
+          "p2p_archive_extract_cmd",
+          {
+            req: {
+              path: archivePath,
+              output_dir: destDir || null,
+              selected: selectedArr.length === info.entries.filter((e) => !e.is_dir).length
+                ? null
+                : selectedArr,
+            },
+          },
+        );
+        onComplete({
+          kind: "decompress",
+          filename: archivePath.split("/").pop() || "archive",
+          originalBytes: r.total_bytes,
+          restoredBytes: r.total_bytes,
+          durationMs: Date.now() - startTime,
+        });
+        setArchivePath(null);
+        setInfo(null);
+      } else {
+        // Legacy single-file extraction.
+        const r = await tauriInvoke<DecompressResult>("decompress_target_cmd", {
+          req: {
+            path: archivePath,
+            output_dir: destDir || null,
+          },
+        });
+        onComplete({
+          kind: "decompress",
+          filename: archivePath.split("/").pop() || "archive",
+          originalBytes: legacyInfo?.total_uncompressed ?? r.restored_size,
+          restoredBytes: r.restored_size,
+          durationMs: Date.now() - startTime,
+        });
+        setArchivePath(null);
+        setLegacyInfo(null);
+      }
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
       setBusy(false);
     }
-  }, [archivePath, destDir, onComplete]);
+  }, [archivePath, destDir, inspectable, info, selected, legacyInfo, onComplete]);
+
+  const fileCount = info?.entries.filter((e) => !e.is_dir).length ?? 0;
+  const selectedCount = selected.size;
+  const allSelected = fileCount > 0 && selectedCount === fileCount;
 
   return (
     <div
@@ -207,14 +340,21 @@ export function DecompressView({
         {/* Header */}
         <div className="mb-10">
           <div className="text-zinc-500 text-[12px] tracking-wide mb-2">
-            ← Volver
+            <button
+              onClick={() => onNavigate("landing")}
+              className="hover:text-zinc-300 transition-colors"
+            >
+              ← Volver
+            </button>
           </div>
           <h1 className="text-white text-[36px] font-semibold tracking-tight mb-3">
             Descomprimir
           </h1>
           <p className="text-zinc-400 text-[14px] leading-relaxed max-w-2xl">
-            Arrastra un archivo .nxs6 y la app te mostrará qué hay dentro
-            antes de extraer nada.
+            Arrastra un archivo <code className="text-amber-300">.tar</code> o{" "}
+            <code className="text-amber-300">.nxs6</code> — la app lee el directorio
+            central sin descomprimir nada y te deja elegir qué archivos querés
+            sacar (estilo WinRAR).
           </p>
         </div>
 
@@ -231,7 +371,7 @@ export function DecompressView({
               {dragOver ? "⤓" : "📂"}
             </div>
             <h3 className="text-white text-[20px] font-medium mb-2">
-              {dragOver ? "Suelta el archivo" : "Arrastra un archivo .nxs6"}
+              {dragOver ? "Suelta el archivo" : "Arrastra un archivo .tar o .nxs6"}
             </h3>
             <p className="text-zinc-500 text-[13px] mb-6">
               o escribe la ruta absoluta
@@ -242,7 +382,7 @@ export function DecompressView({
                 value={pathInput}
                 onChange={(e) => setPathInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && onAddPath()}
-                placeholder="/Users/usuario/Downloads/archivo.nxs6"
+                placeholder="/Users/usuario/Downloads/Counter-Strike 2.tar"
                 className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-xl px-4 py-2.5 text-[13px] text-white placeholder-zinc-600 focus:outline-none focus:border-amber-500/50"
               />
               <button
@@ -263,16 +403,32 @@ export function DecompressView({
         ) : (
           <div className="mb-10 rounded-2xl bg-white/[0.03] border border-amber-500/20 overflow-hidden">
             <div className="px-6 py-5">
-              <div className="text-amber-400 text-[11px] tracking-[0.2em] uppercase mb-3">
-                Archivo detectado
-              </div>
-              <div className="text-white text-[20px] font-medium mb-1">
-                {archivePath.split("/").pop()}
-              </div>
-              <div className="text-zinc-500 text-[12px] font-mono truncate mb-5">
-                {archivePath}
+              <div className="flex items-start justify-between mb-3">
+                <div>
+                  <div className="text-amber-400 text-[11px] tracking-[0.2em] uppercase mb-2">
+                    {inspectable ? `Directorio central · ${inspectable.toUpperCase()}` : "Archivo detectado"}
+                  </div>
+                  <div className="text-white text-[20px] font-medium mb-1">
+                    {archivePath.split("/").pop()}
+                  </div>
+                  <div className="text-zinc-500 text-[12px] font-mono truncate">
+                    {archivePath}
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setArchivePath(null);
+                    setInfo(null);
+                    setLegacyInfo(null);
+                    setSelected(new Set());
+                  }}
+                  className="text-zinc-500 hover:text-red-400 text-[12px] transition-colors px-2 py-1"
+                >
+                  Cambiar
+                </button>
               </div>
 
+              {/* Stats */}
               {info ? (
                 <div className="grid grid-cols-3 gap-5 pt-4 border-t border-white/[0.06]">
                   <DetailStat label="Formato" value={info.archive_kind} />
@@ -281,23 +437,98 @@ export function DecompressView({
                     value={`${info.n_files}`}
                   />
                   <DetailStat
+                    label="Tamaño total"
+                    value={prettyBytes(info.total_bytes)}
+                  />
+                </div>
+              ) : legacyInfo ? (
+                <div className="grid grid-cols-3 gap-5 pt-4 border-t border-white/[0.06]">
+                  <DetailStat label="Formato" value={legacyInfo.archive_kind} />
+                  <DetailStat
+                    label="Archivos"
+                    value={`${legacyInfo.n_files}`}
+                  />
+                  <DetailStat
                     label="Tamaño original"
-                    value={prettyBytes(info.total_uncompressed)}
+                    value={prettyBytes(legacyInfo.total_uncompressed)}
                   />
                 </div>
               ) : (
                 <div className="text-zinc-500 text-[13px] py-4">
-                  Detectando contenido…
+                  Leyendo directorio central…
                 </div>
               )}
 
-              {info && info.files.length > 0 && (
+              {/* WinRAR-style entry list with checkboxes */}
+              {info && info.entries.length > 0 && (
+                <div className="mt-5 pt-4 border-t border-white/[0.06]">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="text-zinc-400 text-[12px]">
+                      {selectedCount} de {fileCount} archivos seleccionados
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={selectAll}
+                        disabled={allSelected}
+                        className="text-[11px] px-2 py-1 text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                      >
+                        Todos
+                      </button>
+                      <button
+                        onClick={selectNone}
+                        disabled={selectedCount === 0}
+                        className="text-[11px] px-2 py-1 text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                      >
+                        Ninguno
+                      </button>
+                    </div>
+                  </div>
+                  <div className="max-h-80 overflow-y-auto rounded-xl bg-black/30 border border-white/[0.04] divide-y divide-white/[0.04]">
+                    {info.entries.map((entry, i) => {
+                      if (entry.is_dir) {
+                        return (
+                          <div
+                            key={i}
+                            className="text-zinc-500 text-[12px] flex items-center gap-3 px-4 py-2 font-mono"
+                          >
+                            <span className="w-4">📁</span>
+                            <span className="flex-1 truncate">{entry.name}</span>
+                            <span className="text-zinc-700 text-[10.5px]">dir</span>
+                          </div>
+                        );
+                      }
+                      const checked = selected.has(entry.name);
+                      return (
+                        <label
+                          key={i}
+                          className="text-zinc-300 text-[12px] flex items-center gap-3 px-4 py-1.5 hover:bg-white/[0.02] cursor-pointer font-mono"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleEntry(entry.name)}
+                            className="accent-amber-500 w-4 h-4 flex-shrink-0"
+                          />
+                          <span className="w-4 flex-shrink-0">📄</span>
+                          <span className="flex-1 truncate">{entry.name}</span>
+                          <span className="text-zinc-500 text-[10.5px] flex-shrink-0 tabular-nums">
+                            {prettyBytes(entry.size)}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Legacy: just list, no selection */}
+              {legacyInfo && legacyInfo.files.length > 0 && (
                 <details className="mt-5 pt-4 border-t border-white/[0.06]">
                   <summary className="text-zinc-400 text-[12px] cursor-pointer hover:text-white transition-colors">
-                    Ver contenido ({info.files.length} archivos)
+                    Ver contenido ({legacyInfo.files.length} archivos)
                   </summary>
                   <div className="mt-3 max-h-48 overflow-y-auto space-y-1">
-                    {info.files.slice(0, 50).map((f, i) => (
+                    {legacyInfo.files.slice(0, 50).map((f, i) => (
                       <div
                         key={i}
                         className="text-zinc-500 text-[12px] flex items-center gap-2 font-mono"
@@ -311,24 +542,14 @@ export function DecompressView({
                         </span>
                       </div>
                     ))}
-                    {info.files.length > 50 && (
+                    {legacyInfo.files.length > 50 && (
                       <div className="text-zinc-600 text-[11px] pt-2">
-                        … y {info.files.length - 50} más
+                        … y {legacyInfo.files.length - 50} más
                       </div>
                     )}
                   </div>
                 </details>
               )}
-
-              <button
-                onClick={() => {
-                  setArchivePath(null);
-                  setInfo(null);
-                }}
-                className="mt-4 text-zinc-500 hover:text-red-400 text-[12px] transition-colors"
-              >
-                Cambiar archivo
-              </button>
             </div>
           </div>
         )}
@@ -357,10 +578,20 @@ export function DecompressView({
         {/* Extract button */}
         <button
           onClick={onExtract}
-          disabled={!archivePath || busy}
+          disabled={
+            archivePath == null ||
+            busy ||
+            (!!inspectable && selectedCount === 0)
+          }
           className="w-full py-4 rounded-2xl bg-gradient-to-b from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 disabled:from-zinc-800 disabled:to-zinc-800 disabled:text-zinc-600 text-white text-[15px] font-semibold tracking-tight transition-all shadow-lg shadow-amber-500/20 disabled:shadow-none"
         >
-          {busy ? "Extrayendo…" : "Descomprimir"}
+          {busy
+            ? "Extrayendo…"
+            : inspectable && info
+              ? allSelected
+                ? "Extraer todo"
+                : `Extraer ${selectedCount} de ${fileCount}`
+              : "Descomprimir"}
         </button>
 
         {error && (
