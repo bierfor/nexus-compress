@@ -74,6 +74,14 @@ path = "src/main.rs"
 name = "p2p_smoke"
 path = "src/bin/p2p_smoke.rs"
 
+# Sprint 5.6.9: end-to-end test that exercises the FULL
+# receiver path against a local sender (no cloudflared) using
+# v3 cross-NAT flow + peek_filename. Verifies the real flow
+# the GUI triggers, not just unit tests of crypto primitives.
+[[bin]]
+name = "e2e_v3"
+path = "src/bin/e2e_v3.rs"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

@@ -1023,8 +1023,15 @@ async fn resolve_direct_service(
     // Bridge it to a tokio mpsc channel so we can use
     // tokio::time::timeout / tokio::select without blocking.
     let (tx, mut rx) = mpsc::unbounded_channel::<ServiceEvent>();
+    // mdns-sd 0.11.5 validates that the service type ends with
+    // '._tcp.local.' (note the trailing dot). Our SERVICE_TYPE
+    // constant deliberately omits it (because ServiceInfo::new
+    // needs it AND we'd get '..' otherwise), so we append it
+    // here for the browse query.
+    let service_type_for_browse =
+        format!("{}.", p2p_config::SERVICE_TYPE);
     let _browse = daemon
-        .browse(p2p_config::SERVICE_TYPE)
+        .browse(&service_type_for_browse)
         .map_err(|e| format!("mdns browse: {}", e))?;
     // Spawn a tiny task that forwards events into our tokio
     // channel. We can't move the `Receiver` from the
@@ -1043,7 +1050,7 @@ async fn resolve_direct_service(
         }
     });
     let service_fullname = format!(
-        "nx-{}.{}",
+        "nx-{}.{}.",
         service_hash,
         p2p_config::SERVICE_TYPE
     );
@@ -1534,13 +1541,20 @@ pub async fn peek_filename(
         } else {
             let (ip, port) =
                 resolve_direct_service(&v3.service_hash, timeout_secs).await?;
-            format!("http://{}:{}", ip, port)
+            // Wrap IPv6 in brackets; IPv4 prints as-is.
+            match ip {
+                std::net::IpAddr::V6(_) => format!("http://[{}]:{}", ip, port),
+                std::net::IpAddr::V4(_) => format!("http://{}:{}", ip, port),
+            }
         }
     } else if token_compact.starts_with(p2p_config::TOKEN_PREFIX_V2) {
         let v2 = p2p_config::parse_v2_token(token_compact)?;
         let (ip, port) =
             resolve_direct_service(&v2.service_hash, timeout_secs).await?;
-        format!("http://{}:{}", ip, port)
+        match ip {
+            std::net::IpAddr::V6(_) => format!("http://[{}]:{}", ip, port),
+            std::net::IpAddr::V4(_) => format!("http://{}:{}", ip, port),
+        }
     } else if let Ok(v1) = P2pToken::from_compact(token_compact) {
         // v1 tokens carry the filename in the JSON itself.
         return Ok(v1.filename);

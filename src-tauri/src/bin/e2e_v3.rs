@@ -1,0 +1,132 @@
+//! Sprint 5.6.9 — end-to-end test that EXACTLY mirrors what the
+//! GUI does when the user pastes a v3 token and clicks "Recibir":
+//!
+//! 1. Sender: start_direct_sender (no cloudflared, no Quick tunnel).
+//! 2. Receiver: peek_filename → fetch /meta without doing the receive.
+//! 3. Receiver: receive_direct_file (does the full SPAKE2 + file
+//!    transfer).
+//! 4. Assert: bytes match the original.
+
+#[path = "../p2p_tunnel.rs"]
+mod p2p_tunnel;
+#[path = "../p2p_auth.rs"]
+mod p2p_auth;
+#[path = "../p2p_config.rs"]
+mod p2p_config;
+#[path = "../upnp_hole.rs"]
+mod upnp_hole;
+
+use p2p_tunnel::{peek_filename, receive_direct_file, start_direct_sender};
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tokio::time::timeout;
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+async fn main() {
+    // 1. Setup: create a temp file with known content.
+    let tmp = std::env::temp_dir().join(format!(
+        "e2e_v3_{}.html",
+        std::process::id()
+    ));
+    let original = b"<html><body>test content for Sofia Baldi's CV</body></html>";
+    {
+        let mut f = tokio::fs::File::create(&tmp).await.expect("create");
+        f.write_all(original).await.expect("write");
+    }
+
+    // 2. Force Direct mode in BOTH possible config locations.
+    let cfg_dir_a = std::env::temp_dir().join("nexus-rar-p2p");
+    std::fs::create_dir_all(&cfg_dir_a).unwrap();
+    std::fs::write(
+        cfg_dir_a.join("nexus_config.json"),
+        br#"{"mode":"Direct","hostname":null}"#,
+    )
+    .unwrap();
+    // The GUI binary uses tauri::path::app_data_dir → on macOS that's
+    // ~/Library/Application Support/com.nexus-rar.tunnel
+    let cfg_dir_b = std::env::var("HOME")
+        .map(|h| {
+            std::path::PathBuf::from(h)
+                .join("Library/Application Support/com.nexus-rar.tunnel")
+        })
+        .unwrap_or_else(|_| std::env::temp_dir().join("nexus-rar-home"));
+    let _ = std::fs::create_dir_all(&cfg_dir_b);
+    let _ = std::fs::write(
+        cfg_dir_b.join("nexus_config.json"),
+        br#"{"mode":"Direct","hostname":null}"#,
+    );
+
+    // 3. Start the sender on 0.0.0.0:0 — get a free port.
+    let code = "alpha-bear-cosmic-delta".to_string();
+    let started = start_direct_sender(tmp.clone(), code.clone(), cfg_dir_a.clone())
+        .await
+        .expect("start sender");
+
+    let v3_token = started.token_compact.clone();
+    println!("[e2e] token = {}", v3_token);
+    println!("[e2e] token.v = {}, filename = {:?}",
+        started.token.v, started.token.filename);
+    assert!(
+        started.token.filename.is_some(),
+        "sender must include filename in token"
+    );
+    assert_eq!(
+        started.token.filename.as_deref(),
+        Some(tmp.file_name().unwrap().to_str().unwrap()),
+        "filename must be the original file's basename"
+    );
+
+    // 4. PEEK the filename (the new command). Should succeed without
+    //    consuming the SPAKE state.
+    let peeked = peek_filename(&v3_token, 5)
+        .await
+        .expect("peek_filename");
+    println!("[e2e] peeked filename = {:?}", peeked);
+    assert_eq!(peeked.as_deref(), started.token.filename.as_deref());
+
+    // 5. PEEK again to confirm the first one didn't burn anything.
+    let peeked2 = peek_filename(&v3_token, 5).await;
+    println!("[e2e] second peek = {:?}", peeked2);
+    assert!(peeked2.is_ok(), "peek should be idempotent");
+
+    // 6. Now do the FULL receive. SPAKE state is fresh.
+    let out = std::env::temp_dir().join(format!(
+        "e2e_v3_RECEIVED_{}.html",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&out);
+
+    let result = timeout(
+        Duration::from_secs(15),
+        receive_direct_file(v3_token.clone(), out.clone(), 5),
+    )
+    .await
+    .expect("receive timed out")
+    .expect("receive failed");
+
+    println!(
+        "[e2e] received {} bytes → {} (filename={:?})",
+        result.bytes_written,
+        result.output_path.display(),
+        result.filename
+    );
+    assert_eq!(
+        result.bytes_written as usize,
+        original.len(),
+        "bytes match"
+    );
+    assert_eq!(
+        result.filename.as_deref(),
+        started.token.filename.as_deref(),
+        "filename flows through receive result"
+    );
+
+    // 7. Verify the actual bytes on disk.
+    let got = std::fs::read(&out).expect("read received file");
+    assert_eq!(got, original, "file bytes match");
+
+    // 8. Cleanup.
+    drop(started);
+    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&out);
+}
