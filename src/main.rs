@@ -22,7 +22,7 @@ use std::path::Path;
 use nexus_compress::engine;
 
 fn print_help() {
-    eprintln!("nexus CLI — NexusCompress v4 + v5 LZMA + v6 AST-aware");
+    eprintln!("nexus CLI — NexusCompress v4 + v5 LZMA + v6 AST-aware + v6-solid");
     eprintln!();
     eprintln!("USAGE:");
     eprintln!("    nexus c [OPTIONS] <input> <output>");
@@ -33,6 +33,9 @@ fn print_help() {
     eprintln!("    --backend NAME  v4 | v5 | v5-min | v5-extreme | v6 | v6-extreme");
     eprintln!("                    (default: v4)");
     eprintln!("    --minify        apply the conservative minify pre-filter (v5-min)");
+    eprintln!("    --solid         directory: build a SOLID v6 archive (NXS6, LOSSY)");
+    eprintln!("                    cross-file LZMA dictionary, max ratio on source code");
+    eprintln!("    --level N       LZMA level 0..9 (default 6, used by --solid and v5/v6)");
     eprintln!("    -h, --help      show this help");
     eprintln!();
     eprintln!("EXAMPLES:");
@@ -41,8 +44,9 @@ fn print_help() {
     eprintln!("    nexus c --backend v5-min src out.lz  # LZMA + minify (lossless)");
     eprintln!("    nexus c --backend v6 app.tsx out.lz  # LZMA + swc AST minify (lossy)");
     eprintln!("    nexus c --backend v6-extreme code.js out.lz  # LZMA -9 + swc");
-    eprintln!("    nexus c --backend v5-extreme big.nxs tiny.lz  # LZMA -9 (max ratio)");
-    eprintln!("    nexus d out.nxs big.txt              # auto-detect v4/v5");
+    eprintln!("    nexus c --solid src/ out.nxs6        # SOLID v6 (lossy, max ratio)");
+    eprintln!("    nexus c --solid --level 9 src/ out.nxs6  # SOLID v6, LZMA -9");
+    eprintln!("    nexus d out.nxs6 out_dir/            # auto-detect NXS6 / NXAR / v5");
 }
 
 fn main() {
@@ -54,6 +58,8 @@ fn main() {
     let mut iter = args.iter().skip(1);
     let mut backend: Option<String> = None;
     let mut minify = false;
+    let mut solid = false;
+    let mut lzma_level: Option<u32> = None;
     let mut positional: Vec<String> = Vec::new();
     while let Some(a) = iter.next() {
         match a.as_str() {
@@ -62,6 +68,12 @@ fn main() {
             }
             "--minify" => {
                 minify = true;
+            }
+            "--solid" => {
+                solid = true;
+            }
+            "--level" => {
+                lzma_level = iter.next().and_then(|s| s.parse().ok());
             }
             "-h" | "--help" => {
                 print_help();
@@ -91,28 +103,63 @@ fn main() {
             let output = &positional[2];
             let backend_name = backend.as_deref().unwrap_or("v4");
             if input.is_dir() {
-                // Directory compression → NXAR archive.
-                // The directory path uses the per-file v4 pipeline
-                // (multi-stream, dedup, dict). The --backend flag
-                // applies to single-file mode.
-                if backend.is_some() {
-                    eprintln!("warn: --backend is ignored for directory compression (NXAR uses v4 per-file)");
+                if solid {
+                    // SOLID v6 archive: NXS6 magic, single LZMA
+                    // stream over the entire preprocessed corpus.
+                    // LOSSY — decompress returns minified files.
+                    let level = lzma_level
+                        .or_else(|| {
+                            if backend.as_deref() == Some("v6-extreme") {
+                                Some(9)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(6);
+                    let files = walk_dir(input).expect("walk dir");
+                    if files.is_empty() {
+                        eprintln!("error: directory has no files: {}", positional[1]);
+                        std::process::exit(2);
+                    }
+                    let original_total: usize = files.iter().map(|(_, b)| b.len()).sum();
+                    let t0 = std::time::Instant::now();
+                    let archive = nexus_compress::solid_archive::compress(&files, level)
+                        .expect("solid compress");
+                    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    fs::write(output, &archive).expect("write output");
+                    let ratio = original_total as f64 / archive.len().max(1) as f64;
+                    eprintln!(
+                        "{} -> {} (SOLID v6 LZMA {}, {:.2}x, {} files, {} bytes -> {} bytes, {:.0} ms)",
+                        positional[1],
+                        output,
+                        level,
+                        ratio,
+                        files.len(),
+                        original_total,
+                        archive.len(),
+                        ms,
+                    );
+                } else {
+                    // Per-file NXAR archive (lossless v4).
+                    if backend.is_some() {
+                        eprintln!("warn: --backend is ignored for directory compression (NXAR uses v4 per-file)");
+                    }
+                    let (result, archive) = nexus_compress::api::compress_directory(
+                        input,
+                        nexus_compress::api::CompressionLevel::Fast,
+                    )
+                    .expect("compress directory");
+                    fs::write(output, &archive).expect("write output");
+                    eprintln!(
+                        "{} -> {} ({:.2}x), {} files, {} bytes -> {} bytes",
+                        positional[1],
+                        output,
+                        result.aggregate_ratio,
+                        result.n_files,
+                        result.total_original_size,
+                        result.total_compressed_size
+                    );
                 }
-                let (result, archive) = nexus_compress::api::compress_directory(
-                    input,
-                    nexus_compress::api::CompressionLevel::Fast,
-                )
-                .expect("compress directory");
-                fs::write(output, &archive).expect("write output");
-                eprintln!(
-                    "{} -> {} ({:.2}x), {} files, {} bytes -> {} bytes",
-                    positional[1],
-                    output,
-                    result.aggregate_ratio,
-                    result.n_files,
-                    result.total_original_size,
-                    result.total_compressed_size
-                );
             } else {
                 let bytes = fs::read(input).expect("read input");
                 let out = if matches!(backend_name, "v6" | "v6-extreme") {
@@ -143,8 +190,31 @@ fn main() {
                 std::process::exit(2);
             }
             let input = fs::read(&positional[1]).expect("read input");
-            // Auto-detect NXAR vs v4/v5 by magic.
-            if input.len() >= 4 && &input[0..4] == b"NXAR" {
+            // Auto-detect by magic.
+            if input.len() >= 5 && &input[0..5] == nexus_compress::solid_archive::MAGIC {
+                // NXS6 solid archive. Output is a directory; we
+                // write the preprocessed bytes of each file. LOSSY.
+                let out_path = Path::new(&positional[2]);
+                std::fs::create_dir_all(out_path).expect("create output dir");
+                let (entries, solid) =
+                    nexus_compress::solid_archive::decompress(&input).expect("solid decompress");
+                let mut n = 0;
+                for e in &entries {
+                    let start = e.solid_offset as usize;
+                    let end = start + e.pre_size as usize;
+                    let bytes = &solid[start..end];
+                    let target = out_path.join(&e.name);
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent).expect("create parent");
+                    }
+                    std::fs::write(&target, bytes).expect("write extracted file");
+                    n += 1;
+                }
+                eprintln!(
+                    "{} -> {} (SOLID v6, {} files, lossy)",
+                    positional[1], positional[2], n
+                );
+            } else if input.len() >= 4 && &input[0..4] == b"NXAR" {
                 let out_path = Path::new(&positional[2]);
                 std::fs::create_dir_all(out_path).expect("create output dir");
                 let result = nexus_compress::api::decompress_directory(&input, out_path)
@@ -172,4 +242,36 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+/// Walk a directory recursively and return `(relative_path, bytes)`
+/// for every regular file, sorted by relative path for determinism.
+fn walk_dir(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        out: &mut Vec<(String, Vec<u8>)>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                walk(root, &path, out)?;
+            } else if file_type.is_file() {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let bytes = std::fs::read(&path)?;
+                out.push((rel, bytes));
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out)?;
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }

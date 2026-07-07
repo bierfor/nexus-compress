@@ -27,6 +27,7 @@ pub mod minify;
 pub mod nxar;
 pub mod rans_v4;
 pub mod rle;
+pub mod solid_archive;
 
 pub use codec::{compress, compress_premium, decompress};
 pub use format::{BlockType, NexusHeader};
