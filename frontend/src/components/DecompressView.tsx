@@ -107,10 +107,24 @@ export function DecompressView({
     return () => unlisten?.();
   }, [acceptPath]);
 
-  const onBrowse = useCallback(() => fileInputRef.current?.click(), []);
-  const onFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = (e.target.files ?? [])[0] as any;
-    if (f) acceptPath(f.path || f.name);
+  // Sprint 5.6.3: use plugin dialog directly. HTML5 file input
+  // doesn't give us absolute paths on Tauri 2.x.
+  const onBrowse = useCallback(async () => {
+    if (!isTauri) return;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const result = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "Nexus archive", extensions: ["nxs", "nxs6", "lz", "nxar", "nxr"] },
+          { name: "All files", extensions: ["*"] },
+        ],
+      });
+      if (typeof result === "string") acceptPath(result);
+    } catch (e) {
+      console.error("file picker:", e);
+    }
   }, [acceptPath]);
   const onAddPath = useCallback(() => {
     const trimmed = pathInput.trim();
@@ -200,12 +214,6 @@ export function DecompressView({
             <p className="text-zinc-500 text-[13px] mb-6">
               o escribe la ruta absoluta
             </p>
-            <input
-              ref={fileInputRef}
-              type="file"
-              onChange={onFileChange}
-              className="hidden"
-            />
             <div className="flex items-center gap-2 max-w-xl mx-auto">
               <input
                 type="text"

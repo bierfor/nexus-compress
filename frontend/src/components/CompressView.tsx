@@ -216,15 +216,23 @@ export function CompressView({
     };
   }, [acceptPaths]);
 
-  // HTML file input (hidden)
-  const onBrowse = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
-  const onFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const fl = Array.from(e.target.files ?? []);
-    if (fl.length > 0) {
-      const names = fl.map((f) => (f as any).path || f.name);
-      acceptPaths(names);
+  // Sprint 5.6.3: use the plugin dialog directly. HTML5 file
+  // input on Tauri 2.x no longer exposes absolute paths on the
+  // File object (`f.path` is undefined), so the absolute-path
+  // input is only available via the plugin dialog API.
+  const onBrowse = useCallback(async () => {
+    if (!isTauri) return;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const result = await open({
+        multiple: true,
+        directory: false,
+        filters: [{ name: "All files", extensions: ["*"] }],
+      });
+      if (Array.isArray(result)) acceptPaths(result);
+      else if (typeof result === "string") acceptPaths([result]);
+    } catch (e) {
+      console.error("file picker:", e);
     }
   }, [acceptPaths]);
 
@@ -371,13 +379,6 @@ export function CompressView({
               <p className="text-zinc-500 text-[13px] mb-6">
                 o usa el campo de abajo para escribir la ruta
               </p>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                onChange={onFileChange}
-                className="hidden"
-              />
               <div className="flex items-center gap-2 max-w-xl mx-auto">
                 <input
                   type="text"

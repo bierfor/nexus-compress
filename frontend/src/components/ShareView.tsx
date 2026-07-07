@@ -129,7 +129,6 @@ function SendTab({
   const [pathInput, setPathInput] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [copied, setCopied] = useState<"code" | "token" | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const acceptPath = useCallback((p: string | null) => {
     if (p) {
@@ -169,11 +168,42 @@ function SendTab({
     return () => unlisten?.();
   }, [acceptPath]);
 
-  const onBrowse = useCallback(() => fileInputRef.current?.click(), []);
-  const onFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = (e.target.files ?? [])[0] as any;
-    if (f) acceptPath(f.path || f.name);
+  // Sprint 5.6.3: use the plugin dialog directly. The HTML5
+  // file input on Tauri 2.x no longer exposes absolute paths
+  // on the File object (`f.path` is undefined since v2.0.0 for
+  // security reasons), so `f.path || f.name` would silently
+  // fall back to just the basename. The plugin dialog returns
+  // real paths via its JS API.
+  const onBrowse = useCallback(async () => {
+    if (!isTauri) return;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const result = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "All files", extensions: ["*"] }],
+      });
+      if (typeof result === "string") acceptPath(result);
+    } catch (e) {
+      console.error("file picker:", e);
+    }
   }, [acceptPath]);
+
+  // Also support picking a folder (for sending whole directories).
+  const onBrowseFolder = useCallback(async () => {
+    if (!isTauri) return;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const result = await open({
+        multiple: false,
+        directory: true,
+      });
+      if (typeof result === "string") acceptPath(result);
+    } catch (e) {
+      console.error("folder picker:", e);
+    }
+  }, [acceptPath]);
+
   const onAddPath = useCallback(() => {
     const t = pathInput.trim();
     if (t) acceptPath(t);
@@ -234,26 +264,28 @@ function SendTab({
           <p className="text-zinc-500 text-[13px] mb-6">
             o usa el campo de abajo para escribir la ruta
           </p>
-          <input
-            ref={fileInputRef}
-            type="file"
-            onChange={onFileChange}
-            className="hidden"
-          />
           <div className="flex items-center gap-2 max-w-xl mx-auto mb-6">
             <input
               type="text"
               value={pathInput}
               onChange={(e) => setPathInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && onAddPath()}
-              placeholder="/Users/usuario/Desktop/pelicula.mkv"
+              placeholder="/Users/usuario/Desktop/pelicula.mkv o ~/Documents"
               className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-xl px-4 py-2.5 text-[13px] text-white placeholder-zinc-600 focus:outline-none focus:border-emerald-500/50"
             />
             <button
               onClick={onBrowse}
               className="px-4 py-2.5 text-[13px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-xl transition-colors"
+              title="Pick a single file"
             >
-              Explorar
+              📄 Archivo
+            </button>
+            <button
+              onClick={onBrowseFolder}
+              className="px-4 py-2.5 text-[13px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-xl transition-colors"
+              title="Pick a whole folder"
+            >
+              📁 Carpeta
             </button>
           </div>
 
