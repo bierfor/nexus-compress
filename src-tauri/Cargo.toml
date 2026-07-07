@@ -37,6 +37,8 @@ sha2 = "0.10"                 # SHA-256 (keyed)
 hkdf = "0.12"                 # HKDF-SHA256 for session key derivation
 hmac = "0.12"                 # HMAC-SHA256 challenge-response auth header
 tokio = { version = "1", features = ["full"] }
+flate2 = "1"                  # gzip decompression for cloudflared .tgz
+tar = "0.4"                   # tar extraction for cloudflared tarball
 # The `custom-protocol` feature activates production mode: instead
 # of fetching from `devUrl`, the `frontendDist` directory is embedded
 # into the binary at compile time. Without this, the Tauri build
@@ -54,6 +56,19 @@ tauri-build = { version = "2", features = ["codegen"] }
 # `cargo check` on the lib side). The GUI is opt-in.
 default = []
 tauri-app = []  # marker feature; kept for forward compat
+
+# Sprint 5.0 — P2P field-test binary. Compiled with
+# `cargo build --release --bin p2p_smoke`. Uses the same
+# p2p_tunnel module as the GUI but is a standalone CLI for
+# measuring handshake latency, throughput, and drop behavior
+# against the real Cloudflare Quick Tunnel.
+[[bin]]
+name = "nexus-rar"
+path = "src/main.rs"
+
+[[bin]]
+name = "p2p_smoke"
+path = "src/bin/p2p_smoke.rs"
 
 [profile.release]
 opt-level = 3

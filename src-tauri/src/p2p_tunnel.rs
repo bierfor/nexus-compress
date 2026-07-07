@@ -48,6 +48,8 @@
 //!   11. cloudflared killed         12. connection closed
 //! ```
 
+#[path = "p2p_auth.rs"]
+mod auth;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
