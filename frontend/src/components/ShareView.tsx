@@ -220,46 +220,61 @@ function SendPanel({
             }`}
           >
             <div className="text-4xl mb-3 select-none">{dragOver ? "⤓" : "🚀"}</div>
-            <p className="text-zinc-400 text-[13px] mb-4">
+            <p className="text-zinc-400 text-[13px] mb-2">
               {dragOver ? t("share.send.drop.active") : t("share.send.drop")}
+            </p>
+            {/* Sprint 5.6.27: explicit hint about drag-drop being
+                the most reliable path on macOS Sequoia where the
+                native picker is flaky. */}
+            <p className="text-zinc-600 text-[11px] mb-4 max-w-md mx-auto">
+              {t("share.send.drop.hint")}
             </p>
             <div className="flex justify-center gap-2 flex-wrap">
               <button
                 onClick={onBrowseFile}
                 className="px-3 py-1.5 text-[12px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-lg transition-colors"
+                title="Si el picker falla, arrastra o pega la ruta abajo"
               >
                 {"📄 " + t("share.send.file")}
               </button>
               <button
                 onClick={onBrowseFolder}
                 className="px-3 py-1.5 text-[12px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-lg transition-colors"
+                title="Si el picker falla, arrastra o pega la ruta abajo"
               >
                 {"📁 " + t("share.send.folder")}
               </button>
             </div>
           </div>
 
-          {/* Path input */}
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={pathInput}
-              onChange={(e) => setPathInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && pathInput.trim() && acceptPath(pathInput.trim())}
-              placeholder={t("share.send.path")}
-              className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-xl px-3 py-2 text-[12px] text-white placeholder-zinc-600 focus:outline-none focus:border-emerald-500/40 font-mono"
-            />
-            <button
-              onClick={() => pathInput.trim() && acceptPath(pathInput.trim())}
-              disabled={!pathInput.trim()}
-              className="px-3 py-2 text-[12px] text-emerald-400 border border-emerald-500/30 rounded-xl hover:bg-emerald-500/10 disabled:opacity-30 transition-colors"
-            >
-              {t("share.send.use")}
-            </button>
+          {/* Path input — Sprint 5.6.27: this is the RELIABLE
+              primary action. macOS Sequoia native picker is
+              flaky, so we make this bigger and more obvious.
+              User can: type, paste (Cmd+V), or copy a path from
+              Finder via right-click + "Copy ... as Pathname"
+              (Cmd+Opt+C). */}
+          <div>
+            <label className="text-zinc-500 text-[10px] tracking-[0.15em] uppercase mb-1.5 block">
+              {t("share.send.path.label")}
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={pathInput}
+                onChange={(e) => setPathInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && pathInput.trim() && acceptPath(pathInput.trim())}
+                placeholder={t("share.send.path")}
+                className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-xl px-4 py-3 text-[13px] text-white placeholder-zinc-600 focus:outline-none focus:border-emerald-500/40 font-mono"
+              />
+              <button
+                onClick={() => pathInput.trim() && acceptPath(pathInput.trim())}
+                disabled={!pathInput.trim()}
+                className="px-5 py-3 text-[13px] text-emerald-400 border border-emerald-500/30 rounded-xl hover:bg-emerald-500/10 disabled:opacity-30 disabled:cursor-not-allowed transition-colors font-medium"
+              >
+                {t("share.send.use")}
+              </button>
+            </div>
           </div>
-
-          {/* Hint below input */}
-          <p className="text-zinc-600 text-[11px] -mt-2">{t("share.send.drop.hint")}</p>
 
           {/* Selected file */}
           {filePath && (

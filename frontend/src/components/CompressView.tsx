@@ -14,6 +14,8 @@
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { type View } from "@/components/NeoTopBar";
+import { useLocale } from "@/components/LocaleProvider";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -48,11 +50,10 @@ interface ProgressEvent {
 
 type Mode = "rapido" | "balanceado" | "ultra";
 
+// Only backend/static data — titles and descriptions come from t()
 const MODES: {
   id: Mode;
   icon: string;
-  title: string;
-  description: string;
   stars: number;
   backend: string;
   lzma: number;
@@ -60,8 +61,6 @@ const MODES: {
   {
     id: "rapido",
     icon: "⚡",
-    title: "Rápido",
-    description: "Ideal para vídeos. Compresión rápida, ahorra ~10-20%.",
     stars: 4,
     backend: "v4",
     lzma: 0,
@@ -69,8 +68,6 @@ const MODES: {
   {
     id: "balanceado",
     icon: "⚖",
-    title: "Balanceado",
-    description: "Recomendado. Mejor relación tiempo/tamaño para la mayoría de archivos.",
     stars: 5,
     backend: "v5-min",
     lzma: 6,
@@ -78,12 +75,7 @@ const MODES: {
   {
     id: "ultra",
     icon: "💎",
-    title: "Ultra",
-    description: "Máxima compresión. Más lento, pero ahorra más espacio.",
     stars: 3,
-    // v6-solid (not v6) — that's the Solid-AST whole-archive
-    // backend that produces the .nxs6 extension. The bare "v6"
-    // backend produces .lz files which is not what users expect.
     backend: "v6-solid",
     lzma: 9,
   },
@@ -91,6 +83,7 @@ const MODES: {
 
 export function CompressView({
   onComplete,
+  onNavigate,
 }: {
   onComplete: (op: {
     kind: "compress";
@@ -99,7 +92,9 @@ export function CompressView({
     compressedBytes: number;
     durationMs: number;
   }) => void;
+  onNavigate: (v: View) => void;
 }) {
+  const { t } = useLocale();
   const [files, setFiles] = useState<string[]>([]);
   const [mode, setMode] = useState<Mode>("balanceado");
   const [destDir, setDestDir] = useState<string>("");
@@ -113,16 +108,12 @@ export function CompressView({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Initialize the destination to the real ~/Downloads path on mount.
-  // NOTE: homeDir() on macOS returns "/Users/<user>" WITHOUT a trailing
-  // slash, so we must add it explicitly. Otherwise we end up with
-  // "/Users/bierhfforDownloads" (one word, broken path).
   useEffect(() => {
     if (!isTauri || destInitialized) return;
     (async () => {
       try {
         const { homeDir, join } = await import("@tauri-apps/api/path");
         const home = await homeDir();
-        // join() handles the slash correctly across platforms.
         const downloads = await join(home, "Downloads");
         setDestDir(downloads);
       } catch {
@@ -163,8 +154,8 @@ export function CompressView({
   // Auto-dismiss toast after 5s
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), 5000);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(timer);
   }, [toast]);
 
   const acceptPaths = useCallback((paths: string[]) => {
@@ -216,10 +207,6 @@ export function CompressView({
     };
   }, [acceptPaths]);
 
-  // Sprint 5.6.3: use the plugin dialog directly. HTML5 file
-  // input on Tauri 2.x no longer exposes absolute paths on the
-  // File object (`f.path` is undefined), so the absolute-path
-  // input is only available via the plugin dialog API.
   const onBrowse = useCallback(async () => {
     if (!isTauri) return;
     try {
@@ -265,9 +252,6 @@ export function CompressView({
     setProgress(null);
     const startTime = Date.now();
     const m = MODES.find((x) => x.id === mode)!;
-    // Extract the filename from the input path. The backend's
-    // CompressResult doesn't include filename — only output_path.
-    // For Recientes we need the human-readable input name.
     const inputPath = files[0];
     const inputFilename = inputPath.split("/").pop() || "archivo";
     try {
@@ -276,10 +260,6 @@ export function CompressView({
           path: inputPath,
           backend: m.backend,
           lzma_level: m.lzma,
-          // Pass output_dir if user picked one (with trailing
-          // slash fix from the homeDir mount effect above). If
-          // it's empty, fall back to null = backend default
-          // (saves next to input).
           output_dir: destDir || null,
         },
       });
@@ -313,8 +293,20 @@ export function CompressView({
     progress && progress.bytes_total > 0
       ? Math.min(100, (progress.bytes_done / progress.bytes_total) * 100)
       : 0;
-  // Estimated savings for the preview (no real file size available
-  // before compression, so this is a heuristic by mode).
+
+  // Mode title/desc helpers
+  const getModeTitle = (id: Mode) => {
+    if (id === "rapido") return t("mode.fast.title");
+    if (id === "balanceado") return t("mode.balanced.title");
+    return t("mode.ultra.title");
+  };
+  const getModeDesc = (id: Mode) => {
+    if (id === "rapido") return t("mode.fast.desc");
+    if (id === "balanceado") return t("mode.balanced.desc");
+    return t("mode.ultra.desc");
+  };
+
+  // Estimated savings for the preview
   const estSavings =
     mode === "rapido" ? 0.15 : mode === "balanceado" ? 0.35 : 0.5;
 
@@ -345,18 +337,17 @@ export function CompressView({
         <div className="mb-10">
           <div className="text-zinc-500 text-[12px] tracking-wide mb-2">
             <button
-              onClick={() => window.history.back()}
+              onClick={() => onNavigate("landing")}
               className="hover:text-zinc-300 transition-colors"
             >
-              ← Volver
+              {t("back")}
             </button>
           </div>
           <h1 className="text-white text-[36px] font-semibold tracking-tight mb-3">
-            Comprimir
+            {t("compress.title")}
           </h1>
           <p className="text-zinc-400 text-[14px] leading-relaxed max-w-2xl">
-            Arrastra archivos aquí, elige el modo y el destino. La compresión
-            ocurre en local — tus archivos no salen de tu Mac.
+            {t("compress.desc")}
           </p>
         </div>
 
@@ -374,10 +365,10 @@ export function CompressView({
                 {dragOver ? "⤓" : "📦"}
               </div>
               <h3 className="text-white text-[20px] font-medium mb-2">
-                {dragOver ? "Suelta para añadir" : "Arrastra tus archivos aquí"}
+                {dragOver ? t("compress.drop.active") : t("compress.drop")}
               </h3>
               <p className="text-zinc-500 text-[13px] mb-6">
-                o usa el campo de abajo para escribir la ruta
+                {t("compress.drop.hint")}
               </p>
               <div className="flex items-center gap-2 max-w-xl mx-auto">
                 <input
@@ -385,21 +376,21 @@ export function CompressView({
                   value={pathInput}
                   onChange={(e) => setPathInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && onAddPath()}
-                  placeholder="/Users/usuario/Desktop/archivo.mkv"
+                  placeholder={t("compress.placeholder")}
                   className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-xl px-4 py-2.5 text-[13px] text-white placeholder-zinc-600 focus:outline-none focus:border-cyan-500/50"
                 />
                 <button
                   onClick={onBrowse}
                   className="px-4 py-2.5 text-[13px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-xl transition-colors"
                 >
-                  Explorar
+                  {t("compress.browse")}
                 </button>
                 <button
                   onClick={onAddPath}
                   disabled={!pathInput.trim()}
                   className="px-4 py-2.5 text-[13px] text-cyan-400 hover:text-cyan-300 border border-cyan-500/30 hover:border-cyan-500/50 rounded-xl transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                 >
-                  Añadir
+                  {t("compress.add")}
                 </button>
               </div>
             </div>
@@ -407,14 +398,15 @@ export function CompressView({
             <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] overflow-hidden">
               <div className="px-5 py-3 border-b border-white/[0.06] flex items-center justify-between">
                 <div className="text-zinc-300 text-[13px] font-medium">
-                  {files.length} archivo{files.length !== 1 ? "s" : ""}
+                  {files.length}{" "}
+                  {files.length !== 1 ? t("compress.files.plural") : t("compress.files")}
                 </div>
                 <button
                   onClick={() => setFiles([])}
                   className="text-zinc-500 hover:text-red-400 text-[12px] transition-colors"
                   disabled={busy}
                 >
-                  Limpiar
+                  {t("compress.clear")}
                 </button>
               </div>
               <div className="divide-y divide-white/[0.04]">
@@ -440,7 +432,7 @@ export function CompressView({
         {/* Mode selector */}
         <div className="mb-10">
           <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-4">
-            Modo
+            {t("compress.mode")}
           </div>
           <div className="grid grid-cols-3 gap-3">
             {MODES.map((m) => {
@@ -459,11 +451,11 @@ export function CompressView({
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-xl">{m.icon}</span>
                     <span className="text-white text-[16px] font-medium">
-                      {m.title}
+                      {getModeTitle(m.id)}
                     </span>
                   </div>
                   <div className="text-zinc-500 text-[11.5px] leading-relaxed mb-2.5 min-h-[2.6em]">
-                    {m.description}
+                    {getModeDesc(m.id)}
                   </div>
                   <div className="flex items-center gap-0.5 text-amber-400/80 text-[11px]">
                     {"★".repeat(m.stars)}
@@ -483,7 +475,7 @@ export function CompressView({
         {/* Destination */}
         <div className="mb-10">
           <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-3">
-            Destino
+            {t("compress.dest")}
           </div>
           <div className="flex items-center gap-3 px-5 py-4 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
             <span className="text-zinc-500 text-[13px]">📁</span>
@@ -491,14 +483,14 @@ export function CompressView({
               className="text-white text-[14px] flex-1 truncate font-mono"
               title={destDir}
             >
-              {destDir || "Detectando…"}
+              {destDir || t("compress.dest.detecting")}
             </span>
             <button
               onClick={onBrowseDest}
               disabled={busy}
               className="px-3 py-1.5 text-[12px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-lg transition-colors disabled:opacity-50"
             >
-              Cambiar
+              {t("compress.dest.change")}
             </button>
           </div>
         </div>
@@ -509,12 +501,12 @@ export function CompressView({
             <div className="flex items-center justify-between mb-3">
               <div className="text-cyan-300 text-[11px] tracking-[0.2em] uppercase">
                 {progress.phase === "reading"
-                  ? "Leyendo"
+                  ? t("compress.phase.reading")
                   : progress.phase === "compressing"
-                  ? "Comprimiendo"
+                  ? t("compress.phase.compressing")
                   : progress.phase === "writing"
-                  ? "Escribiendo"
-                  : "Procesando"}
+                  ? t("compress.phase.writing")
+                  : t("compress.phase.processing")}
               </div>
               <div className="text-white text-[20px] font-semibold tabular-nums">
                 {progressPct.toFixed(1)}%
@@ -541,14 +533,29 @@ export function CompressView({
         {files.length > 0 && !busy && (
           <div className="mb-10 p-6 rounded-2xl bg-gradient-to-br from-cyan-500/[0.06] to-emerald-500/[0.04] border border-white/[0.08]">
             <div className="text-zinc-400 text-[11px] tracking-[0.2em] uppercase mb-4">
-              Resultado estimado ({mode})
+              {t("compress.estimate.title")} ({getModeTitle(mode)})
             </div>
             <div className="grid grid-cols-3 gap-6">
-              <Stat label="Ahorro esperado" value={`${(estSavings * 100).toFixed(0)}%`} />
-              <Stat label="Velocidad" value={mode === "rapido" ? "rápida" : mode === "balanceado" ? "media" : "lenta"} />
+              <Stat label={t("compress.estimate.saving")} value={`${(estSavings * 100).toFixed(0)}%`} />
               <Stat
-                label="Ideal para"
-                value={mode === "rapido" ? "vídeos" : mode === "balanceado" ? "general" : "archivos"}
+                label={t("compress.estimate.speed")}
+                value={
+                  mode === "rapido"
+                    ? t("compress.speed.fast")
+                    : mode === "balanceado"
+                    ? t("compress.speed.medium")
+                    : t("compress.speed.slow")
+                }
+              />
+              <Stat
+                label={t("compress.estimate.best")}
+                value={
+                  mode === "rapido"
+                    ? t("compress.best.video")
+                    : mode === "balanceado"
+                    ? t("compress.best.general")
+                    : t("compress.best.files")
+                }
               />
             </div>
           </div>
@@ -560,7 +567,9 @@ export function CompressView({
           disabled={files.length === 0 || busy || !destDir}
           className="w-full py-4 rounded-2xl bg-gradient-to-b from-cyan-500 to-cyan-600 hover:from-cyan-400 hover:to-cyan-500 disabled:from-zinc-800 disabled:to-zinc-800 disabled:text-zinc-600 text-white text-[15px] font-semibold tracking-tight transition-all shadow-lg shadow-cyan-500/20 disabled:shadow-none"
         >
-          {busy ? `Comprimiendo… ${progressPct.toFixed(0)}%` : "Comprimir"}
+          {busy
+            ? `${t("compress.btn.busy")} ${progressPct.toFixed(0)}%`
+            : t("compress.btn")}
         </button>
 
         {error && (
