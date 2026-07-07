@@ -774,6 +774,17 @@ struct SenderState {
     /// expensive spake.finish group operation. The key is
     /// derived from the sender's KEK at session start.
     auth: auth::AuthState,
+    /// Sprint 5.6.15: receiver signals "transfer complete"
+    /// here. The state.active watcher polls this and clears
+    /// the slot when set, so the user can start a new send
+    /// without "a p2p send is already in progress". The
+    /// axum::serve task itself never returns (it's a TCP
+    /// listener loop), so we can't rely on is_finished().
+    done: Arc<std::sync::atomic::AtomicBool>,
+    /// Sprint 5.6.15: server start time, used by the
+    /// hard-timeout fallback in the watcher so abandoned
+    /// sessions don't pin the slot forever.
+    started_at: std::time::Instant,
 }
 
 #[derive(Clone)]
@@ -802,6 +813,17 @@ pub struct StartedSend {
     pub token_compact: String,
     pub tunnel: TunnelHandle,
     pub server_task: JoinHandle<Result<(), String>>,
+    /// Sprint 5.6.15: receiver signals "transfer complete"
+    /// here by hitting /done on the sender. The state.active
+    /// watcher polls this and clears the slot when set.
+    /// axum::serve runs the TCP listener loop forever, so we
+    /// can't rely on server_task.is_finished() alone.
+    pub done: Arc<std::sync::atomic::AtomicBool>,
+    /// Sprint 5.6.15: hard-timeout fallback for abandoned
+    /// sessions (receiver never hits /done). After this
+    /// many seconds, the watcher aborts the server and
+    /// clears the slot.
+    pub started_at: std::time::Instant,
     /// Sprint 5.5.4 Phase 3: info about the open UPnP port
     /// mapping (if any). `Some` means the token is v3 (cross-NAT
     /// capable). `None` means LAN-only (v2 token). The UI uses
@@ -1255,6 +1277,8 @@ pub async fn start_direct_sender(
         }),
         auth: auth.clone(),
         code: Arc::new(code.clone()),
+        done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        started_at: std::time::Instant::now(),
     };
     let rate_limit = Arc::new(RateLimit::new());
     let app = Router::new()
@@ -1263,6 +1287,7 @@ pub async fn start_direct_sender(
             Router::new()
                 .route("/spake", post(handle_spake))
                 .route("/file", get(handle_file))
+                .route("/done", post(handle_done))
                 .route_layer(axum::middleware::from_fn_with_state(
                     rate_limit.clone(),
                     rate_limit_middleware,
@@ -1273,7 +1298,9 @@ pub async fn start_direct_sender(
                 ))
                 .with_state(state.clone()),
         )
-        .with_state(state);
+        .with_state(state.clone());
+    let send_done = state.done.clone();
+    let send_started_at = state.started_at;
 
     // 6. Spawn axum server.
     let server_task = tokio::spawn(async move {
@@ -1373,12 +1400,16 @@ pub async fn start_direct_sender(
         mdns: Some(mdns),
         upnp: upnp_hole,
     };
+    let send_done = state.done.clone();
+    let send_started_at = state.started_at;
     Ok(StartedSend {
         token,
         token_compact,
         tunnel,
         server_task,
         upnp_info,
+        done: send_done,
+        started_at: send_started_at,
     })
 }
 
@@ -1746,6 +1777,8 @@ pub async fn start_sender(
         }),
         auth: auth.clone(),
         code: Arc::new(code.clone()),
+        done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        started_at: std::time::Instant::now(),
     };
 
     // 7. Build the axum app. Middleware order (outermost
@@ -1760,6 +1793,7 @@ pub async fn start_sender(
             Router::new()
                 .route("/spake", post(handle_spake))
                 .route("/file", get(handle_file))
+                .route("/done", post(handle_done))
                 .route_layer(axum::middleware::from_fn_with_state(
                     rate_limit.clone(),
                     rate_limit_middleware,
@@ -1770,7 +1804,9 @@ pub async fn start_sender(
                 ))
                 .with_state(state.clone()),
         )
-        .with_state(state);
+        .with_state(state.clone());
+    let send_done = state.done.clone();
+    let send_started_at = state.started_at;
 
     // 8. Spawn the server. axum::serve_with_connect_info
     //    lets the rate-limit middleware read the peer IP
@@ -1803,6 +1839,8 @@ pub async fn start_sender(
         tunnel,
         server_task,
         upnp_info: None,
+        done: send_done,
+        started_at: send_started_at,
     })
 }
 
@@ -1844,6 +1882,22 @@ struct SpakeRequest {
 struct SpakeResponse {
     /// base64url-encoded T_b message from the sender.
     t_b: String,
+}
+
+/// Sprint 5.6.15: receiver signals "I successfully streamed
+/// and decrypted the whole file" by hitting /done. The sender
+/// sets a flag the state.active watcher polls. Without this,
+/// axum::serve runs forever and the slot stays Some(started)
+/// forever, blocking new sends with "a p2p send is already
+/// in progress".
+async fn handle_done(State(state): State<SenderState>) -> &'static str {
+    eprintln!(
+        "[p2p] /done received — transfer complete, flagging slot for cleanup"
+    );
+    state
+        .done
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    "ok"
 }
 
 async fn handle_spake(
@@ -2186,6 +2240,32 @@ pub async fn receive_send_file(
         let _ = tokio::fs::remove_file(&output_path).await;
         return Err("SHA-256 mismatch — file corrupted or tampered".to_string());
     }
+    // Sprint 5.6.15: tell the sender we're done so it can
+    // release the slot. We DON'T send /done if the file
+    // failed integrity — the sender still owns the slot so
+    // the user can retry. Hit /done AFTER the SHA-256 check
+    // passes, in a fire-and-forget way (we don't care if it
+    // fails: the sender's watcher also has a 10-minute hard
+    // timeout fallback for abandoned sessions).
+    let base = token.url.trim_end_matches('/');
+    let done_url = format!("{}/done", base);
+    let done_auth = auth::build_auth_header(
+        &*pre_key,
+        auth::now_unix(),
+        "POST",
+        "/done",
+    );
+    let done_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok();
+    if let Some(c) = done_client {
+        let _ = c
+            .post(&done_url)
+            .header(auth::HEADER_NAME, done_auth)
+            .send()
+            .await;
+    }
     // Sprint 5.6.11: strip macOS quarantine attribute on the
     // freshly-written file. Otherwise Gatekeeper asks the user
     // "are you sure you want to open this?" every time they
@@ -2440,6 +2520,8 @@ mod tests {
             meta: Arc::new(meta),
             auth: auth::AuthState::new(&*kek),
             code: Arc::new(code.clone()),
+            done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            started_at: std::time::Instant::now(),
         };
         let app = Router::new()
             .route("/meta", get(handle_meta))
@@ -2611,11 +2693,14 @@ mod tests {
             meta: Arc::new(meta),
             auth: auth::AuthState::new(&*kek),
             code: Arc::new(code.clone()),
+            done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            started_at: std::time::Instant::now(),
         };
         let app = Router::new()
             .route("/meta", get(handle_meta))
             .route("/spake", post(handle_spake))
             .route("/file", get(handle_file))
+            .route("/done", post(handle_done))
             .with_state(state);
         let server_task = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve");

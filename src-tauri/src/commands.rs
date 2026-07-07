@@ -622,53 +622,52 @@ pub async fn p2p_send_start_cmd(
         file_size,
         upnp_status,
     };
-    // Sprint 5.6.13: clear state.active when the server task
-    // ends. Previously the slot stayed Some(started) forever
-    // after a send (success OR error OR window close), so
-    // every subsequent "Crear enlace" failed with "a p2p send
-    // is already in progress". The watcher below polls the
-    // stored server_task and clears the slot when it ends.
+    // Sprint 5.6.15: clear state.active when either (a) the
+    // receiver hits /done (signaling successful file transfer)
+    // or (b) 10 minutes have passed since the sender started
+    // (hard timeout for abandoned sessions). The watcher
+    // polls every 500ms.
+    //
+    // Sprint 5.6.13 tried to detect this via
+    // `server_task.is_finished()`, but axum::serve runs the
+    // TCP listener loop FOREVER — it never returns naturally.
+    // So that approach was broken. We now rely on explicit
+    // signals from the receiver (/done) plus a timeout.
     let state_clone = state.inner().clone();
-    // We need the server_task AFTER storing started (since
-    // the watcher needs to access it through state.active).
-    // Move started into state.active first, then take the
-    // server_task out for the watcher to monitor.
     *state.active.lock().await = Some(started);
-    let active_arc = state_clone.active.clone();
-    // Hold a guard across the spawn so the slot is guaranteed
-    // to be Some when the watcher starts.
-    let server_task_for_watcher = {
-        let guard = active_arc.lock().await;
-        guard.as_ref().map(|s| {
-            // We need a clone or move — JoinHandle doesn't
-            // implement Clone. We use the abort-on-drop pattern:
-            // store an AbortHandle in the watcher.
-            s.server_task.abort_handle()
-        })
-    };
-    if let Some(abort_handle) = server_task_for_watcher {
-        // Actually we want to MONITOR the task, not abort it.
-        // Drop the abort handle — the server_task stays running
-        // until either (a) axum exits naturally or (b) abort_cmd
-        // is called. Both paths should clear state.active.
-        drop(abort_handle);
-    }
-    // Spawn the polling watcher. It wakes every 250ms, checks
-    // if the stored task is_finished(), and clears the slot.
-    let active_for_watcher = active_arc.clone();
+    let active_for_watcher = state_clone.active.clone();
     tokio::spawn(async move {
+        let session_start = std::time::Instant::now();
+        let hard_timeout = Duration::from_secs(10 * 60); // 10 min
         loop {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
             let mut guard = active_for_watcher.lock().await;
-            let still_active = match guard.as_ref() {
-                Some(s) => !s.server_task.is_finished(),
-                None => false,
-            };
-            if !still_active {
-                if guard.is_some() {
-                    eprintln!("[p2p-state] server task ended, clearing active slot");
-                    *guard = None;
+            let should_clear = match guard.as_ref() {
+                // receiver flagged completion — clear immediately
+                Some(s) if s.done.load(std::sync::atomic::Ordering::SeqCst) => {
+                    eprintln!("[p2p-state] /done received, clearing active slot");
+                    true
                 }
+                // server task aborted (abort_cmd called) — clear
+                Some(s) if s.server_task.is_finished() => {
+                    eprintln!("[p2p-state] server task aborted, clearing active slot");
+                    true
+                }
+                // hard timeout for sessions that never finished
+                Some(s) if session_start.elapsed() >= hard_timeout => {
+                    eprintln!(
+                        "[p2p-state] hard timeout reached ({}s), clearing active slot",
+                        session_start.elapsed().as_secs()
+                    );
+                    // also abort the server so it stops listening
+                    s.server_task.abort();
+                    true
+                }
+                Some(_) => false,
+                None => return, // already cleared — exit watcher
+            };
+            if should_clear {
+                *guard = None;
                 return;
             }
         }
