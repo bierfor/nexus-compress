@@ -558,9 +558,11 @@ pub struct P2pSendStartResp {
 
 #[tauri::command]
 pub async fn p2p_send_start_cmd(
+    app: tauri::AppHandle,
     req: serde_json::Value,
     state: State<'_, Arc<P2pState>>,
 ) -> Result<P2pSendStartResp, String> {
+    use tauri::Manager; // brings .path() into scope on AppHandle
     let req: P2pSendStartReq = serde_json::from_value(req)
         .map_err(|e| format!("invalid p2p_send_start request: {}", e))?;
     let file_path = PathBuf::from(&req.file_path);
@@ -580,7 +582,10 @@ pub async fn p2p_send_start_cmd(
             return Err("a p2p send is already in progress — abort it first".to_string());
         }
     }
-    let app_data_dir = std::env::temp_dir().join("nexus-rar-p2p");
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app_data_dir: {}", e))?;
     std::fs::create_dir_all(&app_data_dir)
         .map_err(|e| format!("mkdir app_data_dir: {}", e))?;
     let started = p2p_tunnel::start_sender(file_path.clone(), code.clone(), app_data_dir).await?;

@@ -83,7 +83,7 @@ pub struct TunnelConfig {
 impl Default for TunnelConfig {
     fn default() -> Self {
         TunnelConfig {
-            mode: TransportMode::Quick,
+            mode: TransportMode::Direct,
             hostname: None,
         }
     }
