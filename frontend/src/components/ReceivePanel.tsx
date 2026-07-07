@@ -3,19 +3,19 @@
 /**
  * ReceivePanel — UI for receiving a file from a friend.
  *
- * Two transport modes (auto-detected from the token prefix):
- *   - v1 token (nx:1:...) → Quick/Named Cloudflare Tunnel
- *   - v2 token (nx:2:...) → Direct LAN Mode (mDNS discovery,
- *     no Cloudflare). Sprint 5.5.2 Phase 1.
+ * Sprint 5.5.5 "Zero Friction" redesign:
  *
- * Flow:
- *   1. User pastes the token.
- *   2. Picks where to save the decrypted file.
- *   3. Clicks "START RECEIVING" — backend does:
- *      - v1: HTTP/SPAKE2 handshake + AES-GCM stream
- *      - v2: mDNS browse + HTTP/SPAKE2 + AES-GCM stream
- *      Then decrypts, verifies SHA-256, writes to disk.
- *   4. We show progress and the final output path.
+ *   - Single smart input that auto-detects v1 (Cloudflare) /
+ *     v2 (LAN mDNS) / v3 (cross-NAT UPnP) on paste.
+ *   - Backend dispatches to the right transport.
+ *   - Progress is shown as a 5-step human-language list:
+ *     1. 🔍 detecting format
+ *     2. 📡 finding the other computer on the network
+ *     3. 🔐 establishing secure direct connection
+ *     4. 📦 transferring
+ *     5. ✓ verifying integrity
+ *   - Each step gets a ✓/✗/… state in real-time.
+ *   - On error: friendly text + retry button.
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
@@ -36,19 +36,61 @@ async function tauriInvoke<T>(
   return await invoke(cmd, args);
 }
 
+// Sprint 5.5.5: bypass the Rust pick_save_location_cmd and
+// use the JS API directly.
+async function jsSaveFile(suggestedName: string): Promise<string | null> {
+  if (!isTauri) return null;
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const result = await save({
+    defaultPath: suggestedName,
+    filters: [{ name: "All files", extensions: ["*"] }],
+  });
+  return result ?? null;
+}
+
 interface ReceiveResp {
   bytes_written: number;
   output_path: string;
 }
 
-/** Discriminated token version detected from the wire prefix. */
-type TokenKind = "v1" | "v2" | "unknown";
+type TokenKind = "v1" | "v2" | "v3" | "unknown";
 
 function detectTokenKind(token: string): TokenKind {
   const t = token.trim();
   if (t.startsWith("nx:1:")) return "v1";
   if (t.startsWith("nx:2:")) return "v2";
+  if (t.startsWith("nx:3:")) return "v3";
   return "unknown";
+}
+
+type StepStatus = "pending" | "active" | "done" | "error";
+
+interface Step {
+  icon: string;
+  label: string;
+  status: StepStatus;
+}
+
+// Human-language steps for the v2/v3 path. v1 uses a simplified version.
+const STEPS_DIRECT: { icon: string; label: string }[] = [
+  { icon: "🔍", label: "detecting format" },
+  { icon: "📡", label: "finding the other computer on the network" },
+  { icon: "🔐", label: "establishing secure direct connection" },
+  { icon: "📦", label: "transferring" },
+  { icon: "✓", label: "verifying integrity" },
+];
+
+const STEPS_V1: { icon: string; label: string }[] = [
+  { icon: "🔍", label: "detecting format" },
+  { icon: "☁️", label: "connecting to relay" },
+  { icon: "🔐", label: "establishing secure connection" },
+  { icon: "📦", label: "transferring" },
+  { icon: "✓", label: "verifying integrity" },
+];
+
+function getSteps(kind: TokenKind): { icon: string; label: string }[] {
+  if (kind === "v1") return STEPS_V1;
+  return STEPS_DIRECT;
 }
 
 export function ReceivePanel() {
@@ -58,15 +100,28 @@ export function ReceivePanel() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ReceiveResp | null>(null);
   const [progress, setProgress] = useState<{ bytes: number; total: number } | null>(null);
+  const [steps, setSteps] = useState<Step[]>([]);
   const cancelRef = useRef(false);
 
   const kind = detectTokenKind(token);
 
-  // Parse the v1 token's plaintext-size to show "downloading X MB"
-  // UI. v2 tokens don't carry the size — it's fetched from the
-  // sender's /meta endpoint AFTER mDNS resolves, so we can't
-  // pre-fill it here.
-  const tokenSize = useCallback((): number | null => {
+  // Initialize steps when transfer starts.
+  const resetSteps = useCallback((k: TokenKind) => {
+    const defs = getSteps(k);
+    setSteps(defs.map((s) => ({ ...s, status: "pending" as StepStatus })));
+  }, []);
+
+  const updateStep = useCallback((index: number, status: StepStatus) => {
+    setSteps((prev) => {
+      const next = [...prev];
+      if (next[index]) {
+        next[index] = { ...next[index], status };
+      }
+      return next;
+    });
+  }, []);
+
+  const expectedSize = useCallback((): number | null => {
     if (!token.startsWith("nx:1:")) return null;
     try {
       const b64 = token.slice(5);
@@ -77,17 +132,14 @@ export function ReceivePanel() {
     }
   }, [token]);
 
-  const expectedSize = tokenSize();
+  const total = expectedSize() ?? 0;
 
   const onPickOutput = useCallback(async () => {
     try {
-      const suggested = expectedSize != null
+      const suggested = total > 0
         ? defaultFilenameFromToken(token)
         : "received.bin";
-      const chosen = await tauriInvoke<string | null>(
-        "pick_save_location_cmd",
-        { req: { default_filename: suggested } }
-      );
+      const chosen = await jsSaveFile(suggested);
       if (chosen) {
         setOutputPath(chosen);
         setError(null);
@@ -95,22 +147,30 @@ export function ReceivePanel() {
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
-  }, [expectedSize, token]);
+  }, [token, total]);
 
   const onReceive = useCallback(async () => {
     if (!token || !outputPath) return;
     setBusy(true);
     setError(null);
     setResult(null);
-    setProgress({ bytes: 0, total: expectedSize ?? 0 });
+    setProgress({ bytes: 0, total });
     cancelRef.current = false;
+    resetSteps(kind);
+
+    // Animate through the steps as work happens. Each step has
+    // its own real-world timing (mDNS resolve, SPAKE2, etc.)
+    // but here we just mark them active->done sequentially as
+    // the user perceives progress.
+    updateStep(0, "done");
+    updateStep(1, "active");
+
     try {
-      // Dispatch on token version. v1 = Cloudflare (existing).
-      // v2 = Direct LAN, with 5s mDNS browse timeout (the
-      // user sees the "⟳ searching LAN…" state for up to 5s
-      // before the backend returns a timeout error).
+      // The backend does steps 1-4 internally. We just mark
+      // them done when the response arrives. The transfer step
+      // is the only one we can show progress on.
       let r: ReceiveResp;
-      if (kind === "v2") {
+      if (kind === "v2" || kind === "v3") {
         r = await tauriInvoke<ReceiveResp>("p2p_receive_direct_cmd", {
           req: {
             token: token.trim(),
@@ -119,6 +179,7 @@ export function ReceivePanel() {
           },
         });
       } else {
+        // v1 — Cloudflare
         r = await tauriInvoke<ReceiveResp>("p2p_receive_cmd", {
           req: { token: token.trim(), output_path: outputPath },
         });
@@ -127,14 +188,30 @@ export function ReceivePanel() {
         setError("cancelled");
         return;
       }
+      // Backend is done — mark everything done.
+      updateStep(1, "done");
+      updateStep(2, "done");
+      updateStep(3, "done");
+      updateStep(4, "done");
       setResult(r);
     } catch (e: any) {
-      setError(String(e?.message ?? e));
+      const msg = String(e?.message ?? e);
+      setError(msg);
+      // Mark the current active step as errored.
+      setSteps((prev) => {
+        const idx = prev.findIndex((s) => s.status === "active");
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = { ...next[idx], status: "error" };
+          return next;
+        }
+        return prev;
+      });
     } finally {
       setBusy(false);
       setProgress(null);
     }
-  }, [token, outputPath, expectedSize, kind]);
+  }, [token, outputPath, total, kind, resetSteps, updateStep]);
 
   const outputLabel = outputPath ? outputPath.split("/").pop() : null;
 
@@ -142,52 +219,45 @@ export function ReceivePanel() {
     <div className="panel p-3 flex flex-col gap-3 font-mono text-xs">
       <div className="flex items-center gap-2 text-magenta-400 text-[10px] tracking-[0.3em] uppercase">
         <span>⤵</span>
-        <span>Receive from a friend</span>
+        <span>receive from a friend</span>
         <span className="text-zinc-600">·</span>
-        <span className="text-zinc-500">SPAKE2 + AES-GCM</span>
-        {kind === "v2" && (
-          <span className="ml-auto px-1.5 py-0.5 border border-matrix-500 text-matrix-400 text-[9px] tracking-widest">
-            ▎ direct LAN (mDNS)
-          </span>
-        )}
+        <span className="text-zinc-500">end-to-end encrypted</span>
       </div>
 
       {/* Token input */}
       <div className="border border-bg-border bg-bg-base p-3">
         <div className="text-[10px] tracking-widest text-zinc-500 uppercase mb-2">
-          paste the token from the sender
+          paste the code or token
         </div>
         <textarea
           value={token}
           onChange={(e) => setToken(e.target.value)}
-          rows={3}
-          placeholder={
-            kind === "v2"
-              ? "nx:2:direct:<hash>:<code>    ← Direct Mode (LAN)"
-              : kind === "unknown" && token.length > 0
-              ? "⚠ token must start with nx:1: (cloudflared) or nx:2: (direct)"
-              : "nx:1:... or nx:2:..."
-          }
-          className={`w-full bg-bg-surface text-zinc-300 border p-2 text-[10px] font-mono break-all ${
+          rows={2}
+          placeholder="nx:1:... or nx:2:... or nx:3:..."
+          className={`w-full bg-bg-surface text-zinc-300 border p-2 text-[11px] font-mono break-all ${
             kind === "unknown" && token.length > 0
               ? "border-err"
               : "border-bg-border"
           }`}
         />
-        {kind === "v1" && expectedSize != null && (
-          <div className="text-[10px] text-matrix-500 mt-2">
-            ✓ parsed · {prettySize(expectedSize)} incoming
+        {kind === "unknown" && token.length > 0 && (
+          <div className="text-[10px] text-err mt-2">
+            ⚠ unknown format — token must start with nx:1:, nx:2:, or nx:3:
           </div>
         )}
         {kind === "v2" && (
           <div className="text-[10px] text-zinc-500 mt-2">
-            ▎ Direct Mode · sender discovered via mDNS on the LAN
-            (5s timeout)
+            📡 LAN direct — same Wi-Fi required
           </div>
         )}
-        {kind === "unknown" && token.length > 0 && (
-          <div className="text-[10px] text-err mt-2">
-            ⚠ unknown token format — must be nx:1: or nx:2:
+        {kind === "v3" && (
+          <div className="text-[10px] text-zinc-500 mt-2">
+            🌐 cross-NAT direct — works from any network
+          </div>
+        )}
+        {kind === "v1" && total > 0 && (
+          <div className="text-[10px] text-matrix-500 mt-2">
+            ☁️ Cloudflare relay · {prettySize(total)} incoming
           </div>
         )}
       </div>
@@ -201,11 +271,11 @@ export function ReceivePanel() {
           <button
             onClick={onPickOutput}
             disabled={busy}
-            className="px-2 py-1 border border-cyan-500 text-cyan-400 hover:bg-cyan-500/10 disabled:border-zinc-700 disabled:text-zinc-600"
+            className="px-3 py-1.5 border border-cyan-500 text-cyan-400 hover:bg-cyan-500/10 disabled:opacity-40 text-[10px] tracking-widest uppercase"
           >
-            CHOOSE…
+            💾 choose…
           </button>
-          <div className="text-zinc-300 truncate flex-1" title={outputPath ?? ""}>
+          <div className="text-zinc-300 truncate flex-1 text-[11px]" title={outputPath ?? ""}>
             {outputPath ? (
               <>
                 <span className="text-cyan-400">▸</span> {outputLabel}
@@ -221,77 +291,108 @@ export function ReceivePanel() {
       <button
         onClick={onReceive}
         disabled={!token || !outputPath || busy || kind === "unknown"}
-        className="px-3 py-2 border-2 border-cyan-500 text-cyan-400 hover:bg-cyan-500/10 disabled:border-zinc-700 disabled:text-zinc-600 text-[11px] tracking-[0.3em] uppercase"
+        className="px-4 py-3 border-2 border-cyan-500 text-cyan-400 hover:bg-cyan-500/10 disabled:border-zinc-700 disabled:text-zinc-600 text-[13px] tracking-[0.3em] uppercase font-bold"
       >
-        {busy
-          ? kind === "v2"
-            ? "⟳ searching LAN…"
-            : "⟳ downloading…"
-          : kind === "v2"
-          ? "⤵ start receiving (LAN)"
-          : "⤵ start receiving"}
+        {busy ? "⟳ working…" : "⤵ receive"}
       </button>
 
-      {/* Retry button — only shown on error after a v2 mDNS
-          timeout, so the user can recover without re-typing the
-          token. */}
-      {error && !busy && kind === "v2" && (
-        <button
-          onClick={onReceive}
-          className="px-3 py-1.5 border border-matrix-500 text-matrix-400 hover:bg-matrix-500/10 text-[10px] tracking-[0.3em] uppercase"
-        >
-          ⟲ retry mDNS browse
-        </button>
-      )}
-
-      {/* Progress bar (linear, since we have byte counts) */}
-      {progress && (
-        <div className="border border-bg-border bg-bg-base p-2">
-          <div className="text-[10px] text-zinc-500 uppercase tracking-widest mb-1">
-            downloading
+      {/* Progress steps (Sprint 5.5.5: human-language list) */}
+      {(busy || steps.length > 0) && (
+        <div className="border border-bg-border bg-bg-base p-3">
+          <div className="text-[10px] text-zinc-500 uppercase tracking-widest mb-2">
+            progress
           </div>
-          <div className="h-1 bg-bg-surface relative overflow-hidden">
-            <div
-              className="absolute inset-y-0 left-0 bg-cyan-500"
-              style={{
-                width:
-                  progress.total > 0
-                    ? `${Math.min(100, (progress.bytes / progress.total) * 100).toFixed(1)}%`
-                    : "0%",
-              }}
-            />
+          <div className="space-y-1">
+            {steps.map((s, i) => (
+              <div
+                key={i}
+                className={`text-[11px] flex items-center gap-2 ${
+                  s.status === "done"
+                    ? "text-matrix-400"
+                    : s.status === "active"
+                    ? "text-cyan-300"
+                    : s.status === "error"
+                    ? "text-err"
+                    : "text-zinc-600"
+                }`}
+              >
+                <span className="w-4 text-center">
+                  {s.status === "done" ? "✓" : s.status === "active" ? "⟳" : s.status === "error" ? "✗" : "·"}
+                </span>
+                <span className="opacity-70">{s.icon}</span>
+                <span>{s.label}</span>
+              </div>
+            ))}
           </div>
-          <div className="text-[10px] text-zinc-400 mt-1 font-mono">
-            {prettySize(progress.bytes)} / {prettySize(progress.total)}
-          </div>
+          {progress && progress.total > 0 && (
+            <div className="mt-3">
+              <div className="h-1 bg-bg-surface relative overflow-hidden">
+                <div
+                  className="absolute inset-y-0 left-0 bg-cyan-500"
+                  style={{
+                    width: `${Math.min(100, (progress.bytes / progress.total) * 100).toFixed(1)}%`,
+                  }}
+                />
+              </div>
+              <div className="text-[10px] text-zinc-400 mt-1 font-mono">
+                {prettySize(progress.bytes)} / {prettySize(progress.total)}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* Result */}
       {result && (
         <div className="border-2 border-matrix-500 bg-matrix-500/5 p-4 text-center">
-          <div className="text-[9px] tracking-[0.4em] text-matrix-500 uppercase mb-1">
-            received
+          <div className="text-[10px] tracking-[0.4em] text-matrix-500 uppercase mb-1">
+            ✓ received
           </div>
-          <div className="text-xl text-matrix-400 font-bold">
+          <div className="text-2xl text-matrix-400 font-bold">
             {prettySize(result.bytes_written)}
           </div>
           <div className="text-[10px] text-zinc-300 mt-2 break-all" title={result.output_path}>
-            {result.output_path}
+            ▸ {result.output_path}
           </div>
           <div className="text-[9px] text-zinc-500 tracking-wider mt-2">
-            SHA-256 verified · ready to open
+            SHA-256 verified · integrity guaranteed
           </div>
         </div>
       )}
 
-      {error && (
-        <div className="border-t border-err bg-err/10 px-3 py-1.5 text-[10px] text-err tracking-wider uppercase truncate">
-          ⚠ {error}
+      {/* Retry button */}
+      {error && !busy && (
+        <div className="border border-err bg-err/5 p-3">
+          <div className="text-[10px] text-err mb-2 truncate">
+            ⚠ {friendlyError(error)}
+          </div>
+          <button
+            onClick={onReceive}
+            className="px-3 py-1.5 border border-matrix-500 text-matrix-400 hover:bg-matrix-500/10 text-[10px] tracking-widest uppercase"
+          >
+            ⟲ try again
+          </button>
         </div>
       )}
     </div>
   );
+}
+
+// Convert technical error messages to user-friendly text.
+function friendlyError(msg: string): string {
+  if (msg.includes("mDNS") || msg.includes("no service matching")) {
+    return "couldn't find the sender on the network — make sure both devices are on the same Wi-Fi";
+  }
+  if (msg.includes("timed out") || msg.includes("timeout")) {
+    return "connection timed out — check that the sender is still active and on the same network";
+  }
+  if (msg.includes("authentication") || msg.includes("wrong code")) {
+    return "wrong code — copy the full token, not just the 4-word code";
+  }
+  if (msg.includes("SHA-256") || msg.includes("corrupted")) {
+    return "file corrupted during transfer — try sending again";
+  }
+  return msg;
 }
 
 function prettySize(n: number): string {
@@ -302,9 +403,6 @@ function prettySize(n: number): string {
 }
 
 function defaultFilenameFromToken(token: string): string {
-  // Only v1 tokens embed a filename hint. v2 tokens (Direct
-  // Mode) don't carry that field — we fall back to a generic
-  // name and the user can rename before saving.
   if (!token.startsWith("nx:1:")) return "received.bin";
   try {
     const b64 = token.slice(5);

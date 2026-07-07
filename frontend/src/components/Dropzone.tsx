@@ -5,30 +5,29 @@ import { useCallback, useState } from "react";
 /**
  * The Dropzone — the visual centerpiece of the app.
  *
- * Two ways for the user to feed input:
+ * Three ways for the user to feed input:
  *   1. Drag-and-drop a file or folder onto the dashed area
  *      (handled natively by Tauri on macOS via `tauri://drag-drop`)
- *   2. Click "PICK FILE" / "PICK FOLDER" to use the native dialog
+ *   2. Click "📄 File" to pick a single file
+ *   3. Click "📁 Folder" to pick a single folder
+ *   4. Click "🗂️ Files" to pick multiple files at once
  *
- * The actual handling lives in the parent (page.tsx) — it needs
- * access to the Tauri commands and the (mode, strength) state.
- * The Dropzone is a presentational + drag-presentation layer.
+ * Sprint 5.5.5: added multi-file picker + icons throughout.
+ * The actual handling lives in the parent (page.tsx).
  */
 export function Dropzone({
   onPickFile,
   onPickFolder,
+  onPickFiles,
   pickDisabled,
 }: {
   onPickFile: () => void;
   onPickFolder: () => void;
+  onPickFiles?: () => void;
   pickDisabled?: boolean;
 }) {
   const [over, setOver] = useState(false);
 
-  // We keep the HTML5 handlers for the browser dev fallback. Inside
-  // Tauri they will rarely fire (the OS-level drop is handled by
-  // Tauri's tauri://drag-drop event in page.tsx), but they don't
-  // hurt.
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setOver(true);
@@ -48,7 +47,9 @@ export function Dropzone({
         over ? "dragover" : "",
       ].join(" ")}
     >
-      <div className="text-cyan-500 text-7xl mb-4 font-mono">▣</div>
+      <div className="text-cyan-500 text-7xl mb-4 font-mono">
+        {over ? "⤓" : "▣"}
+      </div>
       <h2 className="text-cyan-400 text-xl font-mono tracking-[0.2em] uppercase mb-2">
         {over ? "release to compress" : "drop file or folder"}
       </h2>
@@ -56,25 +57,34 @@ export function Dropzone({
         Drag any file or directory onto this area, or use the buttons
         below to pick via the native macOS dialog.
       </p>
-      <div className="flex gap-3">
+      <div className="flex flex-wrap gap-3 justify-center">
         <button
           onClick={onPickFile}
           disabled={pickDisabled}
           className="btn border-cyan-500 text-cyan-400 hover:bg-cyan-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          Pick file
+          📄 file
         </button>
         <button
           onClick={onPickFolder}
           disabled={pickDisabled}
           className="btn border-amber-500 text-amber-400 hover:bg-amber-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          Pick folder
+          📁 folder
         </button>
+        {onPickFiles && (
+          <button
+            onClick={onPickFiles}
+            disabled={pickDisabled}
+            className="btn border-matrix-500 text-matrix-400 hover:bg-matrix-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            🗂️ multiple
+          </button>
+        )}
       </div>
       {pickDisabled && (
         <div className="text-zinc-600 text-[10px] font-mono mt-3 uppercase tracking-widest">
-          compress disabled — backend unavailable
+          ⚠ compress disabled — backend unavailable
         </div>
       )}
     </div>

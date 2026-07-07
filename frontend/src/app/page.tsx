@@ -1,575 +1,176 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
-import { Dropzone } from "@/components/Dropzone";
-import { ActionToolbar, looksLikeArchive } from "@/components/ActionToolbar";
-import { ProgressBar, type Progress } from "@/components/ProgressBar";
-import { SaveTarget, defaultOutputFilename } from "@/components/SaveTarget";
-import { ArchivePreview, type Preview } from "@/components/ArchivePreview";
-import { EntropyMonitor, type Metrics } from "@/components/EntropyMonitor";
-import { ConfigPanel, type Mode, type Strength } from "@/components/ConfigPanel";
-import { SendPanel } from "@/components/SendPanel";
-import { ReceivePanel } from "@/components/ReceivePanel";
+/**
+ * Home — Sprint 5.6 "Neo Terminal" redesign.
+ *
+ * Layout:
+ *   - NeoTopBar: minimal nav (Inicio · Recientes · Compartir · Ajustes)
+ *   - [VIEW]: the active screen (LandingPage | CompressView | DecompressView | ShareView)
+ *   - NeoDashboard: bottom strip with last op stats
+ *
+ * The 3 main actions (Compress / Decompress / Share) each get
+ * their own dedicated view. The LandingPage is the entry point
+ * with 3 big cards.
+ */
 
-const isTauri =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-interface CompressTargetRow {
-  is_directory: boolean;
-  original_size: number;
-  compressed_size: number;
-  ratio: number;
-  compress_time_ms: number;
-  n_files: number;
-  output_path: string;
-  output_ext: string;
-}
-
-interface DecompressTargetRow {
-  archive_kind: string;
-  restored_size: number;
-  n_files: number;
-  is_directory: boolean;
-  output_path: string;
-  decompress_time_ms: number;
-}
-
-interface PeekRow {
-  archive_kind: string;
-  n_files: number;
-  total_uncompressed: number;
-  compressed_size: number;
-  files: { path: string; size: number; is_dir: boolean }[];
-}
-
-async function tauriInvoke<T>(
-  cmd: string,
-  args: Record<string, unknown> = {}
-): Promise<T> {
-  if (!isTauri) {
-    console.log(`[stub] invoke ${cmd}`, args);
-    return {} as T;
-  }
-  const invoke = (window as any).__TAURI_INTERNALS__.invoke;
-  return await invoke(cmd, args);
-}
-
-function resolveBackend(
-  mode: Mode,
-  strength: Strength
-): { backend: string; lzma: number } {
-  if (mode === "v4") {
-    return { backend: "v4", lzma: 0 };
-  }
-  const lzma = strength === "fast" ? 1 : strength === "balanced" ? 6 : 9;
-  return { backend: mode, lzma };
-}
-
-function basename(path: string): string {
-  return path.split("/").pop() || path;
-}
+import { useState, useCallback } from "react";
+import { NeoTopBar, type View } from "@/components/NeoTopBar";
+import { LandingPage } from "@/components/LandingPage";
+import { CompressView } from "@/components/CompressView";
+import { DecompressView } from "@/components/DecompressView";
+import { ShareView } from "@/components/ShareView";
+import { NeoDashboard, type LastOp } from "@/components/NeoDashboard";
 
 export default function Home() {
-  const [metrics, setMetrics] = useState<Metrics>(null);
-  const [mode, setMode] = useState<Mode>("v4");
-  const [strength, setStrength] = useState<Strength>("balanced");
-  const [status, setStatus] = useState<string>("idle");
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [selectedIsDir, setSelectedIsDir] = useState<boolean>(false);
-  const [lastOutputPath, setLastOutputPath] = useState<string | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [progress, setProgress] = useState<Progress | null>(null);
-  // COMPRESS → save destination dir.
-  const [saveDir, setSaveDir] = useState<string | null>(null);
-  // DECOMPRESS → extract destination dir.
-  const [extractDir, setExtractDir] = useState<string | null>(null);
-  // Archive preview (shown when user picks an archive).
-  const [preview, setPreview] = useState<Preview | null>(null);
-  // What the user wants to do with the selection: compress or decompress.
-  // Auto-detected from the file extension but the buttons can override.
-  const [intent, setIntent] = useState<"compress" | "decompress">(
-    "compress"
+  const [view, setView] = useState<View>("landing");
+  const [lastOp, setLastOp] = useState<LastOp | null>(null);
+
+  const onNavigate = useCallback((v: View) => {
+    setView(v);
+  }, []);
+
+  const onSettings = useCallback(() => {
+    setView("settings");
+  }, []);
+
+  const onOpComplete = useCallback(
+    (op: {
+      kind: "compress" | "decompress" | "share";
+      filename: string;
+      originalBytes: number;
+      compressedBytes?: number;
+      restoredBytes?: number;
+      durationMs: number;
+    }) => {
+      setLastOp({
+        kind: op.kind,
+        filename: op.filename,
+        originalBytes: op.originalBytes,
+        compressedBytes: op.compressedBytes,
+        restoredBytes: op.restoredBytes,
+        durationMs: op.durationMs,
+        status: "ok",
+      });
+    },
+    []
   );
 
-  // When selectedPath changes, decide if it's an archive and fetch
-  // a preview. Also reset preview when the path clears.
-  useEffect(() => {
-    if (!selectedPath) {
-      setPreview(null);
-      return;
-    }
-    if (!looksLikeArchive(selectedPath)) {
-      setPreview(null);
-      setIntent("compress");
-      return;
-    }
-    // It's an archive — peek and switch intent to decompress.
-    setIntent("decompress");
-    tauriInvoke<PeekRow>("peek_archive_target_cmd", { path: selectedPath })
-      .then((r) => {
-        setPreview({
-          archive_kind: r.archive_kind,
-          n_files: r.n_files,
-          total_uncompressed: r.total_uncompressed,
-          compressed_size: r.compressed_size,
-          files: r.files,
-        });
-      })
-      .catch((e) => {
-        console.error("peek failed:", e);
-        setPreview(null);
-      });
-  }, [selectedPath]);
-
-  // ---- Compress (explicit) ----
-  const onCompress = useCallback(async () => {
-    if (!selectedPath) return;
-    const { backend, lzma } = resolveBackend(mode, strength);
-    setStatus("working");
-    setErrorMsg(null);
-    setProgress({
-      phase: "reading",
-      current_file: basename(selectedPath),
-      files_done: 0,
-      files_total: 1,
-      bytes_done: 0,
-      bytes_total: 0,
-    });
-    try {
-      const r = await tauriInvoke<CompressTargetRow>(
-        "compress_target_cmd",
-        {
-          req: {
-            path: selectedPath,
-            backend,
-            lzma_level: lzma,
-            output_dir: saveDir,
-          },
-        }
-      );
-      setMetrics({
-        originalSize: r.original_size,
-        compressedSize: r.compressed_size,
-        ratio: r.ratio,
-        compressMs: r.compress_time_ms,
-        nFiles: r.n_files,
-        mode,
-        strength,
-      });
-      setLastOutputPath(r.output_path || null);
-      setStatus(r.output_path ? "ok" : "saved-elsewhere");
-    } catch (e: any) {
-      setErrorMsg(String(e?.message ?? e));
-      setStatus("err");
-    } finally {
-      setTimeout(() => setProgress(null), 1500);
-    }
-  }, [selectedPath, saveDir, mode, strength]);
-
-  // ---- Decompress ----
-  const onDecompress = useCallback(async () => {
-    if (!selectedPath) return;
-    setStatus("working");
-    setErrorMsg(null);
-    setProgress({
-      phase: "reading",
-      current_file: basename(selectedPath),
-      files_done: 0,
-      files_total: 1,
-      bytes_done: 0,
-      bytes_total: 0,
-    });
-    try {
-      const r = await tauriInvoke<DecompressTargetRow>(
-        "decompress_target_cmd",
-        {
-          req: { path: selectedPath, output_dir: extractDir },
-        }
-      );
-      setMetrics({
-        originalSize: r.restored_size,
-        compressedSize: r.restored_size,
-        ratio: 1.0,
-        compressMs: r.decompress_time_ms,
-        nFiles: r.n_files,
-        mode,
-        strength,
-      });
-      setLastOutputPath(r.output_path);
-      setStatus("ok");
-    } catch (e: any) {
-      setErrorMsg(String(e?.message ?? e));
-      setStatus("err");
-    } finally {
-      setTimeout(() => setProgress(null), 1500);
-    }
-  }, [selectedPath, extractDir, mode, strength]);
-
-  // ---- Open saved output in Finder ----
-  const onOpen = useCallback(async () => {
-    if (!lastOutputPath) return;
-    try {
-      await tauriInvoke<void>("reveal_in_finder_cmd", { path: lastOutputPath });
-    } catch (e: any) {
-      setErrorMsg(String(e?.message ?? e));
-    }
-  }, [lastOutputPath]);
-
-  // ---- Clear ----
-  const onClear = useCallback(() => {
-    setSelectedPath(null);
-    setSelectedIsDir(false);
-    setLastOutputPath(null);
-    setMetrics(null);
-    setErrorMsg(null);
-    setProgress(null);
-    setSaveDir(null);
-    setExtractDir(null);
-    setPreview(null);
-    setIntent("compress");
-    setStatus("idle");
-  }, []);
-
-  // ---- Pickers ----
-  const onPickFile = useCallback(async () => {
-    try {
-      const path = await tauriInvoke<string | null>("pick_file_cmd");
-      if (path) {
-        setSelectedPath(path);
-        setSelectedIsDir(false);
-      }
-    } catch (e: any) {
-      setErrorMsg(String(e?.message ?? e));
-    }
-  }, []);
-
-  const onPickFolder = useCallback(async () => {
-    try {
-      const path = await tauriInvoke<string | null>("pick_directory_cmd");
-      if (path) {
-        setSelectedPath(path);
-        setSelectedIsDir(true);
-      }
-    } catch (e: any) {
-      setErrorMsg(String(e?.message ?? e));
-    }
-  }, []);
-
-  // ---- Choose COMPRESS destination folder (native save dialog) ----
-  const onPickCompressFolder = useCallback(async () => {
-    try {
-      const suggested =
-        defaultOutputFilename(selectedPath, mode, selectedIsDir) ||
-        "archive.nxs6";
-      const chosen = await tauriInvoke<string | null>(
-        "pick_save_location_cmd",
-        { req: { default_filename: suggested } }
-      );
-      if (!chosen) return;
-      const lastSlash = chosen.lastIndexOf("/");
-      setSaveDir(lastSlash > 0 ? chosen.slice(0, lastSlash) : chosen);
-      setErrorMsg(null);
-    } catch (e: any) {
-      setErrorMsg(String(e?.message ?? e));
-    }
-  }, [selectedPath, mode, selectedIsDir]);
-
-  // ---- Choose EXTRACT destination folder (native dir picker) ----
-  const onPickExtractFolder = useCallback(async () => {
-    try {
-      const path = await tauriInvoke<string | null>("pick_directory_cmd");
-      if (path) setExtractDir(path);
-    } catch (e: any) {
-      setErrorMsg(String(e?.message ?? e));
-    }
-  }, []);
-
-  // ---- Self-test ----
-  const onSelfTest = useCallback(async () => {
-    setStatus("working");
-    setErrorMsg(null);
-    try {
-      const r = await tauriInvoke<any>("self_test_cmd");
-      setMetrics({
-        originalSize: 8 * 1024,
-        compressedSize: Math.round((8 * 1024) / (r.ratio || 1)),
-        ratio: r.ratio,
-        compressMs: r.compress_time_ms,
-        decompressMs: r.decompress_time_ms,
-        mode,
-        strength,
-      });
-      setStatus("ok");
-    } catch (e: any) {
-      setErrorMsg(String(e?.message ?? e));
-      setStatus("err");
-    }
-  }, [mode, strength]);
-
-  // ---- Native Tauri drag-drop listener ----
-  useEffect(() => {
-    if (!isTauri) return;
-    let unlistenDrop: (() => void) | undefined;
-    (async () => {
-      try {
-        const eventMod = (window as any).__TAURI__?.event;
-        if (!eventMod?.listen) return;
-        unlistenDrop = await eventMod.listen(
-          "tauri://drag-drop",
-          (e: any) => {
-            const paths: string[] = e?.payload?.paths ?? [];
-            if (paths.length > 0) {
-              setSelectedPath(paths[0]);
-              setSelectedIsDir(true);
-            }
-          }
-        );
-      } catch (e) {
-        console.error("failed to attach tauri drag-drop listener:", e);
-      }
-    })();
-    return () => {
-      if (unlistenDrop) unlistenDrop();
-    };
-  }, []);
-
-  // ---- Progress event listener from Rust ----
-  useEffect(() => {
-    if (!isTauri) return;
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      try {
-        const eventMod = (window as any).__TAURI__?.event;
-        if (!eventMod?.listen) return;
-        unlisten = await eventMod.listen(
-          "compress-progress",
-          (e: any) => {
-            const p = e?.payload;
-            if (!p) return;
-            setProgress({
-              phase: p.phase,
-              current_file: p.current_file ?? "",
-              files_done: Number(p.files_done ?? 0),
-              files_total: Number(p.files_total ?? 1),
-              bytes_done: Number(p.bytes_done ?? 0),
-              bytes_total: Number(p.bytes_total ?? 0),
-            });
-          }
-        );
-      } catch (e) {
-        console.error("failed to attach progress listener:", e);
-      }
-    })();
-    return () => {
-      if (unlisten) unlisten();
-    };
-  }, []);
-
-  const working = status === "working";
-  const selectedName = selectedPath ? basename(selectedPath) : null;
-  const outputName = lastOutputPath ? basename(lastOutputPath) : null;
-  const showingPreview =
-    !!selectedPath && looksLikeArchive(selectedPath) && preview !== null;
-  const compressDisabled = !selectedPath || intent !== "compress" || working;
-  const decompressDisabled = !selectedPath || intent !== "decompress" || working;
-
   return (
-    <main className="h-screen flex flex-col bg-bg-base">
-      <header
-        data-tauri-drag-region
-        className="no-select h-9 flex items-center justify-between px-4 border-b border-bg-border bg-bg-card shrink-0"
-      >
-        <div className="flex items-center gap-2 text-cyan-400 font-mono text-xs tracking-[0.3em] uppercase">
-          <span>▣</span>
-          <span>NexusRAR</span>
-          <span className="text-zinc-600">·</span>
-          <span className="text-zinc-500">v0.1.0</span>
-        </div>
-        <div className="flex items-center gap-3 text-[10px] font-mono tracking-widest uppercase">
-          <span
-            className={[
-              "px-2 py-0.5 border",
-              status === "ok" ? "border-matrix-500 text-matrix-500" : "",
-              status === "working" ? "border-cyan-500 text-cyan-400" : "",
-              status === "err" ? "border-err text-err" : "",
-              status === "saved-elsewhere"
-                ? "border-amber-500 text-amber-400"
-                : "",
-              status === "idle" ? "border-zinc-700 text-zinc-500" : "",
-            ].join(" ")}
-          >
-            {status}
-          </span>
-        </div>
-      </header>
-
-      <div className="flex-1 grid grid-cols-3 gap-3 p-3 min-h-0 overflow-y-auto">
-        <div className="col-span-2 min-h-0 flex flex-col gap-3">
-          <Dropzone
-            onPickFile={onPickFile}
-            onPickFolder={onPickFolder}
-          />
-
-          <div className="panel p-3 font-mono text-[10px] tracking-wider">
-            <div className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
-              <div className="metric-label">selected</div>
-              <div className="text-zinc-300 truncate">
-                {selectedPath ? (
-                  <>
-                    <span className="text-cyan-400">▸</span>{" "}
-                    <span title={selectedPath}>{selectedName}</span>
-                    {selectedIsDir && (
-                      <span className="ml-2 text-[9px] px-1 border border-cyan-500 text-cyan-400">
-                        DIR
-                      </span>
-                    )}
-                    {looksLikeArchive(selectedPath ?? "") && (
-                      <span className="ml-2 text-[9px] px-1 border border-magenta-500 text-magenta-400">
-                        ARCHIVE
-                      </span>
-                    )}
-                  </>
-                ) : (
-                  <span className="text-zinc-600">
-                    (nothing selected — pick or drop)
-                  </span>
-                )}
-              </div>
-              <div className="metric-label">action</div>
-              <div className="flex items-center gap-3">
-                <label className="flex items-center gap-1 cursor-pointer">
-                  <input
-                    type="radio"
-                    name="intent"
-                    checked={intent === "compress"}
-                    onChange={() => setIntent("compress")}
-                    disabled={!selectedPath || working}
-                  />
-                  <span
-                    className={
-                      intent === "compress"
-                        ? "text-cyan-400"
-                        : "text-zinc-500"
-                    }
-                  >
-                    compress
-                  </span>
-                </label>
-                <label className="flex items-center gap-1 cursor-pointer">
-                  <input
-                    type="radio"
-                    name="intent"
-                    checked={intent === "decompress"}
-                    onChange={() => setIntent("decompress")}
-                    disabled={!selectedPath || working}
-                  />
-                  <span
-                    className={
-                      intent === "decompress"
-                        ? "text-magenta-400"
-                        : "text-zinc-500"
-                    }
-                  >
-                    decompress
-                  </span>
-                </label>
-                <span className="text-zinc-700">—</span>
-                <span className="text-amber-400 text-[9px]">
-                  {intent === "compress" ? "input → archive" : "archive → output"}
-                </span>
-              </div>
-              <div className="metric-label">output</div>
-              <div className="text-zinc-300 truncate">
-                {lastOutputPath ? (
-                  <>
-                    <span className="text-matrix-500">▸</span>{" "}
-                    <span title={lastOutputPath}>{outputName}</span>
-                    <span className="ml-2 text-amber-400">⌖ click OPEN to reveal</span>
-                  </>
-                ) : (
-                  <span className="text-zinc-600">
-                    (no output yet — click {intent === "compress" ? "COMPRESS" : "DECOMPRESS"})
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Archive preview (only when an archive is selected) */}
-          {showingPreview && <ArchivePreview preview={preview} />}
-
-          {/* Progress bar */}
-          {progress && <ProgressBar progress={progress} />}
-        </div>
-
-        <div className="col-span-1 min-h-0 flex flex-col gap-3">
-          <SaveTarget
-            selectedPath={selectedPath}
-            isDirectory={selectedIsDir}
-            mode={mode}
-            outputDir={intent === "compress" ? saveDir : extractDir}
-            onPickFolder={
-              intent === "compress" ? onPickCompressFolder : onPickExtractFolder
-            }
-            onReset={() => {
-              if (intent === "compress") setSaveDir(null);
-              else setExtractDir(null);
-            }}
-          />
-          <ActionToolbar
-            selectedPath={selectedPath}
-            lastOutputPath={lastOutputPath}
-            working={working}
-            onCompress={onCompress}
-            onDecompress={onDecompress}
-            onOpen={onOpen}
-            onClear={onClear}
-            // Override the per-mode disable since we now have an
-            // intent radio: each button only runs when its intent
-            // matches.
-            forceCompressActive={!compressDisabled}
-            forceDecompressActive={!decompressDisabled}
-          />
-          <div className="flex-1 min-h-0">
-            <EntropyMonitor metrics={metrics} />
-          </div>
-          <ConfigPanel
-            mode={mode}
-            strength={strength}
-            onModeChange={setMode}
-            onStrengthChange={setStrength}
-            onSelfTest={onSelfTest}
-          />
-        </div>
+    <main className="h-screen flex flex-col bg-[#0a0a0a] text-white">
+      {/* Subtle ambient gradient background */}
+      <div className="fixed inset-0 pointer-events-none">
+        <div className="absolute top-0 left-1/4 w-[600px] h-[600px] rounded-full bg-cyan-500/[0.03] blur-[120px]" />
+        <div className="absolute bottom-0 right-1/4 w-[600px] h-[600px] rounded-full bg-emerald-500/[0.02] blur-[120px]" />
       </div>
 
-      {/* P2P tunnel — Sprint 5.0 demo */}
-      <div className="grid grid-cols-2 gap-3 p-3 pt-0 border-t border-bg-border">
-        <SendPanel />
-        <ReceivePanel />
+      <NeoTopBar view={view} onNavigate={onNavigate} onSettings={onSettings} />
+
+      <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden">
+        {view === "landing" && <LandingPage onNavigate={onNavigate} />}
+        {view === "compress" && <CompressView onComplete={onOpComplete} />}
+        {view === "decompress" && <DecompressView onComplete={onOpComplete} />}
+        {view === "share" && <ShareView onComplete={onOpComplete} />}
+        {view === "settings" && <SettingsView onNavigate={onNavigate} />}
+        {view === "recent" && <RecentView onNavigate={onNavigate} />}
       </div>
 
-      <footer className="no-select h-7 border-t border-bg-border bg-bg-card flex items-center justify-between px-4 text-[10px] font-mono tracking-widest uppercase shrink-0 gap-4">
-        <div className="text-zinc-500 truncate min-w-0">
-          {lastOutputPath
-            ? `· saved → ${lastOutputPath}`
-            : selectedName
-            ? `· selected: ${selectedName}`
-            : "· awaiting input"}
-        </div>
-        <div className="flex gap-3 text-zinc-600 shrink-0">
-          <span>intent: {intent}</span>
-          <span>mode: {mode}</span>
-          <span>str: {strength}</span>
-          <span>dict: 5348</span>
-        </div>
-      </footer>
-
-      {errorMsg && (
-        <div className="border-t border-err bg-err/10 px-4 py-1.5 text-[10px] font-mono text-err tracking-wider uppercase truncate">
-          ⚠ {errorMsg}
-        </div>
-      )}
+      <NeoDashboard op={lastOp} />
     </main>
+  );
+}
+
+// ============================================================
+//  Settings (placeholder — full settings come in next iteration)
+// ============================================================
+
+function SettingsView({ onNavigate }: { onNavigate: (v: View) => void }) {
+  return (
+    <div className="flex-1 overflow-y-auto">
+      <div className="max-w-3xl mx-auto px-8 pt-12 pb-20">
+        <div className="text-zinc-500 text-[12px] tracking-wide mb-2">
+          <button onClick={() => onNavigate("landing")} className="hover:text-zinc-300">
+            ← Volver
+          </button>
+        </div>
+        <h1 className="text-white text-[36px] font-semibold tracking-tight mb-8">
+          Ajustes
+        </h1>
+
+        <Section title="Transporte P2P">
+          <Row label="Modo" value="Directo (LAN + UPnP)" />
+          <Row label="Apertura UPnP" value="automática" />
+          <Row label="Fallback" value="mDNS local" />
+        </Section>
+
+        <Section title="Compresión">
+          <Row label="Por defecto" value="Balanceado (v5)" />
+          <Row label="Diccionario" value="5348 entradas" />
+        </Section>
+
+        <Section title="Interfaz">
+          <Row label="Tema" value="Oscuro (Neo)" />
+          <Row label="Idioma" value="Español" />
+        </Section>
+
+        <Section title="Acerca de">
+          <Row label="Versión" value="NexusRAR 0.1.0" />
+          <Row label="Motor" value="NexusCompress v6 Solid-AST" />
+        </Section>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+//  Recent (placeholder)
+// ============================================================
+
+function RecentView({ onNavigate }: { onNavigate: (v: View) => void }) {
+  return (
+    <div className="flex-1 overflow-y-auto">
+      <div className="max-w-3xl mx-auto px-8 pt-12 pb-20">
+        <div className="text-zinc-500 text-[12px] tracking-wide mb-2">
+          <button onClick={() => onNavigate("landing")} className="hover:text-zinc-300">
+            ← Volver
+          </button>
+        </div>
+        <h1 className="text-white text-[36px] font-semibold tracking-tight mb-8">
+          Recientes
+        </h1>
+        <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] p-12 text-center">
+          <div className="text-zinc-500 text-[13px]">
+            Aún no hay operaciones recientes.
+          </div>
+          <button
+            onClick={() => onNavigate("landing")}
+            className="mt-4 text-cyan-400 hover:text-cyan-300 text-[13px]"
+          >
+            Empezar una operación →
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="mb-8">
+      <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-3">
+        {title}
+      </div>
+      <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] overflow-hidden divide-y divide-white/[0.04]">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="px-5 py-3 flex items-center justify-between text-[13.5px]">
+      <span className="text-zinc-400">{label}</span>
+      <span className="text-white font-mono text-[12px]">{value}</span>
+    </div>
   );
 }

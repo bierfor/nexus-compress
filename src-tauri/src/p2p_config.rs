@@ -59,7 +59,13 @@ pub enum TransportMode {
 
 impl Default for TransportMode {
     fn default() -> Self {
-        TransportMode::Quick
+        // Sprint 5.5.5: default to Direct. The user shouldn't
+        // have to choose between Quick/Named/Direct in the UI
+        // — Direct just works (LAN via mDNS, cross-NAT via
+        // UPnP if available). Cloudflare is the fallback for
+        // networks where UPnP fails AND there's no shared LAN
+        // — the user can switch to it from ConfigPanel.
+        TransportMode::Direct
     }
 }
 
@@ -702,9 +708,13 @@ mod tests {
     // --- Default + enum ------------------------------------------------
 
     #[test]
-    fn default_mode_is_quick() {
-        assert_eq!(TunnelConfig::default().mode, TransportMode::Quick);
-        assert_eq!(TransportMode::default(), TransportMode::Quick);
+    fn default_mode_is_direct() {
+        // Sprint 5.5.5: default switched from Quick to Direct.
+        // The UI doesn't ask the user to choose a mode anymore;
+        // Direct just works (LAN mDNS + UPnP cross-NAT) and
+        // Cloudflare is only a manual fallback.
+        assert_eq!(TunnelConfig::default().mode, TransportMode::Direct);
+        assert_eq!(TransportMode::default(), TransportMode::Direct);
     }
 
     #[test]

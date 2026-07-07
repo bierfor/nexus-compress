@@ -162,33 +162,6 @@ pub async fn compress_target_cmd(
 /// side-step Tauri's arg-name conversion gotchas (the user's
 /// `MISSING REQUIRED KEY DEFAULTFILENAME` error from earlier was
 /// the same camelCase/snake_case trap that bit `lzma_level`).
-#[tauri::command]
-pub async fn pick_save_location_cmd(
-    app: tauri::AppHandle,
-    req: serde_json::Value,
-) -> Result<Option<String>, String> {
-    let default_filename = req
-        .get("default_filename")
-        .and_then(|v| v.as_str())
-        .unwrap_or("archive.nxs")
-        .to_string();
-    use tauri::Manager;
-    use tauri_plugin_dialog::{DialogExt, FilePath};
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_focus();
-    }
-    let (tx, rx) = std::sync::mpsc::channel::<Option<FilePath>>();
-    app.dialog()
-        .file()
-        .set_file_name(&default_filename)
-        .save_file(move |path| {
-            let _ = tx.send(path);
-        });
-    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
-        .await
-        .map_err(|e| format!("dialog join failed: {}", e))?;
-    Ok(picked.and_then(|fp| fp.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
-}
 
 /// Decompress an archive by path. Auto-detects the format from the
 /// file's magic bytes (NXS6 / NXAR / v4 / v5-v6 single) and restores
@@ -301,86 +274,134 @@ fn reveal_in_finder(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+
+// ============================================================================
+//  File/folder pickers (Sprint 5.5.5: blocking pattern — fixes hang on macOS)
+// ============================================================================
+//
+// The previous version of these commands used the async-callback-with-mpsc
+// pattern (pick_file(callback) + spawn_blocking(recv)). That pattern is
+// documented as deadlock-prone by tauri-plugin-dialog — the callback is
+// dispatched from a sub-thread but the dialog itself needs the main
+// thread, and the channel rendezvous can hang. The fix is to use the
+// blocking_pick_* variants inside spawn_blocking. Simpler and works.
+
+/// Pick a single file. Returns the absolute path or None if cancelled.
+#[tauri::command]
+pub async fn pick_file_cmd(window: tauri::Window) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let window = window.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        let path = window
+            .dialog()
+            .file()
+            .add_filter(
+                "Nexus archive (.nxs/.nxs6/.lz/.nxar/.nxr)",
+                &["nxs", "nxs6", "lz", "nxar", "nxr"],
+            )
+            .add_filter("All files", &["*"])
+            .blocking_pick_file();
+        path.and_then(|fp| fp.into_path().ok())
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("dialog join failed: {}", e))?;
+    Ok(picked)
+}
+
+/// Pick MULTIPLE files (Sprint 5.5.5).
+#[tauri::command]
+pub async fn pick_files_cmd(window: tauri::Window) -> Result<Option<Vec<String>>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let window = window.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        let paths = window
+            .dialog()
+            .file()
+            .add_filter("All files", &["*"])
+            .blocking_pick_files();
+        paths.map(|v| {
+            v.into_iter()
+                .filter_map(|fp| fp.into_path().ok())
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+    })
+    .await
+    .map_err(|e| format!("dialog join failed: {}", e))?;
+    Ok(picked)
+}
+
+/// Pick a single directory.
+#[tauri::command]
+pub async fn pick_directory_cmd(window: tauri::Window) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let window = window.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        let path = window.dialog().file().blocking_pick_folder();
+        path.and_then(|fp| fp.into_path().ok())
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("dialog join failed: {}", e))?;
+    Ok(picked)
+}
+
+/// Pick MULTIPLE directories.
+#[tauri::command]
+pub async fn pick_folders_cmd(window: tauri::Window) -> Result<Option<Vec<String>>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let window = window.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        let paths = window.dialog().file().blocking_pick_folders();
+        paths.map(|v| {
+            v.into_iter()
+                .filter_map(|fp| fp.into_path().ok())
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+    })
+    .await
+    .map_err(|e| format!("dialog join failed: {}", e))?;
+    Ok(picked)
+}
+
+/// Pick a save location (the user picks where to write the output).
+/// Used by Receive panel. Args via single-JSON-arg pattern (the
+/// camelCase/snake_case trap that bit `lzma_level`).
+#[tauri::command]
+pub async fn pick_save_location_cmd(
+    window: tauri::Window,
+    req: serde_json::Value,
+) -> Result<Option<String>, String> {
+    let default_filename = req
+        .get("default_filename")
+        .and_then(|v| v.as_str())
+        .unwrap_or("archive.nxs")
+        .to_string();
+    use tauri_plugin_dialog::DialogExt;
+    let window = window.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        let path = window
+            .dialog()
+            .file()
+            .set_file_name(&default_filename)
+            .blocking_save_file();
+        path.and_then(|fp| fp.into_path().ok())
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("dialog join failed: {}", e))?;
+    Ok(picked)
+}
+
 #[tauri::command]
 pub async fn self_test_cmd() -> Result<SelfTestResult, String> {
     to_ipc(api::self_test())
 }
 
-#[tauri::command]
-pub async fn pick_file_cmd(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    use tauri::Manager;
-    use tauri_plugin_dialog::{DialogExt, FilePath};
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_focus();
-    }
-    let (tx, rx) = std::sync::mpsc::channel::<Option<FilePath>>();
-    // Cover EVERY suffix the codebase can produce. Critically, the
-    // "Nexus archive" filter is NOT made the default — the
-    // default "All files" filter lets the user pick a single
-    // source file (e.g. an uncompressed `.ts`) without having to
-    // dig into a filter dropdown.
-    app.dialog()
-        .file()
-        .add_filter(
-            "Nexus archive (.nxs/.nxs6/.lz)",
-            &["nxs", "nxs6", "lz", "nxar", "nxr"],
-        )
-        .add_filter("All files", &["*"])
-        .pick_file(move |path| {
-            let _ = tx.send(path);
-        });
-    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
-        .await
-        .map_err(|e| format!("dialog join failed: {}", e))?;
-    Ok(picked.and_then(|fp| fp.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
-}
 
-#[tauri::command]
-pub async fn pick_directory_cmd(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    use tauri::Manager;
-    use tauri_plugin_dialog::{DialogExt, FilePath};
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_focus();
-    }
-    let (tx, rx) = std::sync::mpsc::channel::<Option<FilePath>>();
-    app.dialog().file().pick_folder(move |path| {
-        let _ = tx.send(path);
-    });
-    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
-        .await
-        .map_err(|e| format!("dialog join failed: {}", e))?;
-    Ok(picked.and_then(|fp| fp.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
-}
 
-#[tauri::command]
-pub async fn pick_folders_cmd(app: tauri::AppHandle) -> Result<Option<Vec<String>>, String> {
-    use tauri::Manager;
-    use tauri_plugin_dialog::{DialogExt, FilePath};
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_focus();
-    }
-    let (tx, rx) = std::sync::mpsc::channel::<Option<Vec<FilePath>>>();
-    app.dialog().file().pick_folders(move |paths| {
-        let _ = tx.send(paths);
-    });
-    let picked = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().flatten())
-        .await
-        .map_err(|e| format!("dialog join failed: {}", e))?;
-    let out = match picked {
-        None => None,
-        Some(paths) => {
-            let mut v = Vec::with_capacity(paths.len());
-            for fp in paths {
-                match fp.into_path() {
-                    Ok(p) => v.push(p.to_string_lossy().into_owned()),
-                    Err(e) => return Err(format!("FilePath -> PathBuf failed: {}", e)),
-                }
-            }
-            Some(v)
-        }
-    };
-    Ok(out)
-}
 
 #[tauri::command]
 pub async fn compress_directory_cmd(

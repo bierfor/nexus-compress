@@ -1,28 +1,22 @@
 "use client";
 
 /**
- * SendPanel — UI for the "send a file to a friend" feature.
+ * SendPanel — UI for sending a file to a friend (Sprint 5.5.5).
  *
- * Sprint 5.5.2: reads the current TransportMode from the app
- * config and shows a small badge so the user knows whether the
- * generated token will be a v1 (Cloudflare) or v2 (Direct LAN)
- * token. The actual dispatch happens server-side in
- * `start_sender`, which reads the same config.
+ * Three ways to provide a file (in order of reliability):
+ *   1. **Drag-and-drop** onto the panel itself (most reliable
+ *      on macOS — no native dialog involved)
+ *   2. **Type the path** in the text input (Cmd+V from Finder
+ *      "Copy path" works perfectly)
+ *   3. **Click "browse"** to open the native dialog (sometimes
+ *      flaky on macOS Sequoia — see memory entry on picker bugs)
  *
- * Flow:
- *   1. User picks a file.
- *   2. Clicks "GENERATE CODE" — backend dispatches on the
- *      current transport mode (Quick / Named / Direct) and
- *      returns a v1 or v2 token accordingly.
- *   3. We show the 4-word code in big letters and the full
- *      token (v1 or v2) in a copyable textbox.
- *   4. When the user clicks ABORT or navigates away, we call
- *      `p2p_send_abort_cmd` to kill the tunnel / unregister
- *      the mDNS service.
+ * After the file is set, click "SHARE" — backend auto-decides
+ * the transport (Direct via UPnP + mDNS, fallback to LAN-only
+ * if UPnP fails). No manual mode selection.
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { defaultOutputFilename } from "./SaveTarget";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -39,6 +33,25 @@ async function tauriInvoke<T>(
   return await invoke(cmd, args);
 }
 
+// Sprint 5.5.5: try the JS plugin API directly. If that fails
+// (macOS Sequoia has flaky native dialog behavior), the user
+// can fall back to drag-and-drop or path text input.
+async function jsPickFile(): Promise<string | null> {
+  if (!isTauri) return null;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const result = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "All files", extensions: ["*"] }],
+    });
+    return typeof result === "string" ? result : null;
+  } catch (e) {
+    console.error("jsPickFile failed:", e);
+    return null;
+  }
+}
+
 interface SendStartResp {
   token: string;
   code: string;
@@ -50,57 +63,19 @@ interface SendStartResp {
   } | null;
 }
 
-interface TunnelConfigInfo {
-  mode: "quick" | "named" | "direct";
-  hostname: string | null;
-  has_token: boolean;
-}
-
 export function SendPanel() {
   const [picked, setPicked] = useState<string | null>(null);
   const [resp, setResp] = useState<SendStartResp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState<"token" | "code" | null>(null);
-  const [cfg, setCfg] = useState<TunnelConfigInfo | null>(null);
-  // Sprint 5.5.4: track whether the token has been "consumed"
-  // (user clicked copy OR 5s elapsed since the sender started).
-  // After that, the token text on screen is replaced with
-  // a "copied to clipboard" hint — the plaintext token still
-  // lives in `resp.token` but isn't rendered anymore. This
-  // mitigates the privacy risk of the public IP being
-  // shoulder-surfed from a screen at a coffee shop.
   const [tokenHidden, setTokenHidden] = useState(false);
+  const [tokenHover, setTokenHover] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [pathInput, setPathInput] = useState("");
   const abortInFlight = useRef(false);
 
-  // Read the current transport mode on mount so the user sees
-  // which kind of token they'll generate.
-  useEffect(() => {
-    (async () => {
-      try {
-        const c = await tauriInvoke<TunnelConfigInfo>(
-          "p2p_get_tunnel_config_cmd"
-        );
-        setCfg(c);
-      } catch {
-        // Fall back silently — the backend always returns the
-        // current config (defaults to Quick if file missing).
-      }
-    })();
-  }, []);
-
-  const tokenKind = resp
-    ? resp.token.startsWith("nx:3:")
-      ? "v3"
-      : resp.token.startsWith("nx:2:")
-      ? "v2"
-      : "v1"
-    : null;
-
-  // Privacy mitigation (Sprint 5.5.4): after the user copies
-  // the token OR after 5s of display, hide the token text from
-  // screen. The token still exists in `resp.token` (for any
-  // re-copy via clipboard) but is not rendered anymore.
+  // Auto-hide token after 5s.
   useEffect(() => {
     if (!resp) {
       setTokenHidden(false);
@@ -110,31 +85,99 @@ export function SendPanel() {
     return () => clearTimeout(timer);
   }, [resp]);
 
-  const onPick = useCallback(async () => {
-    try {
-      const path = await tauriInvoke<string | null>("pick_file_cmd");
-      if (path) {
-        setPicked(path);
-        setResp(null);
-        setError(null);
-      }
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
+  const acceptPath = useCallback((path: string | null | undefined) => {
+    if (path && path.length > 0) {
+      setPicked(path);
+      setResp(null);
+      setError(null);
+      setPathInput("");
     }
   }, []);
+
+  // --- Drag and drop ---
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  }, []);
+  const onDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+  }, []);
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length > 0) {
+      // Browser File API doesn't give us the absolute path,
+      // but Tauri intercepts drag-drop and emits the real
+      // path via `tauri://drag-drop`. We listen below as the
+      // primary path.
+      const tauriPaths = (e as any).detail?.paths ?? null;
+      if (tauriPaths && tauriPaths.length > 0) {
+        acceptPath(tauriPaths[0]);
+      } else {
+        // Browser fallback: use the file's name to guess a
+        // path. We can't get the absolute path from the
+        // browser File API, but we can show the name.
+        acceptPath((files[0] as any).path ?? null);
+      }
+    }
+  }, [acceptPath]);
+
+  // Tauri-native drag-drop listener (gives absolute paths).
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const eventMod = (window as any).__TAURI__?.event;
+        if (!eventMod?.listen) return;
+        unlisten = await eventMod.listen(
+          "tauri://drag-drop",
+          (e: any) => {
+            const paths: string[] = e?.payload?.paths ?? [];
+            if (paths.length > 0) {
+              acceptPath(paths[0]);
+            }
+          }
+        );
+      } catch (e) {
+        console.error("failed to attach tauri drag-drop:", e);
+      }
+    })();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [acceptPath]);
+
+  // --- Pick via dialog (may fail on macOS Sequoia) ---
+  const onBrowse = useCallback(async () => {
+    const path = await jsPickFile();
+    if (path) acceptPath(path);
+  }, [acceptPath]);
+
+  // --- Type the path manually ---
+  const onSubmitPath = useCallback(() => {
+    const trimmed = pathInput.trim();
+    if (trimmed) acceptPath(trimmed);
+  }, [pathInput, acceptPath]);
 
   const onStart = useCallback(async () => {
     if (!picked) return;
     setBusy(true);
     setError(null);
     setResp(null);
+    setTokenHidden(false);
     try {
       const r = await tauriInvoke<SendStartResp>("p2p_send_start_cmd", {
         req: { file_path: picked, code: null },
       });
       setResp(r);
     } catch (e: any) {
-      setError(String(e?.message ?? e));
+      setError(`⚠ ${e?.message ?? e}`);
     } finally {
       setBusy(false);
     }
@@ -157,9 +200,9 @@ export function SendPanel() {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(which);
+      setTokenHidden(true);
       setTimeout(() => setCopied(null), 1500);
     } catch {
-      // Fallback for non-secure contexts
       const el = document.createElement("textarea");
       el.value = text;
       document.body.appendChild(el);
@@ -167,11 +210,11 @@ export function SendPanel() {
       document.execCommand("copy");
       el.remove();
       setCopied(which);
+      setTokenHidden(true);
       setTimeout(() => setCopied(null), 1500);
     }
   }, []);
 
-  // Auto-abort on unmount.
   useEffect(() => {
     return () => {
       if (resp && !abortInFlight.current) {
@@ -182,50 +225,82 @@ export function SendPanel() {
 
   const filename = picked ? picked.split("/").pop() : null;
   const sizeLabel = resp ? prettySize(resp.file_size) : null;
+  const crossNat = !!resp?.upnp_status;
 
   return (
-    <div className="panel p-3 flex flex-col gap-3 font-mono text-xs">
+    <div
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      className={`panel p-3 flex flex-col gap-3 font-mono text-xs transition-colors ${
+        dragOver ? "border-cyan-400 bg-cyan-500/5" : ""
+      }`}
+    >
       <div className="flex items-center gap-2 text-cyan-400 text-[10px] tracking-[0.3em] uppercase">
         <span>⤴</span>
-        <span>Send to a friend</span>
+        <span>share with a friend</span>
         <span className="text-zinc-600">·</span>
-        <span className="text-zinc-500">
-          {cfg?.mode === "direct"
-            ? "Direct LAN (mDNS) + E2E encrypted"
-            : cfg?.mode === "named"
-            ? "Named Tunnel + E2E encrypted"
-            : "Quick Cloudflare + E2E encrypted"}
-        </span>
-        {cfg?.mode === "direct" && (
-          <span className="ml-auto px-1.5 py-0.5 border border-matrix-500 text-matrix-400 text-[9px] tracking-widest">
-            ▎ direct LAN
-          </span>
-        )}
+        <span className="text-zinc-500">end-to-end encrypted · no server</span>
       </div>
 
-      {/* File picker */}
-      <div className="border border-bg-border bg-bg-base p-3">
-        <div className="text-[10px] tracking-widest text-zinc-500 uppercase mb-2">
-          file to send
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onPick}
-            disabled={busy}
-            className="px-2 py-1 border border-cyan-500 text-cyan-400 hover:bg-cyan-500/10 disabled:border-zinc-700 disabled:text-zinc-600"
-          >
-            PICK FILE
-          </button>
-          <div className="text-zinc-300 truncate flex-1" title={picked ?? ""}>
-            {picked ? (
-              <>
-                <span className="text-cyan-400">▸</span> {filename}
-              </>
-            ) : (
-              <span className="text-zinc-600">(no file picked)</span>
-            )}
+      {/* File picker — three methods */}
+      <div className="border border-bg-border bg-bg-base p-3 space-y-2">
+        {dragOver ? (
+          <div className="text-center py-4 text-cyan-300 text-[14px] tracking-widest">
+            ⤓ release to share
           </div>
-        </div>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={onBrowse}
+                disabled={busy}
+                className="px-3 py-1.5 border border-cyan-500 text-cyan-400 hover:bg-cyan-500/10 disabled:opacity-40 text-[10px] tracking-widest uppercase"
+              >
+                📄 browse…
+              </button>
+              <span className="text-zinc-600 text-[9px] tracking-wider">
+                or drag &amp; drop here
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={pathInput}
+                onChange={(e) => setPathInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") onSubmitPath();
+                }}
+                placeholder="…or paste the absolute path"
+                className="flex-1 bg-bg-surface text-zinc-300 border border-bg-border p-1.5 text-[10px] font-mono"
+              />
+              <button
+                onClick={onSubmitPath}
+                disabled={!pathInput.trim()}
+                className="px-2 py-1.5 border border-amber-500 text-amber-400 hover:bg-amber-500/10 disabled:opacity-40 text-[10px] tracking-widest uppercase"
+              >
+                use path
+              </button>
+            </div>
+
+            {picked && (
+              <div className="text-[11px] text-zinc-300 truncate flex items-center gap-2 pt-1 border-t border-bg-border">
+                <span className="text-cyan-400">▸</span>
+                <span className="flex-1 truncate" title={picked}>
+                  {filename ?? picked}
+                </span>
+                <button
+                  onClick={() => setPicked(null)}
+                  className="text-zinc-600 hover:text-err text-[10px]"
+                  title="clear"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* Action button */}
@@ -233,18 +308,55 @@ export function SendPanel() {
         <button
           onClick={onStart}
           disabled={!picked || busy}
-          className="px-3 py-2 border-2 border-magenta-500 text-magenta-400 hover:bg-magenta-500/10 disabled:border-zinc-700 disabled:text-zinc-600 text-[11px] tracking-[0.3em] uppercase"
+          className="px-4 py-3 border-2 border-magenta-500 text-magenta-400 hover:bg-magenta-500/10 disabled:border-zinc-700 disabled:text-zinc-600 text-[13px] tracking-[0.3em] uppercase font-bold"
         >
-          {busy ? "⟳ starting tunnel…" : "⤴ generate code"}
+          {busy ? "⟳ preparing…" : "⤴ share"}
         </button>
       ) : (
         <>
-          {/* Code (the human-friendly part) */}
+          {/* Status badge */}
+          <div
+            className={`border-2 p-3 ${
+              crossNat
+                ? "border-matrix-500 bg-matrix-500/5"
+                : "border-amber-500 bg-amber-500/5"
+            }`}
+          >
+            <div
+              className={`text-[11px] tracking-widest uppercase mb-1 ${
+                crossNat ? "text-matrix-400" : "text-amber-400"
+              }`}
+            >
+              {crossNat ? "🟢 ready to share" : "🟡 ready to share"}
+            </div>
+            <div
+              className={`text-[12px] ${
+                crossNat ? "text-matrix-300" : "text-amber-300"
+              }`}
+            >
+              {crossNat ? (
+                <>
+                  any network — direct peer-to-peer
+                  {resp.upnp_status && (
+                    <span className="text-zinc-500">
+                      {" "}
+                      ({resp.upnp_status.external_ip}:
+                      {resp.upnp_status.external_port})
+                    </span>
+                  )}
+                </>
+              ) : (
+                <>same Wi-Fi only — local high-speed</>
+              )}
+            </div>
+          </div>
+
+          {/* Code */}
           <div className="border-2 border-matrix-500 bg-matrix-500/5 p-4 text-center">
-            <div className="text-[9px] tracking-[0.4em] text-matrix-500 uppercase mb-1">
+            <div className="text-[9px] tracking-[0.4em] text-matrix-500 uppercase mb-2">
               share this code
             </div>
-            <div className="text-2xl text-matrix-400 font-bold tracking-widest break-all">
+            <div className="text-3xl text-matrix-400 font-bold tracking-widest break-all leading-tight">
               {resp.code}
             </div>
             <div className="text-[9px] text-zinc-500 tracking-wider mt-2">
@@ -253,75 +365,45 @@ export function SendPanel() {
             <button
               onClick={() => {
                 onCopy(resp.code, "code");
-                setTokenHidden(true); // privacy: hide token once user starts sharing
+                setTokenHidden(true);
               }}
-              className="mt-2 px-2 py-0.5 border border-matrix-500 text-matrix-500 hover:bg-matrix-500/10 text-[9px] tracking-widest uppercase"
+              className="mt-3 px-3 py-1 border border-matrix-500 text-matrix-500 hover:bg-matrix-500/10 text-[10px] tracking-widest uppercase"
             >
-              {copied === "code" ? "✓ copied" : "copy code"}
+              {copied === "code" ? "✓ copied" : "📋 copy code"}
             </button>
           </div>
 
-          {/* UPnP status (Sprint 5.5.4 Phase 3) — visible feedback
-              before the user even looks at the token. Tells them
-              whether the transfer will work cross-NAT or not. */}
-          <div
-            className={`border p-2 text-[10px] tracking-wider ${
-              resp.upnp_status
-                ? "border-matrix-500 bg-matrix-500/5 text-matrix-400"
-                : "border-amber-500 bg-amber-500/5 text-amber-400"
-            }`}
-          >
-            {resp.upnp_status ? (
-              <>
-                ✓ UPnP hole open — external {resp.upnp_status.external_ip}:
-                {resp.upnp_status.external_port}
-                <br />
-                <span className="text-[9px] text-zinc-500">
-                  Cross-NAT ready. The receiver can be on any network.
-                </span>
-              </>
-            ) : (
-              <>
-                ⚠ UPnP unavailable — falling back to LAN-only
-                <br />
-                <span className="text-[9px] text-zinc-500">
-                  Receiver must be on the same Wi-Fi as you.
-                </span>
-              </>
-            )}
-          </div>
-
-          {/* Token (the machine-friendly part) */}
+          {/* Token */}
           <div className="border border-bg-border bg-bg-base p-3">
             <div className="flex items-center justify-between text-[10px] tracking-widest text-zinc-500 uppercase mb-2">
-              <span>or send the full token</span>
+              <span>or share the full token</span>
               <button
-                onClick={() => {
-                  onCopy(resp.token, "token");
-                  setTokenHidden(true); // privacy: hide after copy
-                }}
+                onClick={() => onCopy(resp.token, "token")}
                 className="px-2 py-0.5 border border-cyan-500 text-cyan-400 hover:bg-cyan-500/10"
               >
-                {copied === "token" ? "✓ copied" : "copy token"}
+                {copied === "token" ? "✓ copied" : "📋 copy"}
               </button>
             </div>
-            {tokenHidden ? (
-              <div className="text-[10px] text-zinc-500 italic bg-bg-surface p-2 border border-zinc-700">
-                ▎ token hidden for privacy (public IP exposure).
-                Click <em>copy token</em> again to paste from clipboard
-                history, or use the 4-word code above (works the same).
-              </div>
-            ) : (
-              <div className="text-[10px] text-zinc-400 break-all bg-bg-surface p-2 max-h-24 overflow-y-auto">
-                {resp.token}
-              </div>
-            )}
+            <div
+              onMouseEnter={() => setTokenHover(true)}
+              onMouseLeave={() => setTokenHover(false)}
+              className={`text-[10px] text-zinc-400 break-all bg-bg-surface p-2 max-h-24 overflow-y-auto transition-all duration-500 ${
+                tokenHidden && !tokenHover
+                  ? "blur-sm select-none opacity-50"
+                  : ""
+              }`}
+              title={
+                tokenHidden && !tokenHover
+                  ? "hover to reveal · auto-hidden after 5s for privacy"
+                  : ""
+              }
+            >
+              {resp.token}
+            </div>
             <div className="text-[9px] text-zinc-600 tracking-wider mt-2">
-              {tokenKind === "v3"
-                ? "v3 cross-NAT token: includes your public IP + UPnP port. The receiver tries this first; falls back to LAN mDNS if their router blocks NAT loopback. Auto-hidden after 5s."
-                : tokenKind === "v2"
-                ? "Direct Mode v2 token: service hash + code. The receiver's mDNS browse finds your machine on the LAN — no URL, no Cloudflare. Requires same Wi-Fi."
-                : "v1 token includes the cloudflared URL, the code, the file hash, and SHA-256. The receiver just needs this and the 4-word code."}
+              {crossNat
+                ? "🔒 includes the sender's public IP. Auto-blurred after 5s — hover to reveal. Copy clears the blur."
+                : "🔒 local-network token. Same Wi-Fi required to receive."}
             </div>
           </div>
 
@@ -329,14 +411,14 @@ export function SendPanel() {
             onClick={onAbort}
             className="px-3 py-2 border border-err text-err hover:bg-err/10 text-[11px] tracking-[0.3em] uppercase"
           >
-            ⨯ abort transfer
+            ⨯ cancel
           </button>
         </>
       )}
 
       {error && (
         <div className="border-t border-err bg-err/10 px-3 py-1.5 text-[10px] text-err tracking-wider uppercase truncate">
-          ⚠ {error}
+          {error}
         </div>
       )}
     </div>

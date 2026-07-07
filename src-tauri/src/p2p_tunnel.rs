@@ -531,33 +531,49 @@ pub fn cloudflared_present(path: &Path) -> bool {
 
 /// Build the GitHub release URL for the current OS+arch.
 fn cloudflared_download_url() -> Option<String> {
-    let suffix = match (cfg!(target_os = "windows"), cfg!(target_os = "macos"), cfg!(target_os = "linux")) {
-        (true, _, _) => Some("windows-amd64.exe"),
+    // Sprint 5.5.5 fix: macOS releases are .tgz tarballs, Linux
+    // releases are raw binaries (no extension), Windows are .exe.
+    // The previous version constructed `cloudflared-darwin-arm64`
+    // without the `.tgz` suffix, causing a 404 on every macOS
+    // download. Now each platform gets the right filename.
+    let filename = match (cfg!(target_os = "windows"), cfg!(target_os = "macos"), cfg!(target_os = "linux")) {
+        (true, _, _) => "cloudflared-windows-amd64.exe".to_string(),
         (_, true, _) => {
             // Apple Silicon vs Intel — feature detection at
             // runtime is more reliable than compile-time here.
-            Some(if cfg!(target_arch = "aarch64") {
-                "darwin-arm64"
+            if cfg!(target_arch = "aarch64") {
+                "cloudflared-darwin-arm64.tgz".to_string()
             } else {
-                "darwin-amd64"
-            })
+                "cloudflared-darwin-amd64.tgz".to_string()
+            }
         }
         (_, _, true) => {
-            Some(if cfg!(target_arch = "aarch64") {
-                "linux-arm64"
+            if cfg!(target_arch = "aarch64") {
+                "cloudflared-linux-arm64".to_string()
             } else {
-                "linux-amd64"
-            })
+                "cloudflared-linux-amd64".to_string()
+            }
         }
-        _ => None,
-    }?;
+        _ => return None,
+    };
     Some(format!(
-        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-{suffix}",
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/{filename}",
     ))
 }
 
-/// Download cloudflared into the data dir, chmod +x on unix.
-/// Returns the absolute path of the saved binary.
+/// Download cloudflared into the data dir, extract if .tgz,
+/// chmod +x on unix. Returns the absolute path of the saved
+/// binary.
+///
+/// Sprint 5.5.5: the previous version wrote the .tgz bytes
+/// directly to the target path (Linux only worked, macOS got
+/// a non-executable .tgz as the "binary"). Now we:
+///   1. Download to a temp file
+///   2. If the filename ends in `.tgz`, extract the inner
+///      `cloudflared` binary (also has a `.tgz` containing
+///      `cloudflared` and a LICENSE file)
+///   3. If raw binary, write as-is
+///   4. chmod +x on unix
 pub async fn download_cloudflared(app_data_dir: &Path) -> Result<PathBuf, String> {
     let url = cloudflared_download_url()
         .ok_or_else(|| "unsupported OS for cloudflared auto-download".to_string())?;
@@ -571,11 +587,49 @@ pub async fn download_cloudflared(app_data_dir: &Path) -> Result<PathBuf, String
         .await
         .map_err(|e| format!("download: {}", e))?
         .error_for_status()
-        .map_err(|e| format!("download http: {}", e))?
+        .map_err(|e| format!("download http {}: {}", url, e))?
         .bytes()
         .await
         .map_err(|e| format!("download body: {}", e))?;
-    std::fs::write(&target, &bytes).map_err(|e| format!("write: {}", e))?;
+    let is_tgz = url.ends_with(".tgz");
+    if is_tgz {
+        // Extract the inner `cloudflared` binary from the .tgz.
+        // The tarball contains `cloudflared` + LICENSE. We only
+        // need the binary.
+        let cursor = std::io::Cursor::new(bytes.to_vec());
+        let gz = flate2::read::GzDecoder::new(cursor);
+        let mut archive = tar::Archive::new(gz);
+        let mut extracted = false;
+        for entry in archive
+            .entries()
+            .map_err(|e| format!("tar entries: {}", e))?
+        {
+            let mut entry = entry.map_err(|e| format!("tar entry: {}", e))?;
+            let path = entry
+                .path()
+                .map_err(|e| format!("tar path: {}", e))?
+                .to_path_buf();
+            // The binary file is named exactly "cloudflared"
+            // inside the tarball. Match on filename only (not
+            // full path) to handle both layouts.
+            if path.file_name().and_then(|s| s.to_str()) == Some("cloudflared") {
+                entry
+                    .unpack(&target)
+                    .map_err(|e| format!("unpack cloudflared: {}", e))?;
+                extracted = true;
+                break;
+            }
+        }
+        if !extracted {
+            return Err(format!(
+                "cloudflared .tgz did not contain a `cloudflared` binary (url: {})",
+                url
+            ));
+        }
+    } else {
+        // Raw binary (Linux).
+        std::fs::write(&target, &bytes).map_err(|e| format!("write: {}", e))?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

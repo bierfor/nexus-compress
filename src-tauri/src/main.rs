@@ -47,6 +47,7 @@ fn main() {
             commands::engine_info_cmd,
             commands::self_test_cmd,
             commands::pick_file_cmd,
+            commands::pick_files_cmd,
             commands::pick_directory_cmd,
             commands::pick_folders_cmd,
             commands::compress_directory_cmd,
