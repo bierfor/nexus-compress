@@ -2195,13 +2195,41 @@ pub async fn receive_send_file(
     // file came direct from a peer, not the internet.
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("xattr")
-            .args([
-                "-d",
-                "com.apple.quarantine",
-                &output_path.to_string_lossy(),
-            ])
-            .output();
+        // Run xattr with verbose output so we can see in the
+        // console whether it actually cleared the attribute.
+        // The file path may contain spaces (e.g. "Busta Paga.pdf")
+        // — Command::args handles escaping automatically.
+        let path_str = output_path.to_string_lossy().into_owned();
+        match std::process::Command::new("/usr/bin/xattr")
+            .args(["-d", "com.apple.quarantine", &path_str])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                eprintln!(
+                    "[p2p] cleared quarantine xattr on {}",
+                    output_path.display()
+                );
+            }
+            Ok(out) => {
+                eprintln!(
+                    "[p2p] xattr exit={:?} stderr={}",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            Err(e) => {
+                eprintln!("[p2p] xattr failed to spawn: {}", e);
+            }
+        }
+        // Belt-and-suspenders: also remove the parent dir's
+        // inherited quarantine in case the OS set it on the
+        // whole tree (it shouldn't, but...).
+        if let Some(parent) = output_path.parent() {
+            let parent_str = parent.to_string_lossy().into_owned();
+            let _ = std::process::Command::new("/usr/bin/xattr")
+                .args(["-d", "com.apple.quarantine", &parent_str])
+                .output();
+        }
     }
     Ok(ReceiveResult {
         bytes_written: total,

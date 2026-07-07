@@ -534,7 +534,12 @@ function ReceiveTab() {
     const looksPlaceholder =
       currentBase === "archivo_recibido" ||
       currentBase === "archivo_recibido.bin" ||
-      currentBase.endsWith(".bin");
+      currentBase === "received.bin" ||
+      currentBase.endsWith(".bin") ||
+      // User typed "*.pdf" or "name.pdf.*" by accident — treat
+      // any trailing ".*" as a wildcard/placeholder marker.
+      currentBase.endsWith(".*") ||
+      currentBase.endsWith(".bin.*");
     if (looksPlaceholder && suggestedName) {
       const dir = await dirname(path);
       path = await join(dir, suggestedName);
