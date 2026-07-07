@@ -1066,11 +1066,25 @@ async fn resolve_direct_service(
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Some(ServiceEvent::ServiceResolved(info))) => {
                 if info.get_fullname() == service_fullname {
+                    // Prefer IPv4 over IPv6 — Tailscale and most
+                    // VPN/tunnel interfaces publish IPv6
+                    // addresses first via mDNS, but the sender
+                    // binds 0.0.0.0 (IPv4 only). Picking IPv6
+                    // produces a malformed connect that times
+                    // out on every retry.
+                    eprintln!(
+                        "[p2p] mDNS resolved {} addresses: {:?}",
+                        info.get_fullname(),
+                        info.get_addresses()
+                    );
                     let addr = info
                         .get_addresses()
                         .iter()
-                        .next()
                         .copied()
+                        .find(|a| matches!(a, std::net::IpAddr::V4(_)))
+                        .or_else(|| {
+                            info.get_addresses().iter().copied().next()
+                        })
                         .ok_or_else(|| {
                             "mDNS resolved but no A records".to_string()
                         })?;
@@ -1401,7 +1415,7 @@ async fn receive_v3_with_fallback(
 ) -> Result<ReceiveResult, String> {
     let v3 = p2p_config::parse_v3_token(&token_compact)?;
     eprintln!(
-        "[p2p] v3 token: trying external={}:{} (2s timeout) then mDNS fallback",
+        "[p2p] v3 token: trying external={}:{} (2s timeout) then localhost+mDNS fallback",
         v3.external_ip, v3.external_port
     );
     // 2-second probe to the public endpoint.
@@ -1411,13 +1425,31 @@ async fn receive_v3_with_fallback(
         let u = format!("http://{}:{}", v3.external_ip, v3.external_port);
         eprintln!("[p2p] v3: external endpoint reachable, using it");
         (u, "external")
+    } else if probe_tcp(
+        std::net::Ipv4Addr::new(127, 0, 0, 1),
+        v3.external_port,
+        Duration::from_millis(500),
+    )
+    .await
+    {
+        // Sprint 5.6.11: same-machine fallback. The sender binds
+        // 0.0.0.0 so it's reachable on localhost too. Tailscale
+        // NAT loopback usually blocks the external IP from the
+        // same host, so this is the common case in development.
+        let u = format!("http://127.0.0.1:{}", v3.external_port);
+        eprintln!("[p2p] v3: external blocked, localhost reachable, using it");
+        (u, "localhost")
     } else {
         eprintln!(
-            "[p2p] v3: external endpoint unreachable, falling back to mDNS"
+            "[p2p] v3: external + localhost unreachable, falling back to mDNS"
         );
         let (ip, port) =
             resolve_direct_service(&v3.service_hash, timeout_secs).await?;
-        (format!("http://{}:{}", ip, port), "lan")
+        let u = match ip {
+            std::net::IpAddr::V6(_) => format!("http://[{}]:{}", ip, port),
+            std::net::IpAddr::V4(_) => format!("http://{}:{}", ip, port),
+        };
+        (u, "lan")
     };
     let result = fetch_meta_and_receive(url, v3.code, output_path).await?;
     eprintln!("[p2p] v3 transfer complete (used {} endpoint)", used_endpoint);
@@ -1538,6 +1570,17 @@ pub async fn peek_filename(
         let v3 = p2p_config::parse_v3_token(token_compact)?;
         if probe_tcp(v3.external_ip, v3.external_port, Duration::from_secs(2)).await {
             format!("http://{}:{}", v3.external_ip, v3.external_port)
+        } else if probe_tcp(
+            std::net::Ipv4Addr::new(127, 0, 0, 1),
+            v3.external_port,
+            Duration::from_millis(500),
+        )
+        .await
+        {
+            // Same-machine case: Tailscale NAT loopback makes the
+            // external IP unreachable, but the sender is listening
+            // on localhost too (it binds 0.0.0.0).
+            format!("http://127.0.0.1:{}", v3.external_port)
         } else {
             let (ip, port) =
                 resolve_direct_service(&v3.service_hash, timeout_secs).await?;
@@ -2096,6 +2139,23 @@ pub async fn receive_send_file(
         drop(out);
         let _ = tokio::fs::remove_file(&output_path).await;
         return Err("SHA-256 mismatch — file corrupted or tampered".to_string());
+    }
+    // Sprint 5.6.11: strip macOS quarantine attribute on the
+    // freshly-written file. Otherwise Gatekeeper asks the user
+    // "are you sure you want to open this?" every time they
+    // double-click the received file. The attribute is normally
+    // set by browsers / mail agents when files are downloaded
+    // from the internet — we don't want it here because the
+    // file came direct from a peer, not the internet.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("xattr")
+            .args([
+                "-d",
+                "com.apple.quarantine",
+                &output_path.to_string_lossy(),
+            ])
+            .output();
     }
     Ok(ReceiveResult {
         bytes_written: total,
