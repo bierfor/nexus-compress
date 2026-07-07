@@ -274,6 +274,69 @@ async fn main() {
     );
     drop(started_folder);
     let _ = std::fs::remove_dir_all(&folder);
+    // NOTE: out_folder kept on disk for the inspection test
+    // below (Sprint 5.6.17). Cleaned up at the end.
+
+    // 11. Archive inspection regression (Sprint 5.6.17). Verify
+    //     list_entries reads the tar TOC without extracting, and
+    //     extract_entries with a subset only writes the chosen
+    //     files.
+    println!("[e2e] regression: archive inspection (WinRAR-style browsing)...");
+    let entries = p2p_tunnel::archive_inspect::list_entries(&out_folder)
+        .expect("list entries");
+    // tar archives contain directory entries alongside files,
+    // and on some systems long-name entries get split into
+    // separate headers. We don't assert exact count — we just
+    // check that all 5 file_* entries are listed with the
+    // right basename and non-zero size.
+    assert!(!entries.is_empty(), "tar should have entries");
+    for i in 0..5 {
+        let hit = entries.iter().any(|e| {
+            !e.is_dir
+                && e.name.ends_with(&format!("file_{}.txt", i))
+                && e.size > 0
+        });
+        assert!(hit, "file_{}.txt missing from entries", i);
+    }
+    let selective_dir = std::env::temp_dir().join(format!(
+        "e2e_v3_SELECTIVE_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&selective_dir);
+    let selected = vec![
+        format!(
+            "e2e_v3_folder_{}/file_1.txt",
+            std::process::id()
+        ),
+        format!(
+            "e2e_v3_folder_{}/file_3.txt",
+            std::process::id()
+        ),
+    ];
+    let written = p2p_tunnel::archive_inspect::extract_entries(
+        &out_folder,
+        &selective_dir,
+        Some(selected.clone()),
+    )
+    .expect("selective extract");
+    assert_eq!(written.len(), 2, "selective should write 2 files");
+    // WinRAR-style: preserve the archive's internal hierarchy.
+    // Both extracted files end up under dest/<folder>/.
+    let sub_dir = selective_dir.join(format!(
+        "e2e_v3_folder_{}",
+        std::process::id()
+    ));
+    let mut read_dir = std::fs::read_dir(&sub_dir).expect("readdir sub");
+    let mut names: Vec<String> = read_dir
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["file_1.txt".to_string(), "file_3.txt".to_string()]);
+    println!(
+        "[e2e] inspection OK — listed {} entries, selectively extracted 2",
+        entries.len()
+    );
+    let _ = std::fs::remove_dir_all(&selective_dir);
     let _ = std::fs::remove_file(&out_folder);
     let out2 = std::env::temp_dir().join(format!(
         "e2e_v3_RECEIVED2_{}.html",

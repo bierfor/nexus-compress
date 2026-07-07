@@ -1757,39 +1757,98 @@ pub async fn start_sender(
         }
     };
 
-    // 4. Compute file metadata.
-    let meta = std::fs::metadata(&file_path)
-        .map_err(|e| format!("stat {}: {}", file_path.display(), e))?;
+    // 4. Compute file metadata. If the input is a directory
+    //    (including .app bundles on macOS), archive it to a
+    //    temporary .tar first so we have a single file to stream.
+    //    If the file is already compressed (zip, tar, dmg, etc.)
+    //    we send it as-is without any additional wrapping.
+    let is_dir_input = std::fs::metadata(&file_path)
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    let (effective_path, wire_filename) = if is_dir_input {
+        let dir_name = file_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "directory".to_string());
+        // Use system tar: -c create, -p preserve permissions
+        // (important for .app symlinks and setuid bits).
+        let temp_path = std::env::temp_dir().join(format!(
+            "nexus-p2p-archive-{}-{}.tar",
+            std::process::id(),
+            dir_name
+        ));
+        let parent = file_path
+            .parent()
+            .ok_or_else(|| "directory has no parent path".to_string())?;
+        let tar_status = std::process::Command::new("/usr/bin/tar")
+            .arg("-cpf")
+            .arg(&temp_path)
+            .arg("-C")
+            .arg(parent)
+            .arg(&dir_name)
+            .output()
+            .map_err(|e| format!("spawn tar: {}", e))?;
+        if !tar_status.status.success() {
+            return Err(format!(
+                "tar failed: exit={:?} stderr={}",
+                tar_status.status.code(),
+                String::from_utf8_lossy(&tar_status.stderr)
+            ));
+        }
+        let archive_size = std::fs::metadata(&temp_path)
+            .map_err(|e| format!("stat temp archive: {}", e))?
+            .len();
+        eprintln!(
+            "[p2p] tarred directory {} -> {} ({} bytes)",
+            file_path.display(),
+            temp_path.display(),
+            archive_size
+        );
+        let wf = format!("{}.tar", dir_name);
+        (temp_path, wf)
+    } else {
+        // Regular file — send as-is. The wire filename is the
+        // original basename; we do NOT change the extension even
+        // if the file is already compressed (.zip, .dmg, .tar,
+        // .nxs6, etc.). Recompressing already-compressed data
+        // only wastes time without shrinking the size.
+        let wf = file_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_string());
+        (file_path.clone(), wf)
+    };
+    let meta = std::fs::metadata(&effective_path)
+        .map_err(|e| format!("stat {}: {}", effective_path.display(), e))?;
     let plaintext_size = meta.len();
-    let expected_sha256_hex = sha256_file_hex(&file_path).map_err(|e| format!("sha256 {}: {}", file_path.display(), e))?;
+    let expected_sha256_hex = sha256_file_hex(&effective_path)
+        .map_err(|e| format!("sha256 {}: {}", effective_path.display(), e))?;
     let mut expected_sha256 = [0u8; 32];
     hex::decode_to_slice(expected_sha256_hex.as_bytes(), &mut expected_sha256)
         .map_err(|e| format!("hex decode sha256: {}", e))?;
     let salt = random_salt();
-    // Bind the session keys to the file path so a receiver
-    // can't replay the token against a different file.
-    let fhash_hex = sha256_hex(file_path.to_string_lossy().as_bytes());
+    // Bind the session keys to the effective path (which for
+    // directories is the temp .tar) so a replay can't redirect
+    // the receiver to a different file.
+    let fhash_hex = sha256_hex(effective_path.to_string_lossy().as_bytes());
     let mut fhash = [0u8; 32];
     hex::decode_to_slice(fhash_hex.as_bytes(), &mut fhash)
         .map_err(|e| format!("hex decode fhash: {}", e))?;
-    // Sprint 5.6.8: filename for the token + /meta.
-    let wire_filename = file_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".to_string());
 
     // 5. Begin SPAKE2 (sender = side B = responder).
     let kek = derive_kek(code.as_bytes(), &salt);
     let (spake, t_b) =
         SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")?;
 
-    // 6. Build the shared state.
+    // 6. Build the shared state. Use `effective_path` — for
+    //    directories this is the temp .tar; for files it's
+    //    the original path.
     let auth = auth::AuthState::new(&*kek);
     let state = SenderState {
         spake: Arc::new(Mutex::new(Some((spake, t_b)))),
         keys: Arc::new(Mutex::new(None)),
         meta: Arc::new(FileMeta {
-            file_path: file_path.clone(),
+            file_path: effective_path.clone(),
             plaintext_size,
             expected_sha256,
             salt,

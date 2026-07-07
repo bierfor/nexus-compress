@@ -11,6 +11,7 @@ mod commands;
 mod p2p_config;
 mod p2p_tunnel;
 mod upnp_hole;
+pub mod archive_inspect;
 
 use std::sync::Arc;
 
