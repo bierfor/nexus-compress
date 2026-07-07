@@ -613,6 +613,39 @@ pub async fn p2p_receive_cmd(req: serde_json::Value) -> Result<P2pReceiveResp, S
     })
 }
 
+/// Receive a file sent via Direct Mode (LAN + mDNS). The token
+/// is a v2 token (`nx:2:direct:<hash>:<code>`) — no URL, the
+/// sender is discovered via mDNS browse. `timeout_secs` caps
+/// the mDNS browse window (5s default in the UI).
+#[tauri::command]
+pub async fn p2p_receive_direct_cmd(req: serde_json::Value) -> Result<P2pReceiveResp, String> {
+    let req: serde_json::Value = req;
+    let token_v2 = req
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'token'".to_string())?
+        .to_string();
+    let output_path_str = req
+        .get("output_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'output_path'".to_string())?
+        .to_string();
+    let timeout_secs = req
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5);
+    let output_path = PathBuf::from(&output_path_str);
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir output parent: {}", e))?;
+    }
+    let result = p2p_tunnel::receive_direct_file(token_v2, output_path, timeout_secs).await?;
+    Ok(P2pReceiveResp {
+        bytes_written: result.bytes_written,
+        output_path: result.output_path.to_string_lossy().to_string(),
+    })
+}
+
 // ============================================================================
 //  Sprint 5.5.1 — tunnel config + transport mode commands
 // ============================================================================

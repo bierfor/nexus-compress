@@ -47,6 +47,7 @@ fn main() {
             commands::p2p_send_start_cmd,
             commands::p2p_send_abort_cmd,
             commands::p2p_receive_cmd,
+            commands::p2p_receive_direct_cmd,
             commands::p2p_get_tunnel_config_cmd,
             commands::p2p_save_tunnel_config_cmd,
         ])

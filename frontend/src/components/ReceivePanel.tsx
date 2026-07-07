@@ -1,18 +1,21 @@
 "use client";
 
 /**
- * ReceivePanel — UI for the "receive a file from a friend over
- * a Quick Cloudflare Tunnel" feature (Sprint 5.0 demo).
+ * ReceivePanel — UI for receiving a file from a friend.
+ *
+ * Two transport modes (auto-detected from the token prefix):
+ *   - v1 token (nx:1:...) → Quick/Named Cloudflare Tunnel
+ *   - v2 token (nx:2:...) → Direct LAN Mode (mDNS discovery,
+ *     no Cloudflare). Sprint 5.5.2 Phase 1.
  *
  * Flow:
- *   1. User pastes the token (the long base64url string from
- *      the sender).
+ *   1. User pastes the token.
  *   2. Picks where to save the decrypted file.
- *   3. Clicks "START RECEIVING" — backend does the SPAKE2
- *      handshake, downloads encrypted chunks, decrypts,
- *      verifies SHA-256, writes to disk.
- *   4. We show progress (bytes_done / file_size) and the final
- *      output path.
+ *   3. Clicks "START RECEIVING" — backend does:
+ *      - v1: HTTP/SPAKE2 handshake + AES-GCM stream
+ *      - v2: mDNS browse + HTTP/SPAKE2 + AES-GCM stream
+ *      Then decrypts, verifies SHA-256, writes to disk.
+ *   4. We show progress and the final output path.
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
@@ -38,6 +41,16 @@ interface ReceiveResp {
   output_path: string;
 }
 
+/** Discriminated token version detected from the wire prefix. */
+type TokenKind = "v1" | "v2" | "unknown";
+
+function detectTokenKind(token: string): TokenKind {
+  const t = token.trim();
+  if (t.startsWith("nx:1:")) return "v1";
+  if (t.startsWith("nx:2:")) return "v2";
+  return "unknown";
+}
+
 export function ReceivePanel() {
   const [token, setToken] = useState("");
   const [outputPath, setOutputPath] = useState<string | null>(null);
@@ -47,7 +60,12 @@ export function ReceivePanel() {
   const [progress, setProgress] = useState<{ bytes: number; total: number } | null>(null);
   const cancelRef = useRef(false);
 
-  // Parse the token's plaintext-size to show "downloading X MB" UI.
+  const kind = detectTokenKind(token);
+
+  // Parse the v1 token's plaintext-size to show "downloading X MB"
+  // UI. v2 tokens don't carry the size — it's fetched from the
+  // sender's /meta endpoint AFTER mDNS resolves, so we can't
+  // pre-fill it here.
   const tokenSize = useCallback((): number | null => {
     if (!token.startsWith("nx:1:")) return null;
     try {
@@ -63,7 +81,6 @@ export function ReceivePanel() {
 
   const onPickOutput = useCallback(async () => {
     try {
-      // Suggest a default filename based on the token's metadata.
       const suggested = expectedSize != null
         ? defaultFilenameFromToken(token)
         : "received.bin";
@@ -88,9 +105,24 @@ export function ReceivePanel() {
     setProgress({ bytes: 0, total: expectedSize ?? 0 });
     cancelRef.current = false;
     try {
-      const r = await tauriInvoke<ReceiveResp>("p2p_receive_cmd", {
-        req: { token: token.trim(), output_path: outputPath },
-      });
+      // Dispatch on token version. v1 = Cloudflare (existing).
+      // v2 = Direct LAN, with 5s mDNS browse timeout (the
+      // user sees the "⟳ searching LAN…" state for up to 5s
+      // before the backend returns a timeout error).
+      let r: ReceiveResp;
+      if (kind === "v2") {
+        r = await tauriInvoke<ReceiveResp>("p2p_receive_direct_cmd", {
+          req: {
+            token: token.trim(),
+            output_path: outputPath,
+            timeout_secs: 5,
+          },
+        });
+      } else {
+        r = await tauriInvoke<ReceiveResp>("p2p_receive_cmd", {
+          req: { token: token.trim(), output_path: outputPath },
+        });
+      }
       if (cancelRef.current) {
         setError("cancelled");
         return;
@@ -102,7 +134,7 @@ export function ReceivePanel() {
       setBusy(false);
       setProgress(null);
     }
-  }, [token, outputPath, expectedSize]);
+  }, [token, outputPath, expectedSize, kind]);
 
   const outputLabel = outputPath ? outputPath.split("/").pop() : null;
 
@@ -113,6 +145,11 @@ export function ReceivePanel() {
         <span>Receive from a friend</span>
         <span className="text-zinc-600">·</span>
         <span className="text-zinc-500">SPAKE2 + AES-GCM</span>
+        {kind === "v2" && (
+          <span className="ml-auto px-1.5 py-0.5 border border-matrix-500 text-matrix-400 text-[9px] tracking-widest">
+            ▎ direct LAN (mDNS)
+          </span>
+        )}
       </div>
 
       {/* Token input */}
@@ -124,12 +161,33 @@ export function ReceivePanel() {
           value={token}
           onChange={(e) => setToken(e.target.value)}
           rows={3}
-          placeholder="nx:1:..."
-          className="w-full bg-bg-surface text-zinc-300 border border-bg-border p-2 text-[10px] font-mono break-all"
+          placeholder={
+            kind === "v2"
+              ? "nx:2:direct:<hash>:<code>    ← Direct Mode (LAN)"
+              : kind === "unknown" && token.length > 0
+              ? "⚠ token must start with nx:1: (cloudflared) or nx:2: (direct)"
+              : "nx:1:... or nx:2:..."
+          }
+          className={`w-full bg-bg-surface text-zinc-300 border p-2 text-[10px] font-mono break-all ${
+            kind === "unknown" && token.length > 0
+              ? "border-err"
+              : "border-bg-border"
+          }`}
         />
-        {expectedSize != null && (
+        {kind === "v1" && expectedSize != null && (
           <div className="text-[10px] text-matrix-500 mt-2">
             ✓ parsed · {prettySize(expectedSize)} incoming
+          </div>
+        )}
+        {kind === "v2" && (
+          <div className="text-[10px] text-zinc-500 mt-2">
+            ▎ Direct Mode · sender discovered via mDNS on the LAN
+            (5s timeout)
+          </div>
+        )}
+        {kind === "unknown" && token.length > 0 && (
+          <div className="text-[10px] text-err mt-2">
+            ⚠ unknown token format — must be nx:1: or nx:2:
           </div>
         )}
       </div>
@@ -162,11 +220,29 @@ export function ReceivePanel() {
       {/* Action button */}
       <button
         onClick={onReceive}
-        disabled={!token || !outputPath || busy}
+        disabled={!token || !outputPath || busy || kind === "unknown"}
         className="px-3 py-2 border-2 border-cyan-500 text-cyan-400 hover:bg-cyan-500/10 disabled:border-zinc-700 disabled:text-zinc-600 text-[11px] tracking-[0.3em] uppercase"
       >
-        {busy ? "⟳ downloading…" : "⤵ start receiving"}
+        {busy
+          ? kind === "v2"
+            ? "⟳ searching LAN…"
+            : "⟳ downloading…"
+          : kind === "v2"
+          ? "⤵ start receiving (LAN)"
+          : "⤵ start receiving"}
       </button>
+
+      {/* Retry button — only shown on error after a v2 mDNS
+          timeout, so the user can recover without re-typing the
+          token. */}
+      {error && !busy && kind === "v2" && (
+        <button
+          onClick={onReceive}
+          className="px-3 py-1.5 border border-matrix-500 text-matrix-400 hover:bg-matrix-500/10 text-[10px] tracking-[0.3em] uppercase"
+        >
+          ⟲ retry mDNS browse
+        </button>
+      )}
 
       {/* Progress bar (linear, since we have byte counts) */}
       {progress && (
@@ -226,6 +302,9 @@ function prettySize(n: number): string {
 }
 
 function defaultFilenameFromToken(token: string): string {
+  // Only v1 tokens embed a filename hint. v2 tokens (Direct
+  // Mode) don't carry that field — we fall back to a generic
+  // name and the user can rename before saving.
   if (!token.startsWith("nx:1:")) return "received.bin";
   try {
     const b64 = token.slice(5);

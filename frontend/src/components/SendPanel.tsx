@@ -1,18 +1,24 @@
 "use client";
 
 /**
- * SendPanel — UI for the "send a file to a friend over a
- * Quick Cloudflare Tunnel" feature (Sprint 5.0 demo).
+ * SendPanel — UI for the "send a file to a friend" feature.
+ *
+ * Sprint 5.5.2: reads the current TransportMode from the app
+ * config and shows a small badge so the user knows whether the
+ * generated token will be a v1 (Cloudflare) or v2 (Direct LAN)
+ * token. The actual dispatch happens server-side in
+ * `start_sender`, which reads the same config.
  *
  * Flow:
- *   1. User picks a file (or drags one in).
- *   2. Clicks "GENERATE CODE" — backend spawns cloudflared +
- *      axum server, returns a token.
+ *   1. User picks a file.
+ *   2. Clicks "GENERATE CODE" — backend dispatches on the
+ *      current transport mode (Quick / Named / Direct) and
+ *      returns a v1 or v2 token accordingly.
  *   3. We show the 4-word code in big letters and the full
- *      token in a copyable textbox. The user shares both with
- *      the receiver.
+ *      token (v1 or v2) in a copyable textbox.
  *   4. When the user clicks ABORT or navigates away, we call
- *      `p2p_send_abort_cmd` to kill the tunnel.
+ *      `p2p_send_abort_cmd` to kill the tunnel / unregister
+ *      the mDNS service.
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
@@ -40,13 +46,38 @@ interface SendStartResp {
   file_size: number;
 }
 
+interface TunnelConfigInfo {
+  mode: "quick" | "named" | "direct";
+  hostname: string | null;
+  has_token: boolean;
+}
+
 export function SendPanel() {
   const [picked, setPicked] = useState<string | null>(null);
   const [resp, setResp] = useState<SendStartResp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState<"token" | "code" | null>(null);
+  const [cfg, setCfg] = useState<TunnelConfigInfo | null>(null);
   const abortInFlight = useRef(false);
+
+  // Read the current transport mode on mount so the user sees
+  // which kind of token they'll generate.
+  useEffect(() => {
+    (async () => {
+      try {
+        const c = await tauriInvoke<TunnelConfigInfo>(
+          "p2p_get_tunnel_config_cmd"
+        );
+        setCfg(c);
+      } catch {
+        // Fall back silently — the backend always returns the
+        // current config (defaults to Quick if file missing).
+      }
+    })();
+  }, []);
+
+  const tokenKind = resp ? (resp.token.startsWith("nx:2:") ? "v2" : "v1") : null;
 
   const onPick = useCallback(async () => {
     try {
@@ -127,7 +158,18 @@ export function SendPanel() {
         <span>⤴</span>
         <span>Send to a friend</span>
         <span className="text-zinc-600">·</span>
-        <span className="text-zinc-500">Quick Cloudflare + E2E encrypted</span>
+        <span className="text-zinc-500">
+          {cfg?.mode === "direct"
+            ? "Direct LAN (mDNS) + E2E encrypted"
+            : cfg?.mode === "named"
+            ? "Named Tunnel + E2E encrypted"
+            : "Quick Cloudflare + E2E encrypted"}
+        </span>
+        {cfg?.mode === "direct" && (
+          <span className="ml-auto px-1.5 py-0.5 border border-matrix-500 text-matrix-400 text-[9px] tracking-widest">
+            ▎ direct LAN
+          </span>
+        )}
       </div>
 
       {/* File picker */}
@@ -200,10 +242,9 @@ export function SendPanel() {
               {resp.token}
             </div>
             <div className="text-[9px] text-zinc-600 tracking-wider mt-2">
-              The token includes the cloudflared URL, the code, the file
-              hash, and the SHA-256. The receiver just needs this and the
-              4-word code (which is also inside the token, so the code
-              alone is enough for humans).
+              {tokenKind === "v2"
+                ? "Direct Mode v2 token: service hash + code. The receiver's mDNS browse finds your machine on the LAN — no URL, no Cloudflare. Requires same Wi-Fi."
+                : "v1 token includes the cloudflared URL, the code, the file hash, and SHA-256. The receiver just needs this and the 4-word code."}
             </div>
           </div>
 
