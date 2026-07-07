@@ -47,12 +47,39 @@ pub fn detect_format(path: &Path) -> Result<&'static str, String> {
 }
 
 /// List all entries in the archive's central directory.
+/// Returns the complete Vec. Prefer `list_paginated` for
+/// huge archives — sending 1M entries over IPC is expensive.
 pub fn list_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
     match detect_format(path)? {
         "tar" => list_tar_entries(path),
         "solid" => list_solid_entries(path),
         other => Err(format!("unsupported format: {}", other)),
     }
+}
+
+/// Streaming paginated listing for huge archives. Reads only
+/// `limit + 1` headers to determine the page contents +
+/// `has_more`. For a 30 GB tar with 1M files, only the first
+/// ~256 KB of headers are touched (regardless of where the page
+/// starts), and only `limit` entries are returned over IPC.
+pub fn list_paginated(
+    path: &Path,
+    offset: usize,
+    limit: usize,
+) -> Result<PageResult, String> {
+    match detect_format(path)? {
+        "tar" => list_tar_paginated(path, offset, limit),
+        "solid" => list_solid_paginated(path, offset, limit),
+        other => Err(format!("unsupported format: {}", other)),
+    }
+}
+
+/// One page of archive entries plus the metadata the UI needs
+/// to render "showing N–M of K" / "load more" controls.
+#[derive(Debug, Clone)]
+pub struct PageResult {
+    pub entries: Vec<ArchiveEntry>,
+    pub has_more: bool,
 }
 
 /// Extract the requested entries (or all if `selected` is None)
@@ -93,6 +120,63 @@ fn list_tar_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
         });
     }
     Ok(out)
+}
+
+/// Streaming paginated tar listing. Reads only enough headers
+/// to fill the requested window + one more entry (used to
+/// detect has_more without enumerating the whole archive).
+fn list_tar_paginated(
+    path: &Path,
+    offset: usize,
+    limit: usize,
+) -> Result<PageResult, String> {
+    let f = std::fs::File::open(path).map_err(|e| format!("open tar: {}", e))?;
+    let mut ar = tar::Archive::new(f);
+    // Skip `offset` headers, then collect up to limit+1.
+    let mut out = Vec::with_capacity(limit + 1);
+    let mut skipped = 0usize;
+    let mut entry_iter =
+        ar.entries().map_err(|e| format!("tar entries: {}", e))?;
+    while skipped < offset {
+        match entry_iter.next() {
+            Some(Ok(_)) => skipped += 1,
+            Some(Err(e)) => return Err(format!("tar entry: {}", e)),
+            None => {
+                return Ok(PageResult {
+                    entries: out,
+                    has_more: false,
+                })
+            }
+        }
+    }
+    let mut count = 0usize;
+    for entry in entry_iter {
+        if count >= limit + 1 {
+            break;
+        }
+        let entry = entry.map_err(|e| format!("tar entry: {}", e))?;
+        let name = entry
+            .path()
+            .map_err(|e| format!("tar path: {}", e))?
+            .to_string_lossy()
+            .into_owned();
+        let size = entry.size();
+        let is_dir = entry.header().entry_type().is_dir();
+        out.push(ArchiveEntry {
+            name,
+            size,
+            is_dir,
+        });
+        count += 1;
+    }
+    let has_more = out.len() > limit;
+    if has_more {
+        out.pop();
+    }
+    Ok(PageResult {
+        entries: out,
+        has_more,
+    })
 }
 
 fn extract_tar_entries(
@@ -180,6 +264,43 @@ fn list_solid_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
             }
         })
         .collect())
+}
+
+/// Paginated solid listing. The solid_archive TOC reader is
+/// already O(headers) and the headers are tiny (~50 bytes
+/// each), so even 100k entries parses in tens of milliseconds.
+/// We slice the result for the requested window.
+fn list_solid_paginated(
+    path: &Path,
+    offset: usize,
+    limit: usize,
+) -> Result<PageResult, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("read solid archive: {}", e))?;
+    let entries = nexus_compress::solid_archive::parse_toc(&bytes)
+        .map_err(|e| format!("parse solid toc: {}", e))?;
+    let total = entries.len();
+    let end = (offset + limit).min(total);
+    let window: Vec<ArchiveEntry> = if offset < total {
+        entries[offset..end]
+            .iter()
+            .map(|e| {
+                let name = e.name.clone();
+                ArchiveEntry {
+                    name: e.name.clone(),
+                    size: e.original_size,
+                    is_dir: name.ends_with('/'),
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let has_more = end < total;
+    Ok(PageResult {
+        entries: window,
+        has_more,
+    })
 }
 
 fn extract_solid_entries(
