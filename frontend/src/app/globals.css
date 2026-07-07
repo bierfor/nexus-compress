@@ -1,0 +1,118 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ----------------------------------------------------------------------------
+ * Global base — the dark cyberpunk feel starts here.
+ * Pure black background, monospace fallback for data, no rounded corners
+ * (industrial look — every radius is intentional, not aesthetic).
+ * --------------------------------------------------------------------------*/
+
+html, body {
+  background: #0a0a0c;
+  color: #e0e0e5;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  -webkit-font-smoothing: antialiased;
+  /* Disable the default rubber-band scroll on macOS — the cyberpunk UI
+   * wants fixed boundaries, not bouncy content. */
+  overscroll-behavior: none;
+}
+
+/* Disable user-select on the chrome (title bar, status bar) so the
+ * window decoration can be implemented as a draggable region. */
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The "drag region" used by Tauri frameless windows. Anything with
+ * `data-tauri-drag-region` is draggable; the OS moves the window when
+ * the user clicks and drags. This is how we replace the missing title
+ * bar in a frameless setup. */
+[data-tauri-drag-region] {
+  cursor: grab;
+}
+[data-tauri-drag-region]:active {
+  cursor: grabbing;
+}
+
+/* Card / panel — semi-transparent surface over the base, with a
+ * thin border. The 1px border is the entire visual frame; no shadow. */
+.panel {
+  background: #121215;
+  border: 1px solid #2a2a30;
+}
+
+/* The dropzone — the visual centerpiece. Dashed cyan border,
+ * gentle pulse to signal "drop here". */
+.dropzone {
+  border: 2px dashed #00f0ff;
+  background: #121215;
+  transition: all 0.2s ease;
+}
+.dropzone.dragover {
+  border-style: solid;
+  background: #1a1a1f;
+  box-shadow: inset 0 0 32px rgba(0, 240, 255, 0.15);
+}
+
+/* Stat / metric — used by the Entropy Monitor. Big monospace numbers,
+ * small uppercase label, optional glow for the live value. */
+.metric-label {
+  @apply text-[10px] tracking-[0.2em] uppercase text-zinc-500;
+}
+.metric-value {
+  @apply text-2xl font-mono text-cyan-400;
+}
+.metric-value-glow {
+  text-shadow: 0 0 6px #00f0ff, 0 0 12px rgba(0, 240, 255, 0.5);
+}
+
+/* Buttons — flat, no rounded corners, with a thin border that turns
+ * cyan on hover. The cyberpunk "press me" feel. */
+.btn {
+  @apply px-4 py-2 border border-zinc-700 text-zinc-200 font-mono text-sm
+         uppercase tracking-wider transition-all duration-150
+         hover:border-cyan-500 hover:text-cyan-400 hover:bg-zinc-900
+         active:translate-y-px;
+}
+.btn-primary {
+  @apply border-cyan-500 text-cyan-400 hover:bg-cyan-500/10;
+}
+.btn-magenta {
+  @apply border-magenta-500 text-magenta-400 hover:bg-magenta-500/10;
+}
+
+/* Range slider — used by the Fast/Premium Config Panel. */
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 2px;
+  background: #2a2a30;
+  outline: none;
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: #00f0ff;
+  cursor: pointer;
+  box-shadow: 0 0 8px #00f0ff;
+}
+.slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: #00f0ff;
+  cursor: pointer;
+  border: none;
+  box-shadow: 0 0 8px #00f0ff;
+}
+
+/* Scrollbar — thin, dark, with cyan accent on hover. Default macOS
+ * scrollbars are too rounded and bright for this aesthetic. */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #0a0a0c; }
+::-webkit-scrollbar-thumb { background: #2a2a30; }
+::-webkit-scrollbar-thumb:hover { background: #00f0ff; }

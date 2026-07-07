@@ -1,0 +1,39 @@
+[package]
+name = "nexus-rar"
+version = "0.1.0"
+edition = "2021"
+description = "NexusRAR — Tauri 2.x desktop GUI for NexusCompress"
+license = "MIT"
+default-run = "nexus-rar"
+
+# The library is consumed by path: the engine is in the workspace
+# root (`../`), so `nexus-compress` resolves to the existing crate
+# without duplication. Any local change to the engine is picked up
+# by `cargo build -p nexus-rar` automatically.
+[dependencies]
+nexus-compress = { path = "..", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The `custom-protocol` feature activates production mode: instead
+# of fetching from `devUrl`, the `frontendDist` directory is embedded
+# into the binary at compile time. Without this, the Tauri build
+# script sets `dev = true` and the app tries to load from the dev
+# server, which doesn't exist when running the release binary
+# directly. This is the single most-baffling Tauri 2.x config.
+tauri = { version = "2", features = ["custom-protocol"] }
+tauri-plugin-dialog = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = ["codegen"] }
+
+[features]
+# Default feature is empty: the binary builds without Tauri (for
+# `cargo check` on the lib side). The GUI is opt-in.
+default = []
+tauri-app = []  # marker feature; kept for forward compat
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

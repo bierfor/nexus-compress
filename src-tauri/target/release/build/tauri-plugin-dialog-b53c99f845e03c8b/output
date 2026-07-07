@@ -1,0 +1,7 @@
+cargo:rerun-if-changed=permissions
+cargo:PERMISSION_FILES_PATH=/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/tauri-plugin-dialog-b53c99f845e03c8b/out/tauri-plugin-dialog-permission-files
+cargo:rerun-if-env-changed=REMOVE_UNUSED_COMMANDS
+cargo:GLOBAL_API_SCRIPT_PATH=/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-plugin-dialog-2.7.1/api-iife.js
+cargo:rustc-check-cfg=cfg(mobile)
+cargo:rustc-check-cfg=cfg(desktop)
+cargo:rustc-cfg=desktop

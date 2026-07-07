@@ -1,0 +1,21 @@
+import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "NexusRAR",
+  description: "Hybrid compressor — LZ77 + rANS + dict codec",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en" className="dark">
+      <body className="bg-bg-base text-zinc-200 antialiased min-h-screen">
+        {children}
+      </body>
+    </html>
+  );
+}

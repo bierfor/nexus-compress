@@ -1,0 +1,14 @@
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/deps/thiserror-aa42c8806d881ae0.d: /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/thiserror-a70e6d0b4718efe0/out/private.rs
+
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/deps/libthiserror-aa42c8806d881ae0.rlib: /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/thiserror-a70e6d0b4718efe0/out/private.rs
+
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/deps/libthiserror-aa42c8806d881ae0.rmeta: /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/thiserror-a70e6d0b4718efe0/out/private.rs
+
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs:
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/thiserror-a70e6d0b4718efe0/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/thiserror-a70e6d0b4718efe0/out

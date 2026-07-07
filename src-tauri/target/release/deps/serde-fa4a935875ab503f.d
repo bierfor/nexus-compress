@@ -1,0 +1,14 @@
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/deps/serde-fa4a935875ab503f.d: /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/serde-60717590f982f87b/out/private.rs
+
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/deps/libserde-fa4a935875ab503f.rlib: /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/serde-60717590f982f87b/out/private.rs
+
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/deps/libserde-fa4a935875ab503f.rmeta: /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/serde-60717590f982f87b/out/private.rs
+
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/serde-60717590f982f87b/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/build/serde-60717590f982f87b/out

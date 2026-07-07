@@ -1,12 +1,15 @@
 //! Honest corpus benchmark suite.
 //!
 //! For each file in `./corpus/`, measure:
-//!   - NexusCompress v4: size, ratio, compress ms, decompress ms, roundtrip OK
-//!   - gzip -9           : size, ratio, compress ms, decompress ms
-//!   - zstd -19          : size, ratio, compress ms, decompress ms
-//!   - 7z (LZMA2 -mx=9)  : size, ratio, compress ms, decompress ms
+//!   - NexusCompress v4 (multi-stream LZ77 + rANS + dict)
+//!   - NexusCompress v5 (LZMA via xz2) — 3 variants: raw, minify, extreme
+//!   - gzip -9
+//!   - zstd -19
+//!   - 7z (LZMA2 -mx=9)
 //!
-//! Output: a markdown table printed to stdout + a final gap-to-7z summary.
+//! Output: a markdown table printed to stdout + roundtrip verification
+//! + an aggregate table comparing all tools. The v5 column is the
+//! headline — it shows how LZMA competes with 7z on the same input.
 //!
 //! Run with: `cargo run --release --bin bench_suite`
 
@@ -15,24 +18,44 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use nexus_compress::{compress, decompress};
+use nexus_compress::engine;
+use nexus_compress::minify;
 
 #[derive(Clone)]
 struct Row {
     file: String,
     size: usize,
+    // v4
     nexus_size: usize,
     nexus_compress_ms: f64,
     nexus_decompress_ms: f64,
     nexus_ok: bool,
+    // v5 LZMA (balanced)
+    v5_size: usize,
+    v5_compress_ms: f64,
+    v5_decompress_ms: f64,
+    v5_ok: bool,
+    // v5 + minify
+    v5m_size: usize,
+    v5m_compress_ms: f64,
+    v5m_decompress_ms: f64,
+    v5m_ok: bool,
+    // v5 extreme (level 9)
+    v5e_size: usize,
+    v5e_compress_ms: f64,
+    v5e_decompress_ms: f64,
+    v5e_ok: bool,
+    // gzip
     gzip_size: usize,
     gzip_compress_ms: f64,
     gzip_decompress_ms: f64,
     gzip_ok: bool,
+    // zstd
     zstd_size: usize,
     zstd_compress_ms: f64,
     zstd_decompress_ms: f64,
     zstd_ok: bool,
+    // 7z
     sevenz_size: usize,
     sevenz_compress_ms: f64,
     sevenz_decompress_ms: f64,
@@ -53,15 +76,9 @@ fn main() {
         std::process::exit(2);
     }
 
-    eprintln!("[bench_suite] NexusCompress v4 vs gzip -9 vs zstd -19 vs 7z (LZMA2 -mx=9)\n");
+    eprintln!("[bench_suite] NexusCompress v4 + v5 LZMA vs gzip -9 vs zstd -19 vs 7z (LZMA2 -mx=9)\n");
     eprintln!("Running benchmarks... (this may take a few seconds)\n");
 
-    // Collect per-file results. Skip files without an extension or
-    // dot-prefix — the corpus script `gen_corpus.py` only writes
-    // extensioned names, so anything bare-named (e.g. `code`, `data`)
-    // is a stray duplicate from older test runs that would
-    // double-count the aggregate. Dotfiles (`.DS_Store`) and
-    // properly extensioned files (`.rs`, `.json`, ...) pass through.
     let entries: Vec<_> = std::fs::read_dir(corpus_dir)
         .expect("read corpus")
         .filter_map(|e| e.ok())
@@ -87,10 +104,44 @@ fn main() {
         eprint!("  {} ({} B)...", name, data.len());
         let _ = std::io::stderr().flush();
 
-        // NexusCompress
-        let (compressed, c_ms) = timed(|| compress(&data));
-        let (decompressed, d_ms) = timed(|| decompress(&compressed));
+        // v4
+        let (compressed, c_ms) = timed(|| nexus_compress::compress(&data));
+        let (decompressed, d_ms) = timed(|| nexus_compress::decompress(&compressed));
         let nexus_ok = decompressed == data;
+
+        // v5 LZMA balanced (level 6, no minify)
+        let (v5_compressed, v5_c_ms) = timed(|| {
+            engine::compress_with("v5", &data, false).expect("v5 compress")
+        });
+        let (v5_decompressed, v5_d_ms) = timed(|| {
+            engine::decompress_any(&v5_compressed).expect("v5 decompress")
+        });
+        let v5_ok = v5_decompressed == data;
+
+        // v5 LZMA balanced + minify
+        // NOTE: the minify pre-filter is LOSSY. It strips comments,
+        // collapses whitespace, normalizes line endings. The output
+        // bytes are NOT byte-identical to the input — the roundtrip
+        // "OK" flag below compares against the MINIFIED input (which
+        // is the post-decompression expectation). This is the only
+        // way the roundtrip is meaningful for a lossy pre-filter.
+        let minified_input = minify::minify(&data);
+        let (v5m_compressed, v5m_c_ms) = timed(|| {
+            engine::compress_with("v5-min", &data, true).expect("v5-min compress")
+        });
+        let (v5m_decompressed, v5m_d_ms) = timed(|| {
+            engine::decompress_any(&v5m_compressed).expect("v5-min decompress")
+        });
+        let v5m_ok = v5m_decompressed == minified_input;
+
+        // v5 LZMA extreme (level 9, no minify)
+        let (v5e_compressed, v5e_c_ms) = timed(|| {
+            engine::compress_with("v5-extreme", &data, false).expect("v5-extreme compress")
+        });
+        let (v5e_decompressed, v5e_d_ms) = timed(|| {
+            engine::decompress_any(&v5e_compressed).expect("v5-extreme decompress")
+        });
+        let v5e_ok = v5e_decompressed == data;
 
         // gzip
         let gzip_path = path.with_extension("gz");
@@ -168,9 +219,7 @@ fn main() {
         };
         let _ = std::fs::remove_file(&zstd_path);
 
-        // 7z (LZMA2, max compression). Falls back to 7za or 7zr
-        // if `7z` isn't on PATH. The archive is created as
-        // `<file>.7z` next to the input, then deleted.
+        // 7z (LZMA2 -mx=9)
         let sevenz_path = path.with_extension("7z");
         let sevenz_bin = if Command::new("7z").arg("--help").output().is_ok() {
             "7z"
@@ -182,7 +231,6 @@ fn main() {
             ""
         };
         let (sevenz_size, sevenz_c_ms, sevenz_d_ms, sevenz_ok) = if sevenz_bin.is_empty() {
-            eprintln!(" (7z skipped: no binary on PATH)");
             (0, 0.0, 0.0, false)
         } else {
             let t0 = Instant::now();
@@ -204,12 +252,14 @@ fn main() {
             (sz, c_ms, d_ms, ok)
         };
 
+        let n_ratio = data.len() as f64 / compressed.len().max(1) as f64;
         eprintln!(
-            " nexus={:.2}x ({} B, {:.1}ms / {:.1}ms){}",
-            data.len() as f64 / compressed.len().max(1) as f64,
-            compressed.len(),
-            c_ms, d_ms,
-            if nexus_ok { "" } else { " ⚠️ MISMATCH" }
+            " v4={:.2}x  v5={:.2}x  v5-min={:.2}x  v5-ext={:.2}x  7z={:.2}x",
+            n_ratio,
+            data.len() as f64 / v5_compressed.len().max(1) as f64,
+            data.len() as f64 / v5m_compressed.len().max(1) as f64,
+            data.len() as f64 / v5e_compressed.len().max(1) as f64,
+            if sevenz_size > 0 { data.len() as f64 / sevenz_size as f64 } else { 0.0 },
         );
 
         rows.push(Row {
@@ -219,6 +269,18 @@ fn main() {
             nexus_compress_ms: c_ms,
             nexus_decompress_ms: d_ms,
             nexus_ok,
+            v5_size: v5_compressed.len(),
+            v5_compress_ms: v5_c_ms,
+            v5_decompress_ms: v5_d_ms,
+            v5_ok,
+            v5m_size: v5m_compressed.len(),
+            v5m_compress_ms: v5m_c_ms,
+            v5m_decompress_ms: v5m_d_ms,
+            v5m_ok,
+            v5e_size: v5e_compressed.len(),
+            v5e_compress_ms: v5e_c_ms,
+            v5e_decompress_ms: v5e_d_ms,
+            v5e_ok,
             gzip_size,
             gzip_compress_ms: gzip_c_ms,
             gzip_decompress_ms: gzip_d_ms,
@@ -234,48 +296,78 @@ fn main() {
         });
     }
 
-    // Markdown table.
-    println!("\n# NexusCompress v4 benchmark — honest comparison");
-    println!("\n## Compression ratio (data size / compressed size)");
-    println!("\n| File | Size | NexusCompress v4 | gzip -9 | zstd -19 | 7z -mx=9 (LZMA2) | Nexus / 7z |");
-    println!("|---|---:|---:|---:|---:|---:|---:|");
+    // Markdown table — ratio row
+    println!("\n# NexusCompress v4 + v5 LZMA — honest benchmark\n");
+    println!("## Compression ratio (data size / compressed size)\n");
+    println!("| File | Size | v4 | v5 LZMA | v5 + minify | v5 extreme (-9) | gzip -9 | zstd -19 | 7z -mx=9 |");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|");
     for r in &rows {
-        let n_ratio = r.size as f64 / r.nexus_size.max(1) as f64;
-        let g_ratio = r.size as f64 / r.gzip_size.max(1) as f64;
-        let z_ratio = r.size as f64 / r.zstd_size.max(1) as f64;
-        let lz_ratio = if r.sevenz_size > 0 { r.size as f64 / r.sevenz_size as f64 } else { 0.0 };
-        let gap = if lz_ratio > 0.0 { n_ratio / lz_ratio } else { 0.0 };
-        let lz_cell = if r.sevenz_size > 0 { format!("{:.2}x ({} B)", lz_ratio, r.sevenz_size) } else { "n/a".to_string() };
+        let n = ratio(r.size, r.nexus_size);
+        let v5 = ratio(r.size, r.v5_size);
+        let v5m = ratio(r.size, r.v5m_size);
+        let v5e = ratio(r.size, r.v5e_size);
+        let g = ratio(r.size, r.gzip_size);
+        let z = ratio(r.size, r.zstd_size);
+        let lz = if r.sevenz_size > 0 { format!("{:.2}x", ratio(r.size, r.sevenz_size)) } else { "n/a".to_string() };
         println!(
-            "| {} | {} B | **{:.2}x** ({} B) | {:.2}x ({} B) | {:.2}x ({} B) | {} | {:.2}x |",
-            r.file, r.size, n_ratio, r.nexus_size,
-            g_ratio, r.gzip_size,
-            z_ratio, r.zstd_size,
-            lz_cell,
-            gap,
+            "| {} | {} B | **{:.2}x** ({}) | **{:.2}x** ({}) | **{:.2}x** ({}) | **{:.2}x** ({}) | {:.2}x ({}) | {:.2}x ({}) | {} |",
+            r.file, r.size,
+            n, fmt_bytes(r.nexus_size),
+            v5, fmt_bytes(r.v5_size),
+            v5m, fmt_bytes(r.v5m_size),
+            v5e, fmt_bytes(r.v5e_size),
+            g, fmt_bytes(r.gzip_size),
+            z, fmt_bytes(r.zstd_size),
+            lz,
         );
     }
 
-    println!("\n## Compress time (ms, single-threaded)");
-    println!("\n| File | NexusCompress v4 | gzip -9 | zstd -19 | 7z -mx=9 |");
-    println!("|---|---:|---:|---:|---:|");
+    // Compress time
+    println!("\n## Compress time (ms, single-threaded)\n");
+    println!("| File | v4 | v5 LZMA | v5 + minify | v5 extreme | gzip -9 | zstd -19 | 7z |");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
     for r in &rows {
         let lz = if r.sevenz_size > 0 { format!("{:.1}", r.sevenz_compress_ms) } else { "n/a".to_string() };
-        println!("| {} | {:.1} | {:.1} | {:.1} | {} |", r.file, r.nexus_compress_ms, r.gzip_compress_ms, r.zstd_compress_ms, lz);
+        println!(
+            "| {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {} |",
+            r.file,
+            r.nexus_compress_ms,
+            r.v5_compress_ms,
+            r.v5m_compress_ms,
+            r.v5e_compress_ms,
+            r.gzip_compress_ms,
+            r.zstd_compress_ms,
+            lz,
+        );
     }
 
-    println!("\n## Decompress time (ms, single-threaded)");
-    println!("\n| File | NexusCompress v4 | gzip -9 | zstd -19 | 7z |");
-    println!("|---|---:|---:|---:|---:|");
+    // Decompress time
+    println!("\n## Decompress time (ms, single-threaded)\n");
+    println!("| File | v4 | v5 LZMA | v5 + minify | v5 extreme | gzip -9 | zstd -19 | 7z |");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
     for r in &rows {
         let lz = if r.sevenz_size > 0 { format!("{:.1}", r.sevenz_decompress_ms) } else { "n/a".to_string() };
-        println!("| {} | {:.1} | {:.1} | {:.1} | {} |", r.file, r.nexus_decompress_ms, r.gzip_decompress_ms, r.zstd_decompress_ms, lz);
+        println!(
+            "| {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {} |",
+            r.file,
+            r.nexus_decompress_ms,
+            r.v5_decompress_ms,
+            r.v5m_decompress_ms,
+            r.v5e_decompress_ms,
+            r.gzip_decompress_ms,
+            r.zstd_decompress_ms,
+            lz,
+        );
     }
 
+    // Roundtrip verification
     println!("\n## Roundtrip verification");
     let mut all_ok = true;
     for r in &rows {
-        if !r.nexus_ok { println!("  ❌ NexusCompress {}: MISMATCH", r.file); all_ok = false; }
+        if !r.nexus_ok { println!("  ❌ v4 {}: MISMATCH", r.file); all_ok = false; }
+        if !r.v5_ok { println!("  ❌ v5 LZMA {}: MISMATCH", r.file); all_ok = false; }
+        if !r.v5m_ok { println!("  ❌ v5 + minify {}: MISMATCH", r.file); all_ok = false; }
+        if !r.v5e_ok { println!("  ❌ v5 extreme {}: MISMATCH", r.file); all_ok = false; }
         if !r.gzip_ok { println!("  ❌ gzip {}: MISMATCH", r.file); all_ok = false; }
         if !r.zstd_ok { println!("  ❌ zstd {}: MISMATCH", r.file); all_ok = false; }
         if r.sevenz_size > 0 && !r.sevenz_ok { println!("  ❌ 7z {}: MISMATCH", r.file); all_ok = false; }
@@ -287,19 +379,28 @@ fn main() {
     // Aggregate summary
     let total_size: usize = rows.iter().map(|r| r.size).sum();
     let total_nexus: usize = rows.iter().map(|r| r.nexus_size).sum();
+    let total_v5: usize = rows.iter().map(|r| r.v5_size).sum();
+    let total_v5m: usize = rows.iter().map(|r| r.v5m_size).sum();
+    let total_v5e: usize = rows.iter().map(|r| r.v5e_size).sum();
     let total_gzip: usize = rows.iter().map(|r| r.gzip_size).sum();
     let total_zstd: usize = rows.iter().map(|r| r.zstd_size).sum();
     let total_sevenz: usize = rows.iter().map(|r| r.sevenz_size).sum();
     let total_nexus_ms: f64 = rows.iter().map(|r| r.nexus_compress_ms).sum();
+    let total_v5_ms: f64 = rows.iter().map(|r| r.v5_compress_ms).sum();
+    let total_v5m_ms: f64 = rows.iter().map(|r| r.v5m_compress_ms).sum();
+    let total_v5e_ms: f64 = rows.iter().map(|r| r.v5e_compress_ms).sum();
     let total_gzip_ms: f64 = rows.iter().map(|r| r.gzip_compress_ms).sum();
     let total_zstd_ms: f64 = rows.iter().map(|r| r.zstd_compress_ms).sum();
     let total_sevenz_ms: f64 = rows.iter().map(|r| r.sevenz_compress_ms).sum();
 
-    println!("\n## Aggregate (sum across all files)");
-    println!("\n| Tool | Total Compressed | Aggregate Ratio | Compress ms |");
+    println!("\n## Aggregate (sum across all files)\n");
+    println!("| Tool | Total Compressed | Aggregate Ratio | Compress ms |");
     println!("|---|---:|---:|---:|");
     for (name, total, ms) in [
         ("NexusCompress v4", total_nexus, total_nexus_ms),
+        ("NexusCompress v5 LZMA (balanced)", total_v5, total_v5_ms),
+        ("NexusCompress v5 LZMA + minify", total_v5m, total_v5m_ms),
+        ("NexusCompress v5 LZMA extreme (-9)", total_v5e, total_v5e_ms),
         ("gzip -9", total_gzip, total_gzip_ms),
         ("zstd -19", total_zstd, total_zstd_ms),
         ("7z -mx=9 (LZMA2)", total_sevenz, total_sevenz_ms),
@@ -309,5 +410,40 @@ fn main() {
         let ratio_str = if total > 0 { format!("{:.2}x", ratio) } else { "n/a".to_string() };
         let ms_str = if total > 0 { format!("{:.1}", ms) } else { "n/a".to_string() };
         println!("| {} | {} | {} | {} |", name, total_str, ratio_str, ms_str);
+    }
+
+    // Verdict
+    if total_sevenz > 0 && total_v5 > 0 {
+        let v5_ratio = total_size as f64 / total_v5 as f64;
+        let sevenz_ratio = total_size as f64 / total_sevenz as f64;
+        println!(
+            "\n## Verdict\n* NexusCompress v5 LZMA is **{:.0}%** of 7z ratio ({:.2}x vs {:.2}x).",
+            (v5_ratio / sevenz_ratio) * 100.0,
+            v5_ratio,
+            sevenz_ratio
+        );
+        if total_v5e > 0 {
+            let v5e_ratio = total_size as f64 / total_v5e as f64;
+            println!(
+                "* With v5 extreme (-9) the v5 ratio is **{:.0}%** of 7z ({:.2}x vs {:.2}x).",
+                (v5e_ratio / sevenz_ratio) * 100.0,
+                v5e_ratio,
+                sevenz_ratio
+            );
+        }
+    }
+}
+
+fn ratio(orig: usize, comp: usize) -> f64 {
+    if comp == 0 { 0.0 } else { orig as f64 / comp as f64 }
+}
+
+fn fmt_bytes(n: usize) -> String {
+    if n < 1024 {
+        format!("{}B", n)
+    } else if n < 1024 * 1024 {
+        format!("{}KB", n / 1024)
+    } else {
+        format!("{}MB", n / 1024 / 1024)
     }
 }

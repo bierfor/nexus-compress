@@ -2,7 +2,7 @@
 name = "nexus-compress"
 version = "0.1.0"
 edition = "2021"
-description = "NexusCompress - hybrid compressor (LZ77 + CM + rANS) with Tauri UI"
+description = "NexusCompress - hybrid compressor (LZ77 + rANS + dict codec)"
 license = "MIT"
 
 [lib]
@@ -12,11 +12,10 @@ path = "src/lib.rs"
 [dependencies]
 rans = "0.4"
 serde = { version = "1", features = ["derive"] }
-# Tauri 2.x — only required for the `nexus-rar` binary. The lib
-# doesn't depend on Tauri (see [features] below).
-tauri = { version = "2", optional = true }
-# Tauri plugins — only used by the `nexus-rar` binary.
-tauri-plugin-dialog = { version = "2", optional = true }
+# v5 LZMA backend. xz2 wraps liblzma (compiled from C source via
+# xz-sys), battle-tested by every Linux distro and used by `xz`.
+# Pure-Rust alternative would be `xz = "0.4"`.
+xz2 = "0.1"
 
 [dev-dependencies]
 serde_json = "1"
@@ -31,63 +30,28 @@ name = "bench_suite"
 path = "src/bin/bench_suite.rs"
 
 [[bin]]
-name = "nexus-rar"
-path = "src/tauri_app.rs"
-required-features = ["tauri-app"]
+name = "dict_train"
+path = "src/bin/dict_train.rs"
 
-[features]
-# Enables the Tauri-based GUI (`nexus-rar` binary). Off by default so
-# the lib + CLI binaries don't pull in webview/webview2/wkwebview deps.
-default = []
-tauri-app = ["dep:tauri", "dep:tauri-plugin-dialog"]
+[[bin]]
+name = "dict_smoke"
+path = "src/bin/dict_smoke.rs"
 
-[build-dependencies]
-# Required for the `nexus-rar` binary. Always-on (not feature-gated)
-# because Cargo's build-dependency resolution doesn't see the
-# package features during the build-script phase — gating it
-# would fail the build of the other binaries.
-tauri-build = { version = "2", default-features = false }
+[[bin]]
+name = "dict_compare"
+path = "src/bin/dict_compare.rs"
 
-[[bench]]
-name = "bench"
-path = "benches/bench.rs"
-harness = false
-
-[[example]]
-name = "inspect_cdc"
-path = "examples/inspect_cdc.rs"
-
-[[example]]
-name = "cdc_sweep"
-path = "examples/cdc_sweep.rs"
-
-[[example]]
-name = "debug_optimal"
-path = "examples/debug_optimal.rs"
-
-[[example]]
-name = "debug_basic"
-path = "examples/debug_basic.rs"
-
-[[example]]
-name = "debug_real"
-path = "examples/debug_real.rs"
-
-[[example]]
-name = "debug_codec"
-path = "examples/debug_codec.rs"
-
-[[example]]
-name = "debug_lazy_vs_opt"
-path = "examples/debug_lazy_vs_opt.rs"
-
-[[example]]
-name = "inspect_entropy"
-path = "examples/inspect_entropy.rs"
-
-[[example]]
-name = "debug_v3"
-path = "examples/debug_v3.rs"
+# The Tauri-based GUI lives in `src-tauri/` (a separate Cargo
+# package that depends on this crate by path). This keeps the
+# webview deps out of the lib build, and matches the standard
+# Tauri 2.x project layout. To build the GUI:
+#
+#   cd src-tauri && cargo build --release
+#
+# To run the dev loop (Tauri + Next.js hot reload):
+#
+#   cd src-tauri && cargo tauri dev
+#
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,11 @@
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/deps/phf-2c0ebc38a248a022.d: /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/lib.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/map.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/ordered_map.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/ordered_set.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/set.rs
+
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/deps/libphf-2c0ebc38a248a022.rlib: /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/lib.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/map.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/ordered_map.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/ordered_set.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/set.rs
+
+/Users/bierhffor/Documents/333/nexus-compress/src-tauri/target/release/deps/libphf-2c0ebc38a248a022.rmeta: /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/lib.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/map.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/ordered_map.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/ordered_set.rs /Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/set.rs
+
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/lib.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/map.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/ordered_map.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/ordered_set.rs:
+/Users/bierhffor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/phf-0.13.1/src/set.rs:
