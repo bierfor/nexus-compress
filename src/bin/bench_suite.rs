@@ -106,7 +106,8 @@ fn main() {
 
         // v4
         let (compressed, c_ms) = timed(|| nexus_compress::compress(&data));
-        let (decompressed, d_ms) = timed(|| nexus_compress::decompress(&compressed));
+        let (decompressed, d_ms) =
+            timed(|| nexus_compress::decompress(&compressed).expect("v4 decompress"));
         let nexus_ok = decompressed == data;
 
         // v5 LZMA balanced (level 6, no minify)

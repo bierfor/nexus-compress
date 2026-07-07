@@ -356,7 +356,9 @@ pub fn decompress_directory(archive: &[u8], output_dir: &Path) -> Result<Directo
             continue;
         }
         let t0 = Instant::now();
-        let bytes = decompress(payload);
+        let bytes = decompress(payload).map_err(|e| {
+            format!("decompress {} failed: {}", entry.path, e)
+        })?;
         let dt = t0.elapsed().as_secs_f64() * 1000.0;
         // Sanity: recovered length matches what we recorded.
         if bytes.len() as u64 != entry.original_size {

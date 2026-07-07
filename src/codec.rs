@@ -481,17 +481,20 @@ fn read_u32(buf: &[u8], off: &mut usize) -> u32 {
     v
 }
 
-pub fn decompress(input: &[u8]) -> Vec<u8> {
+pub fn decompress(input: &[u8]) -> Result<Vec<u8>, String> {
     let mut cursor = Cursor::new(input);
-    let header = NexusHeader::read(&mut cursor).expect("invalid .nexus header");
-    assert!(
-        header.version == VERSION_V0
-            || header.version == VERSION_V2
-            || header.version == VERSION_V3
-            || header.version == VERSION_V3,
-        "unsupported .nexus version {} (expected {}, {}, or {})",
-        header.version, VERSION_V0, VERSION_V2, VERSION_V3
-    );
+    let header = NexusHeader::read(&mut cursor).map_err(|e| {
+        format!("invalid .nexus header: {:?}", e)
+    })?;
+    if header.version != VERSION_V0
+        && header.version != VERSION_V2
+        && header.version != VERSION_V3
+    {
+        return Err(format!(
+            "unsupported .nexus version {} (expected {}, {}, or {})",
+            header.version, VERSION_V0, VERSION_V2, VERSION_V3
+        ));
+    }
     let mut out = Vec::with_capacity(header.uncompressed_total_size as usize);
 
     // Cache of decoded blocks for Duplicate lookup
@@ -507,7 +510,7 @@ pub fn decompress(input: &[u8]) -> Vec<u8> {
             block_idx, header.block_count, bh.block_type, bh.uncompressed_size, bh.compressed_size, block.len());
         out.extend_from_slice(&block);
     }
-    out
+    Ok(out)
 }
 
 fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType, cache: &mut Vec<Vec<u8>>, _version: u8) -> Vec<u8> {
@@ -738,14 +741,14 @@ mod tests {
                      The quick brown fox jumps over the lazy dog. \
                      The quick brown fox jumps over the lazy dog.";
         let c = compress(data);
-        let d = decompress(&c);
+        let d = decompress(&c).expect("decompress");
         assert_eq!(d, data, "roundtrip mismatch");
     }
 
     #[test]
     fn roundtrip_empty() {
         let c = compress(b"");
-        let d = decompress(&c);
+        let d = decompress(&c).expect("decompress");
         assert_eq!(d, b"");
     }
 
@@ -760,7 +763,7 @@ mod tests {
             v.push(x as u8);
         }
         let c = compress(&v);
-        let d = decompress(&c);
+        let d = decompress(&c).expect("decompress");
         assert_eq!(d, v);
     }
 
@@ -773,7 +776,7 @@ mod tests {
             data.extend_from_slice(phrase);
         }
         let c = compress(&data);
-        let d = decompress(&c);
+        let d = decompress(&c).expect("decompress");
         assert_eq!(d, data, "repetitive roundtrip mismatch");
     }
 
@@ -809,7 +812,7 @@ mod tests {
         // The input is ~1.3 MB, which produces ~325 CDC blocks of 4 KB
         // each. The dedup will mark most of them as duplicates.
         let c = compress(&data);
-        let d = decompress(&c);
+        let d = decompress(&c).expect("decompress");
         assert_eq!(d.len(), data.len(), "decoded length mismatch");
         assert_eq!(d, data, "large-dedup roundtrip mismatch (sprint 2.9 bug)");
     }
@@ -839,7 +842,7 @@ mod tests {
             }
         }
         let c = compress(&data);
-        let d = decompress(&c);
+        let d = decompress(&c).expect("decompress");
         assert_eq!(d.len(), data.len(), "decoded length mismatch");
         assert_eq!(d, data, "6000-block dedup roundtrip mismatch");
     }

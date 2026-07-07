@@ -47,12 +47,30 @@ export function DecompressView({
 }) {
   const [archivePath, setArchivePath] = useState<string | null>(null);
   const [info, setInfo] = useState<ArchiveInfo | null>(null);
-  const [destDir, setDestDir] = useState<string>("~/Downloads");
+  const [destDir, setDestDir] = useState<string>("");
+  const [destInitialized, setDestInitialized] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [pathInput, setPathInput] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Resolve homeDir on mount (with proper slash handling)
+  useEffect(() => {
+    if (!isTauri || destInitialized) return;
+    (async () => {
+      try {
+        const { homeDir, join } = await import("@tauri-apps/api/path");
+        const home = await homeDir();
+        const downloads = await join(home, "Downloads");
+        setDestDir(downloads);
+      } catch {
+        setDestDir("Downloads");
+      } finally {
+        setDestInitialized(true);
+      }
+    })();
+  }, [destInitialized]);
 
   // Peek archive on path change
   useEffect(() => {
@@ -60,7 +78,11 @@ export function DecompressView({
       setInfo(null);
       return;
     }
-    tauriInvoke<ArchiveInfo>("peek_archive_target_cmd", { path: archivePath })
+    // Tauri 2.x single-JSON-arg pattern: backend expects
+    // `{ req: { path } }`, not `{ path }` directly.
+    tauriInvoke<ArchiveInfo>("peek_archive_target_cmd", {
+      req: { path: archivePath },
+    })
       .then(setInfo)
       .catch((e) => {
         setError(String(e?.message ?? e));
@@ -153,7 +175,7 @@ export function DecompressView({
       const r = await tauriInvoke<DecompressResult>("decompress_target_cmd", {
         req: {
           path: archivePath,
-          output_dir: destDir === "~/Downloads" ? null : destDir,
+          output_dir: destDir || null,
         },
       });
       onComplete({
@@ -320,7 +342,7 @@ export function DecompressView({
             <div className="flex items-center gap-3 px-5 py-4 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
               <span className="text-zinc-500 text-[13px]">📁</span>
               <span className="text-white text-[14px] flex-1 truncate font-mono">
-                {destDir}
+                {destDir || "Detectando…"}
               </span>
               <button
                 onClick={onBrowseDest}

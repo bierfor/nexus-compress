@@ -5,7 +5,7 @@ use nexus_compress::{compress, decompress};
 fn roundtrip_small() {
     let data: Vec<u8> = b"hello world! this is a test of the codec. ".repeat(100);
     let compressed = compress(&data);
-    let decompressed = decompress(&compressed);
+    let decompressed = decompress(&compressed).expect("decompress");
     assert_eq!(decompressed, data, "roundtrip failed for small text");
 }
 
@@ -18,7 +18,7 @@ fn roundtrip_random() {
         data.push((s >> 16) as u8);
     }
     let compressed = compress(&data);
-    let decompressed = decompress(&compressed);
+    let decompressed = decompress(&compressed).expect("decompress");
     assert_eq!(decompressed, data, "roundtrip failed for random");
 }
 
@@ -26,7 +26,7 @@ fn roundtrip_random() {
 fn roundtrip_repetitive_small() {
     let data: Vec<u8> = b"the quick brown fox jumps over the lazy dog. ".repeat(10);
     let compressed = compress(&data);
-    let decompressed = decompress(&compressed);
+    let decompressed = decompress(&compressed).expect("decompress");
     assert_eq!(decompressed, data, "roundtrip failed for repetitive 10x");
 }
 
@@ -36,7 +36,7 @@ fn roundtrip_repetitive_threshold() {
     eprintln!("[test] starting 97x");
     let compressed = compress(&data);
     eprintln!("[test] compressed len: {}", compressed.len());
-    let decompressed = decompress(&compressed);
+    let decompressed = decompress(&compressed).expect("decompress");
     eprintln!("[test] decompressed len: {}", decompressed.len());
     assert_eq!(decompressed, data, "roundtrip failed for repetitive 97x");
 }
@@ -45,6 +45,6 @@ fn roundtrip_repetitive_threshold() {
 fn roundtrip_repetitive() {
     let data: Vec<u8> = b"the quick brown fox jumps over the lazy dog. ".repeat(1000);
     let compressed = compress(&data);
-    let decompressed = decompress(&compressed);
+    let decompressed = decompress(&compressed).expect("decompress");
     assert_eq!(decompressed, data, "roundtrip failed for repetitive 1000x");
 }

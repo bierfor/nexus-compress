@@ -1217,13 +1217,17 @@ pub fn decompress_bytes(input: &[u8]) -> ApiResult<DecompressResult> {
     }
 
     let start = Instant::now();
-    // `crate::decompress` is currently infallible — it returns the
-    // raw bytes (possibly wrong on corrupted input). The header
-    // validation happens inside, but a corrupted block would
-    // surface as a panic. Wrap with `catch_unwind` to convert to
-    // a clean error.
+    // Sprint 5.6.4: codec::decompress now returns Result
+    // directly. Still wrap with catch_unwind as a safety net for
+    // any other panics deeper in the decode path.
     let data = match std::panic::catch_unwind(|| crate::decompress(input)) {
-        Ok(d) => d,
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => {
+            return Err(ApiError::new(
+                "decompress.invalid_header",
+                e,
+            ));
+        }
         Err(_) => {
             return Err(ApiError::new(
                 "decompress.corrupted",

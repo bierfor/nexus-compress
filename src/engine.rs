@@ -198,10 +198,12 @@ impl CompressionEngine for V4Engine {
     }
 
     fn decompress(&self, encoded: &[u8]) -> Result<Vec<u8>, String> {
-        // `codec::decompress` is currently infallible — wrap any
-        // panic as a string error so the trait contract holds.
+        // Sprint 5.6.4: codec::decompress now returns Result
+        // directly. Still wrap with catch_unwind as a belt-and-
+        // suspenders safety net for any other panics deeper in
+        // the decode path.
         std::panic::catch_unwind(|| codec::decompress(encoded))
-            .map_err(|_| "v4 decompress panicked (corrupted stream?)".to_string())
+            .map_err(|_| "v4 decompress panicked (corrupted stream?)".to_string())?
     }
 }
 
