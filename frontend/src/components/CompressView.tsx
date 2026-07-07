@@ -72,7 +72,7 @@ const MODES: {
     title: "Balanceado",
     description: "Recomendado. Mejor relación tiempo/tamaño para la mayoría de archivos.",
     stars: 5,
-    backend: "v5",
+    backend: "v5-min",
     lzma: 6,
   },
   {
@@ -81,7 +81,10 @@ const MODES: {
     title: "Ultra",
     description: "Máxima compresión. Más lento, pero ahorra más espacio.",
     stars: 3,
-    backend: "v6",
+    // v6-solid (not v6) — that's the Solid-AST whole-archive
+    // backend that produces the .nxs6 extension. The bare "v6"
+    // backend produces .lz files which is not what users expect.
+    backend: "v6-solid",
     lzma: 9,
   },
 ];
@@ -109,14 +112,19 @@ export function CompressView({
   const [toast, setToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Initialize the destination to the real ~/Downloads path on mount
+  // Initialize the destination to the real ~/Downloads path on mount.
+  // NOTE: homeDir() on macOS returns "/Users/<user>" WITHOUT a trailing
+  // slash, so we must add it explicitly. Otherwise we end up with
+  // "/Users/bierhfforDownloads" (one word, broken path).
   useEffect(() => {
     if (!isTauri || destInitialized) return;
     (async () => {
       try {
-        const { homeDir } = await import("@tauri-apps/api/path");
+        const { homeDir, join } = await import("@tauri-apps/api/path");
         const home = await homeDir();
-        setDestDir(`${home}Downloads`);
+        // join() handles the slash correctly across platforms.
+        const downloads = await join(home, "Downloads");
+        setDestDir(downloads);
       } catch {
         setDestDir("Downloads");
       } finally {
@@ -249,14 +257,21 @@ export function CompressView({
     setProgress(null);
     const startTime = Date.now();
     const m = MODES.find((x) => x.id === mode)!;
+    // Extract the filename from the input path. The backend's
+    // CompressResult doesn't include filename — only output_path.
+    // For Recientes we need the human-readable input name.
+    const inputPath = files[0];
+    const inputFilename = inputPath.split("/").pop() || "archivo";
     try {
       const lastResult: CompressResult = await tauriInvoke("compress_target_cmd", {
         req: {
-          path: files[0],
+          path: inputPath,
           backend: m.backend,
           lzma_level: m.lzma,
-          // Always send output_dir (the homeDir/Downloads default is
-          // now a real path, so we never pass null).
+          // Pass output_dir if user picked one (with trailing
+          // slash fix from the homeDir mount effect above). If
+          // it's empty, fall back to null = backend default
+          // (saves next to input).
           output_dir: destDir || null,
         },
       });
@@ -265,11 +280,11 @@ export function CompressView({
       const savingsPct = Math.round((1 - savings) * 100);
       setToast({
         kind: "ok",
-        msg: `✓ ${lastResult.filename} → ${prettyBytes(lastResult.compressed_size)} (${savingsPct}% más pequeño) en ${(durationMs / 1000).toFixed(1)}s`,
+        msg: `✓ ${inputFilename} → ${prettyBytes(lastResult.compressed_size)} (${savingsPct}% más pequeño) en ${(durationMs / 1000).toFixed(1)}s`,
       });
       onComplete({
         kind: "compress",
-        filename: lastResult.filename,
+        filename: inputFilename,
         originalBytes: lastResult.original_size,
         compressedBytes: lastResult.compressed_size,
         durationMs,
