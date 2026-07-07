@@ -3,7 +3,7 @@
 import { useState, useCallback } from "react";
 import { Dropzone } from "@/components/Dropzone";
 import { EntropyMonitor, type Metrics } from "@/components/EntropyMonitor";
-import { ConfigPanel } from "@/components/ConfigPanel";
+import { ConfigPanel, type Mode, type Strength } from "@/components/ConfigPanel";
 
 // Tauri APIs are only available inside the Tauri Webview. In the
 // browser (dev mode outside Tauri) we stub them with console logs
@@ -13,10 +13,7 @@ const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
 async function tauriInvoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   if (!isTauri) {
     console.log(`[stub] invoke ${cmd}`, args);
-    // Return shape-matched stubs so the UI doesn't crash during
-    // browser-only development. Real Tauri calls happen in the
-    // production build.
-    if (cmd === "compress_bytes_cmd") {
+    if (cmd === "compress_bytes_with_backend_cmd" || cmd === "compress_bytes_cmd") {
       return {
         compressed: new Uint8Array([0x4e, 0x58, 0x53, 0x00]),
         original_size: 0,
@@ -25,15 +22,29 @@ async function tauriInvoke<T>(cmd: string, args: Record<string, unknown> = {}): 
         compress_time_ms: 0,
       } as T;
     }
+    if (cmd === "self_test_cmd") {
+      return { ratio: 3.0, compress_time_ms: 5, decompress_time_ms: 2 } as T;
+    }
     throw new Error(`Tauri not available; cmd=${cmd} not stubbed`);
   }
   const invoke = (window as any).__TAURI_INTERNALS__.invoke;
   return await invoke(cmd, args);
 }
 
+/// Map (mode, strength) to a Tauri-callable backend string + LZMA level.
+function resolveBackend(mode: Mode, strength: Strength): { backend: string; lzma: number; isV4: boolean } {
+  if (mode === "v4") {
+    return { backend: "v4", lzma: 0, isV4: true };
+  }
+  const lzma = strength === "fast" ? 1 : strength === "balanced" ? 6 : 9;
+  const id = mode === "v6-solid" ? "v6-solid" : mode;
+  return { backend: id, lzma, isV4: false };
+}
+
 export default function Home() {
   const [metrics, setMetrics] = useState<Metrics>(null);
-  const [level, setLevel] = useState<"fast" | "premium">("fast");
+  const [mode, setMode] = useState<Mode>("v4");
+  const [strength, setStrength] = useState<Strength>("balanced");
   const [status, setStatus] = useState<string>("idle");
   const [fileName, setFileName] = useState<string | null>(null);
 
@@ -44,8 +55,12 @@ export default function Home() {
       const bytes = new Uint8Array(await file.arrayBuffer());
       try {
         const t0 = performance.now();
-        const result = await tauriInvoke<any>("compress_bytes_cmd", {
+        const { backend, lzma } = resolveBackend(mode, strength);
+        const result = await tauriInvoke<any>("compress_bytes_with_backend_cmd", {
           input: Array.from(bytes),
+          fileName: file.name,
+          backend,
+          lzma_level: lzma,
         });
         const t1 = performance.now();
         setMetrics({
@@ -53,7 +68,8 @@ export default function Home() {
           compressedSize: result.compressed_size,
           ratio: result.ratio,
           compressMs: result.compress_time_ms ?? t1 - t0,
-          level,
+          mode,
+          strength,
         });
         setStatus("ok");
       } catch (e) {
@@ -61,7 +77,7 @@ export default function Home() {
         setStatus("err");
       }
     },
-    [level]
+    [mode, strength]
   );
 
   const onSelfTest = useCallback(async () => {
@@ -74,14 +90,15 @@ export default function Home() {
         ratio: r.ratio,
         compressMs: r.compress_time_ms,
         decompressMs: r.decompress_time_ms,
-        level,
+        mode,
+        strength,
       });
       setStatus("ok");
     } catch (e) {
       console.error(e);
       setStatus("err");
     }
-  }, [level]);
+  }, [mode, strength]);
 
   return (
     <main className="h-screen flex flex-col bg-bg-base">
@@ -119,13 +136,15 @@ export default function Home() {
         <div className="col-span-2 min-h-0">
           <Dropzone onFile={onFile} />
         </div>
-        <div className="col-span-1 min-h-0 flex flex-col gap-3">
+        <div className="col-span-1 min-h-0 flex flex-col gap-3 overflow-y-auto">
           <div className="flex-1 min-h-0">
             <EntropyMonitor metrics={metrics} />
           </div>
           <ConfigPanel
-            level={level}
-            onLevelChange={setLevel}
+            mode={mode}
+            strength={strength}
+            onModeChange={setMode}
+            onStrengthChange={setStrength}
             onSelfTest={onSelfTest}
           />
         </div>
@@ -137,8 +156,8 @@ export default function Home() {
           {fileName ? `· ${fileName}` : "· awaiting input"}
         </div>
         <div className="flex gap-3 text-zinc-600">
-          <span>level: {level}</span>
-          <span>format: v4</span>
+          <span>mode: {mode}</span>
+          <span>str: {strength}</span>
           <span>dict: 5348</span>
         </div>
       </footer>

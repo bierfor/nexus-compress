@@ -18,7 +18,8 @@ export type Metrics = {
   compressMs?: number;
   decompressMs?: number;
   nFiles?: number;
-  level?: "fast" | "premium";
+  mode?: "v4" | "v5-min" | "v6" | "v6-solid";
+  strength?: "fast" | "balanced" | "max";
 } | null;
 
 export function EntropyMonitor({ metrics }: { metrics: Metrics }) {
@@ -81,7 +82,7 @@ export function EntropyMonitor({ metrics }: { metrics: Metrics }) {
 
       {metrics.nFiles !== undefined && metrics.nFiles > 1 && (
         <div className="text-zinc-400 text-xs font-mono mt-1">
-          {metrics.nFiles} files · {metrics.level} level
+          {metrics.nFiles} files · {metrics.mode} · {metrics.strength}
         </div>
       )}
     </div>

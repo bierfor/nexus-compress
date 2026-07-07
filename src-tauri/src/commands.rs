@@ -9,8 +9,8 @@
 //! the return values to the frontend via JSON.
 
 use nexus_compress::api::{
-    self, ApiResult, CompressResult, CompressionLevel, DecompressResult, EngineInfo,
-    SelfTestResult,
+    self, ApiResult, BackendInfo, CompressResult, CompressionBackend, CompressionLevel,
+    DecompressResult, EngineInfo, SelfTestResult,
 };
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -50,6 +50,46 @@ pub async fn compress_bytes_with_level_cmd(
 #[tauri::command]
 pub async fn engine_info_cmd() -> Result<EngineInfo, String> {
     Ok(api::engine_info())
+}
+
+#[tauri::command]
+pub async fn backend_info_cmd() -> Result<Vec<BackendInfo>, String> {
+    Ok(api::backend_info())
+}
+
+#[tauri::command]
+pub async fn compress_bytes_with_backend_cmd(
+    input: Vec<u8>,
+    file_name: String,
+    backend: String,
+    lzma_level: u32,
+) -> Result<CompressResult, String> {
+    let backend = CompressionBackend::from_str(&backend)
+        .map_err(|e| format!("invalid_backend: {}", e))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        api::compress_bytes_with_backend(&input, &file_name, backend, lzma_level)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {}", e))
+}
+
+#[tauri::command]
+pub async fn compress_directory_with_backend_cmd(
+    input_dir: String,
+    backend: String,
+    lzma_level: u32,
+) -> Result<(api::DirectoryResult, Vec<u8>), String> {
+    let backend = CompressionBackend::from_str(&backend)
+        .map_err(|e| format!("invalid_backend: {}", e))?;
+    let path = PathBuf::from(input_dir);
+    tauri::async_runtime::spawn_blocking(move || {
+        to_ipc(
+            api::compress_directory_with_backend(&path, backend, lzma_level)
+                .map(|(r, a)| (r, a.to_vec())),
+        )
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {}", e))?
 }
 
 #[tauri::command]

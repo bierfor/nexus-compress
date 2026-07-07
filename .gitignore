@@ -8,3 +8,12 @@ gen/
 frontend/.next/
 frontend/out/
 frontend/node_modules/
+
+# Tauri build artifacts (release binaries)
+src-tauri/target/release/.fingerprint/
+src-tauri/target/release/build/
+src-tauri/target/release/deps/
+src-tauri/target/release/incremental/
+src-tauri/target/release/*.d
+src-tauri/target/release/nexus-rar
+src-tauri/target/release/nexus-rar.d

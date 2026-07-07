@@ -254,6 +254,272 @@ pub fn compress_bytes_with_level(input: &[u8], level: CompressionLevel) -> Compr
     }
 }
 
+/// Compression backend selector for the GUI.
+///
+/// Each backend has a different preprocessor + entropy coder:
+/// - `V4`: the original lossless codec (multi-stream LZ77 + rANS
+///   + trained dict). 100% reversible. LOSSLESS.
+/// - `V5Min`: LZMA + conservative text minify. Lossless on
+///   non-comment text, lossy when comments are present. ~102%
+///   of 7z on the corpus. Also strong on minified bundles
+///   (strips embedded source-map comments).
+/// - `V6`: swc AST minify (drops types, comments, formatting on
+///   `.js`/`.ts`/`.tsx`) + LZMA. LOSSY. Best on TypeScript
+///   source where type annotations are 70-80% of the bytes
+///   (~117% of 7z on the corpus).
+/// - `V6Solid`: same as `V6` but for a directory — single
+///   LZMA stream over the whole preprocessed corpus so the
+///   dictionary survives across files. +0.7% on the current
+///   corpus, larger wins on diverse source trees.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompressionBackend {
+    V4,
+    V5Min,
+    V6,
+    /// Directory-only. Single LZMA stream over the whole corpus.
+    /// The CLI's `--solid` flag uses this; the Tauri UI exposes
+    /// it under the directory mode.
+    V6Solid,
+}
+
+impl std::str::FromStr for CompressionBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "v4" => Ok(Self::V4),
+            "v5-min" | "v5min" | "v5" => Ok(Self::V5Min),
+            "v6" => Ok(Self::V6),
+            "v6-solid" | "v6solid" | "solid" => Ok(Self::V6Solid),
+            other => Err(format!(
+                "unknown backend '{other}' (use v4 | v5-min | v6 | v6-solid)"
+            )),
+        }
+    }
+}
+
+impl Default for CompressionBackend {
+    fn default() -> Self {
+        Self::V4
+    }
+}
+
+/// `CompressionBackend` info sent to the UI so the ConfigPanel can
+/// render descriptions and ratio hints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendInfo {
+    pub id: String,
+    pub name: &'static str,
+    pub tagline: &'static str,
+    /// Honest one-liner about the lossy / lossless contract.
+    pub contract: &'static str,
+    /// Approximate ratio as % of 7z from `bench_v6` (corpus_real).
+    /// -1 means "not measured" (e.g. v4 uses its own bench).
+    pub pct_of_7z: f64,
+    /// Whether the backend is lossy.
+    pub lossy: bool,
+}
+
+pub fn backend_info() -> Vec<BackendInfo> {
+    vec![
+        BackendInfo {
+            id: "v4".to_string(),
+            name: "v4",
+            tagline: "Lossless · LZ77 + rANS + dict",
+            contract: "100% byte-identical roundtrip. Trained dict (5348 entries).",
+            pct_of_7z: 137.0, // v4 raw on the corpus_suite is 137% of 7z
+            lossy: false,
+        },
+        BackendInfo {
+            id: "v5-min".to_string(),
+            name: "v5 Text-Min",
+            tagline: "Text minify + LZMA",
+            contract: "Strips comments, collapses whitespace. Loses comments.",
+            pct_of_7z: 162.0, // bench_v6 v5-min aggregate (driven by main-app.js bundle)
+            lossy: true,
+        },
+        BackendInfo {
+            id: "v6".to_string(),
+            name: "v6 AST",
+            tagline: "swc AST minify + LZMA (single file)",
+            contract: "Drops types, comments, formatting from .js/.ts. Reversible in semantics only.",
+            pct_of_7z: 117.0, // bench_v6 v6 aggregate on ts_source category
+            lossy: true,
+        },
+        BackendInfo {
+            id: "v6-solid".to_string(),
+            name: "v6 Solid-AST",
+            tagline: "swc + LZMA · single stream over whole corpus",
+            contract: "Same as v6 but the LZMA dictionary spans all files. Best on multi-file source trees.",
+            pct_of_7z: 117.0, // bench_solid SOLID v6 = 8.78x, 7z = 7.48x = 117%
+            lossy: true,
+        },
+    ]
+}
+
+/// Compress in-memory bytes with the chosen backend.
+///
+/// `file_name` is used by `V6` to pick the right preprocessor
+/// (`.js`/`.ts`/`.tsx` get swc AST minify, everything else gets
+/// the conservative text minify). For `V4` and `V5Min` it's
+/// only used for stats.
+///
+/// `lzma_level` is the LZMA preset (0..=9). 6 = balanced
+/// (apples-to-apples with `xz -6`), 9 = max (apples-to-apples
+/// with `7z -mx=9`). Ignored by `V4` (which has its own LZ77
+/// strategy selector — see `CompressionLevel`).
+pub fn compress_bytes_with_backend(
+    input: &[u8],
+    file_name: &str,
+    backend: CompressionBackend,
+    lzma_level: u32,
+) -> CompressResult {
+    let start = Instant::now();
+    let compressed: Vec<u8> = match backend {
+        CompressionBackend::V4 => {
+            // Default to Fast LZ77 — the GUI's level slider can
+            // upgrade to Premium via compress_bytes_with_level.
+            crate::compress(input)
+        }
+        CompressionBackend::V5Min => {
+            // LZMA + conservative text minify.
+            let pre = crate::minify::minify(input);
+            crate::engine::compress_with("v5-min", &pre, false)
+                .unwrap_or_else(|_| pre)
+        }
+        CompressionBackend::V6 => {
+            // swc AST minify (when file_name ends in .js/.ts/etc.)
+            // + LZMA. engine::compress_v6 picks the right pre.
+            let ext = std::path::Path::new(file_name)
+                .extension()
+                .and_then(|e| e.to_str());
+            crate::engine::compress_v6(input, ext, lzma_level)
+        }
+        CompressionBackend::V6Solid => {
+            // For a single in-memory buffer, v6-solid is the same
+            // as v6 (no other files to share the dictionary with).
+            // The CLI uses the directory walker; the Tauri GUI
+            // should call compress_directory_with_backend instead.
+            let ext = std::path::Path::new(file_name)
+                .extension()
+                .and_then(|e| e.to_str());
+            crate::engine::compress_v6(input, ext, lzma_level)
+        }
+    };
+    let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    let original_size = input.len() as u64;
+    let compressed_size = compressed.len() as u64;
+    let ratio = if compressed_size == 0 {
+        0.0
+    } else {
+        original_size as f64 / compressed_size as f64
+    };
+
+    CompressResult {
+        compressed,
+        original_size,
+        compressed_size,
+        ratio,
+        compress_time_ms,
+    }
+}
+
+/// Compress a directory using the chosen backend. The directory
+/// is walked recursively and each file is fed through the right
+/// preprocessor. For `V6Solid` the preprocessed bytes are
+/// concatenated and a single LZMA stream is written. For `V4`
+/// (the existing per-file nxar) and `V5Min` / `V6` the original
+/// per-file v4 archive is used.
+pub fn compress_directory_with_backend(
+    input_dir: &Path,
+    backend: CompressionBackend,
+    lzma_level: u32,
+) -> ApiResult<(DirectoryResult, Vec<u8>)> {
+    match backend {
+        CompressionBackend::V6Solid => {
+            // Walk the directory, build the solid archive.
+            let files = walk_dir_for_solid(input_dir)?;
+            if files.is_empty() {
+                return Err(ApiError::new(
+                    "directory.empty",
+                    format!("no files in {}", input_dir.display()),
+                ));
+            }
+            let archive = crate::solid_archive::compress(&files, lzma_level)
+                .map_err(|e| ApiError::new("solid.compress", e))?;
+            // Build a synthetic DirectoryResult (the solid format
+            // doesn't have the same per-file metadata as nxar, so
+            // we report the aggregate only).
+            let total_original: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+            let entries: Vec<ArchiveEntry> = files
+                .iter()
+                .map(|(name, bytes)| ArchiveEntry {
+                    path: name.clone(),
+                    original_size: bytes.len() as u64,
+                    compressed_size: 0, // solid doesn't track per-file
+                    compress_time_ms: 0.0,
+                })
+                .collect();
+            let result = DirectoryResult {
+                root: input_dir.to_string_lossy().into_owned(),
+                n_files: files.len() as u64,
+                total_original_size: total_original,
+                total_compressed_size: archive.len() as u64,
+                aggregate_ratio: total_original as f64 / archive.len().max(1) as f64,
+                total_time_ms: 0.0,
+                entries,
+            };
+            Ok((result, archive))
+        }
+        // The other backends fall through to the existing
+        // per-file nxar (lossless v4 codec).
+        _ => compress_directory(input_dir, CompressionLevel::Fast),
+    }
+}
+
+/// Walk a directory recursively into (relative_path, bytes) pairs.
+/// Shared with the CLI's `walk_dir` helper — duplicated here to
+/// keep the Tauri boundary self-contained.
+fn walk_dir_for_solid(root: &Path) -> ApiResult<Vec<(String, Vec<u8>)>> {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        out: &mut Vec<(String, Vec<u8>)>,
+    ) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir).map_err(|e| {
+            format!("read_dir({}) failed: {}", dir.display(), e)
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("dir entry failed: {}", e))?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|e| {
+                format!("file_type({}) failed: {}", path.display(), e)
+            })?;
+            if file_type.is_dir() {
+                walk(root, &path, out)?;
+            } else if file_type.is_file() {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let bytes = std::fs::read(&path).map_err(|e| {
+                    format!("read({}) failed: {}", path.display(), e)
+                })?;
+                out.push((rel, bytes));
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out)
+        .map_err(|e| ApiError::new("directory.io", e))?;
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
 /// Decompress a NexusCompress stream. Returns an error if the
 /// input is not a valid NexusCompress header or if the stream
 /// is corrupted.

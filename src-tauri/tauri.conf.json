@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.nexuscompress.nexusrar",
   "build": {
-    "frontendDist": "/tmp/test_tauri",
+    "frontendDist": "../frontend/out",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "",
     "beforeBuildCommand": ""

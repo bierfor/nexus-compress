@@ -29,6 +29,14 @@ module.exports = {
           500: "#00ff66", // "matrix green" — telemetry / live data
           600: "#00cc52",
         },
+        // Amber — used for the v5-min mode (text-min, lossy but
+        // not as aggressive as v6 AST).
+        amber: {
+          300: "#ffd966",
+          400: "#ffcc33",
+          500: "#ffaa00",
+          600: "#cc8800",
+        },
         // Status colors
         ok: "#00ff66",
         warn: "#ffaa00",
