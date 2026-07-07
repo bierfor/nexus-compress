@@ -710,6 +710,32 @@ pub async fn p2p_receive_direct_cmd(req: serde_json::Value) -> Result<P2pReceive
     })
 }
 
+/// Sprint 5.6.9: peek the original filename from the sender
+/// BEFORE the user clicks "Recibir". Returns null if the
+/// sender didn't include one (older tokens). For v2/v3 this
+/// probes the sender's endpoint and reads /meta.
+#[derive(Serialize)]
+pub struct P2pPeekFilenameResp {
+    pub filename: Option<String>,
+}
+
+#[tauri::command]
+pub async fn p2p_peek_filename_cmd(
+    req: serde_json::Value,
+) -> Result<P2pPeekFilenameResp, String> {
+    let token = req
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'token'".to_string())?
+        .to_string();
+    let timeout_secs = req
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5);
+    let filename = p2p_tunnel::peek_filename(&token, timeout_secs).await?;
+    Ok(P2pPeekFilenameResp { filename })
+}
+
 // ============================================================================
 //  Sprint 5.5.1 — tunnel config + transport mode commands
 // ============================================================================

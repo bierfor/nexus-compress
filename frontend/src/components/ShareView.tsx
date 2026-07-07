@@ -382,6 +382,7 @@ function ReceiveTab() {
   // suggestedName so the mkdir + write actually works.
   const [outputPath, setOutputPath] = useState<string>("~/Downloads");
   const [resolvedDownloads, setResolvedDownloads] = useState<string>("");
+  const [resolvedHome, setResolvedHome] = useState<string>("");
   // Original filename from the sender. Used as the default
   // save name so the user doesn't see "received.bin".
   const [suggestedName, setSuggestedName] = useState<string>("");
@@ -398,8 +399,8 @@ function ReceiveTab() {
     return "unknown" as const;
   })();
 
-  // Sprint 5.6.8: resolve ~/Downloads to a real path on mount.
-  // Rust doesn't expand ~, so we MUST do it here.
+  // Sprint 5.6.9: resolve home + ~/Downloads to real paths on
+  // mount. Rust doesn't expand ~, so we MUST do it here.
   useEffect(() => {
     if (!isTauri) return;
     let alive = true;
@@ -408,6 +409,7 @@ function ReceiveTab() {
         const { homeDir, join } = await import("@tauri-apps/api/path");
         const home = await homeDir();
         if (!alive) return;
+        setResolvedHome(home);
         const dl = await join(home, "Downloads");
         if (!alive) return;
         setResolvedDownloads(dl);
@@ -420,26 +422,48 @@ function ReceiveTab() {
     };
   }, []);
 
-  // Sprint 5.6.8: parse the v1 token client-side to extract
-  // the original filename. v2/v3 tokens don't carry the name —
-  // the backend will fetch it from /meta during the receive
-  // and we'll display whatever name the backend returns.
+  // Sprint 5.6.9: parse v1 client-side, peek v2/v3 from backend.
+  // v1 has filename in the base64 JSON; v2/v3 require a round
+  // trip to /meta on the sender's HTTP server.
   useEffect(() => {
     const t = token.trim();
-    if (kind !== "v1") {
+    if (!t) {
       setSuggestedName("");
       return;
     }
-    try {
-      const b64 = t.slice("nx:1:".length);
-      const json = JSON.parse(
-        atob(b64.replace(/-/g, "+").replace(/_/g, "/"))
-      );
-      if (typeof json.filename === "string" && json.filename) {
-        setSuggestedName(json.filename);
+    if (kind === "v1") {
+      try {
+        const b64 = t.slice("nx:1:".length);
+        const json = JSON.parse(
+          atob(b64.replace(/-/g, "+").replace(/_/g, "/"))
+        );
+        if (typeof json.filename === "string" && json.filename) {
+          setSuggestedName(json.filename);
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore — token may not be parseable yet
+      return;
+    }
+    if (kind === "v2" || kind === "v3") {
+      let cancelled = false;
+      (async () => {
+        try {
+          const r = await tauriInvoke<{ filename: string | null }>(
+            "p2p_peek_filename_cmd",
+            { req: { token: t, timeout_secs: 5 } }
+          );
+          if (!cancelled && r?.filename) {
+            setSuggestedName(r.filename);
+          }
+        } catch (e) {
+          // sender not reachable yet — that's fine, user might
+          // be typing the token. Just leave suggestedName empty.
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
     }
   }, [token, kind]);
 
@@ -483,20 +507,40 @@ function ReceiveTab() {
     }
   }, [resolvedDownloads, suggestedName]);
 
-  // Sprint 5.6.8: compute the actual output_path that the
-  // backend will write to. If the user kept the default
-  // "~/Downloads" we substitute resolvedDownloads +
-  // suggestedName so we never hit the "IsADirectory /
-  // ENOENT" failure mode.
+  // Sprint 5.6.9: compute the actual output_path the backend
+  // writes to. Three jobs:
+//   1. Expand any leading "~/" (Rust does NOT expand ~).
+//   2. If the user kept the default "~/Downloads" sentinel,
+//      substitute resolvedDownloads + suggestedName.
+//   3. If the user picked a custom path but the trailing
+//      filename is still the placeholder ("archivo_recibido"
+//      or anything ending in ".bin"), replace just the
+//      basename with the real suggested filename.
   const computeActualOutputPath = useCallback(async (): Promise<string> => {
-    if (outputPath !== "~/Downloads") return outputPath;
-    if (!resolvedDownloads) {
-      throw new Error("home directory not resolved yet — wait a moment and retry");
+    let path = outputPath;
+    const { join, dirname, basename } = await import("@tauri-apps/api/path");
+    // 1. expand leading ~/
+    if (path.startsWith("~/") && resolvedHome) {
+      const homeName = path.slice(2);
+      path = await join(resolvedHome, homeName);
+    } else if (path === "~" && resolvedHome) {
+      path = resolvedHome;
+    } else if (path === "~/Downloads" && resolvedDownloads) {
+      // sentinel → Downloads dir
+      path = resolvedDownloads;
     }
-    const { join } = await import("@tauri-apps/api/path");
-    const name = suggestedName || "archivo_recibido.bin";
-    return await join(resolvedDownloads, name);
-  }, [outputPath, resolvedDownloads, suggestedName]);
+    // 2. placeholder basename → swap to suggestedName
+    const currentBase = await basename(path);
+    const looksPlaceholder =
+      currentBase === "archivo_recibido" ||
+      currentBase === "archivo_recibido.bin" ||
+      currentBase.endsWith(".bin");
+    if (looksPlaceholder && suggestedName) {
+      const dir = await dirname(path);
+      path = await join(dir, suggestedName);
+    }
+    return path;
+  }, [outputPath, resolvedDownloads, resolvedHome, suggestedName]);
 
   const onReceive = useCallback(async () => {
     if (!token) return;
@@ -613,12 +657,13 @@ function ReceiveTab() {
             Cambiar
           </button>
         </div>
-        {/* Sprint 5.6.8: show the suggested filename (from token
-            or /meta) so the user knows what they'll receive and
-            where. Only relevant when outputPath is the default. */}
-        {suggestedName && outputPath === "~/Downloads" && (
-          <div className="text-zinc-500 text-[12px] mt-3">
-            Se guardará como <span className="text-zinc-300 font-medium">{suggestedName}</span> en ~/Downloads
+        {/* Sprint 5.6.9: show the suggested filename whenever we
+            know it. */}
+        {suggestedName && (
+          <div className="text-zinc-500 text-[12px] mt-3 flex items-center gap-2">
+            <span className="text-cyan-400">↻</span>
+            Se guardará como
+            <span className="text-zinc-200 font-medium">{suggestedName}</span>
           </div>
         )}
       </div>

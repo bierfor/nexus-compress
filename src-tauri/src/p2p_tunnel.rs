@@ -1441,12 +1441,30 @@ async fn fetch_meta_and_receive(
     code: String,
     output_path: PathBuf,
 ) -> Result<ReceiveResult, String> {
+    let meta = fetch_meta(&url).await?;
+    let token_v1 = P2pToken {
+        v: 3, // we accept any v in the parser
+        url,
+        salt: meta.salt.clone(),
+        code,
+        fhash: meta.fhash.clone(),
+        size: meta.size,
+        sha256: meta.sha256.clone(),
+        filename: meta.filename.clone(),
+    };
+    receive_send_file(token_v1, output_path).await
+}
+
+/// Fetch only /meta from the sender. Used by both
+/// fetch_meta_and_receive (full receive flow) and
+/// peek_filename (filename hint for the UI).
+async fn fetch_meta(url: &str) -> Result<MetaInfo, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("reqwest: {}", e))?;
     let meta_url = format!("{}/meta", url);
-    let meta: serde_json::Value = client
+    let v: serde_json::Value = client
         .get(&meta_url)
         .send()
         .await
@@ -1456,43 +1474,81 @@ async fn fetch_meta_and_receive(
         .json()
         .await
         .map_err(|e| format!("/meta json: {}", e))?;
-    let salt = meta
+    let salt = v
         .get("salt")
-        .and_then(|v| v.as_str())
+        .and_then(|x| x.as_str())
         .ok_or_else(|| "/meta missing 'salt'".to_string())?
         .to_string();
-    let fhash = meta
+    let fhash = v
         .get("fhash")
-        .and_then(|v| v.as_str())
+        .and_then(|x| x.as_str())
         .ok_or_else(|| "/meta missing 'fhash'".to_string())?
         .to_string();
-    let size = meta
+    let size = v
         .get("size")
-        .and_then(|v| v.as_u64())
+        .and_then(|x| x.as_u64())
         .ok_or_else(|| "/meta missing 'size'".to_string())?;
-    let sha256 = meta
+    let sha256 = v
         .get("sha256")
-        .and_then(|v| v.as_str())
+        .and_then(|x| x.as_str())
         .ok_or_else(|| "/meta missing 'sha256'".to_string())?
         .to_string();
-    // Sprint 5.6.8: original filename from the sender. The
-    // receiver uses this to suggest the right save name
-    // instead of "received.bin".
-    let filename = meta
+    let filename = v
         .get("filename")
-        .and_then(|v| v.as_str())
+        .and_then(|x| x.as_str())
         .map(|s| s.to_string());
-    let token_v1 = P2pToken {
-        v: 3, // we accept any v in the parser
-        url,
+    Ok(MetaInfo {
         salt,
-        code,
         fhash,
         size,
         sha256,
         filename,
+    })
+}
+
+/// Parsed /meta response. Same shape as MetaResponse but
+/// already decoded.
+struct MetaInfo {
+    salt: String,
+    fhash: String,
+    size: u64,
+    sha256: String,
+    filename: Option<String>,
+}
+
+/// Sprint 5.6.9: peek the original filename from the sender
+/// BEFORE the user clicks "Recibir". Lets the UI show the
+/// real name and the save dialog pre-fill it. Returns None
+/// if the sender doesn't expose a filename (older senders).
+/// Tries the same endpoints as receive_direct_file (v3 TCP
+/// probe + mDNS fallback, v2 mDNS-only). Each resolve path
+/// caps at `timeout_secs`.
+pub async fn peek_filename(
+    token_compact: &str,
+    timeout_secs: u64,
+) -> Result<Option<String>, String> {
+    let url = if token_compact.starts_with(p2p_config::TOKEN_PREFIX_V3) {
+        let v3 = p2p_config::parse_v3_token(token_compact)?;
+        if probe_tcp(v3.external_ip, v3.external_port, Duration::from_secs(2)).await {
+            format!("http://{}:{}", v3.external_ip, v3.external_port)
+        } else {
+            let (ip, port) =
+                resolve_direct_service(&v3.service_hash, timeout_secs).await?;
+            format!("http://{}:{}", ip, port)
+        }
+    } else if token_compact.starts_with(p2p_config::TOKEN_PREFIX_V2) {
+        let v2 = p2p_config::parse_v2_token(token_compact)?;
+        let (ip, port) =
+            resolve_direct_service(&v2.service_hash, timeout_secs).await?;
+        format!("http://{}:{}", ip, port)
+    } else if let Ok(v1) = P2pToken::from_compact(token_compact) {
+        // v1 tokens carry the filename in the JSON itself.
+        return Ok(v1.filename);
+    } else {
+        return Err("unknown token format".to_string());
     };
-    receive_send_file(token_v1, output_path).await
+    let meta = fetch_meta(&url).await?;
+    Ok(meta.filename)
 }
 
 /// Spawn the local HTTP server, the cloudflared tunnel, and
