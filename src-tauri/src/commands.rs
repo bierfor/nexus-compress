@@ -506,6 +506,7 @@ pub async fn open_path_cmd(path: String) -> Result<(), String> {
 use crate::p2p_tunnel;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::State;
 use tokio::sync::Mutex;
 
@@ -513,7 +514,10 @@ use tokio::sync::Mutex;
 /// at most one at a time — the UI's intent switch resets the
 /// other side.
 pub struct P2pState {
-    pub active: Mutex<Option<p2p_tunnel::StartedSend>>,
+    /// Arc<Mutex> so a background watcher task can monitor
+    /// the slot's lifecycle (Sprint 5.6.13) without needing
+    /// to borrow through the Tauri State wrapper.
+    pub active: Arc<Mutex<Option<p2p_tunnel::StartedSend>>>,
 }
 
 #[derive(Deserialize)]
@@ -618,7 +622,57 @@ pub async fn p2p_send_start_cmd(
         file_size,
         upnp_status,
     };
+    // Sprint 5.6.13: clear state.active when the server task
+    // ends. Previously the slot stayed Some(started) forever
+    // after a send (success OR error OR window close), so
+    // every subsequent "Crear enlace" failed with "a p2p send
+    // is already in progress". The watcher below polls the
+    // stored server_task and clears the slot when it ends.
+    let state_clone = state.inner().clone();
+    // We need the server_task AFTER storing started (since
+    // the watcher needs to access it through state.active).
+    // Move started into state.active first, then take the
+    // server_task out for the watcher to monitor.
     *state.active.lock().await = Some(started);
+    let active_arc = state_clone.active.clone();
+    // Hold a guard across the spawn so the slot is guaranteed
+    // to be Some when the watcher starts.
+    let server_task_for_watcher = {
+        let guard = active_arc.lock().await;
+        guard.as_ref().map(|s| {
+            // We need a clone or move — JoinHandle doesn't
+            // implement Clone. We use the abort-on-drop pattern:
+            // store an AbortHandle in the watcher.
+            s.server_task.abort_handle()
+        })
+    };
+    if let Some(abort_handle) = server_task_for_watcher {
+        // Actually we want to MONITOR the task, not abort it.
+        // Drop the abort handle — the server_task stays running
+        // until either (a) axum exits naturally or (b) abort_cmd
+        // is called. Both paths should clear state.active.
+        drop(abort_handle);
+    }
+    // Spawn the polling watcher. It wakes every 250ms, checks
+    // if the stored task is_finished(), and clears the slot.
+    let active_for_watcher = active_arc.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let mut guard = active_for_watcher.lock().await;
+            let still_active = match guard.as_ref() {
+                Some(s) => !s.server_task.is_finished(),
+                None => false,
+            };
+            if !still_active {
+                if guard.is_some() {
+                    eprintln!("[p2p-state] server task ended, clearing active slot");
+                    *guard = None;
+                }
+                return;
+            }
+        }
+    });
     Ok(resp)
 }
 

@@ -208,9 +208,17 @@ impl ChunkCipher {
     pub fn open_chunk(&mut self, wire: &[u8]) -> Result<Vec<u8>, String> {
         let nonce_bytes = self.next_nonce();
         let nonce = Nonce::from_slice(&nonce_bytes);
-        self.cipher
+        let out = self
+            .cipher
             .decrypt(nonce, wire)
-            .map_err(|_| ERR_AUTH.to_string())
+            .map_err(|_| ERR_AUTH.to_string())?;
+        // Sprint 5.6.13: increment the counter after a
+        // successful decrypt. Without this, every chunk after
+        // the first uses the same nonce, and AES-GCM fails
+        // authentication on chunk 2+ (ERR_AUTH). The bug
+        // only manifested for files > 64 KiB (multi-chunk).
+        self.counter += 1;
+        Ok(out)
     }
 
     fn next_nonce(&self) -> [u8; 12] {

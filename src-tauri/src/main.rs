@@ -30,7 +30,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(commands::P2pState {
-            active: tokio::sync::Mutex::new(None),
+            active: Arc::new(tokio::sync::Mutex::new(None)),
         }))
         .invoke_handler(tauri::generate_handler![
             commands::compress_bytes_cmd,

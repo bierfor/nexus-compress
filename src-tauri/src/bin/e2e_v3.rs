@@ -151,6 +151,74 @@ async fn main() {
         result2.bytes_written
     );
 
+    // 9. Multi-chunk regression test (Sprint 5.6.13).
+    //    Send a file LARGER than the 64 KiB chunk size so the
+    //    stream encrypt emits more than one chunk. Previously
+    //    the receiver's ChunkCipher::open_chunk forgot to
+    //    increment its counter, so every chunk after the
+    //    first decrypted with the wrong nonce and failed
+    //    AES-GCM auth ("decrypt chunk @65536: p2p: auth...").
+    println!("[e2e] regression: multi-chunk file (128 KiB)...");
+    let tmp_multi = std::env::temp_dir().join(format!(
+        "e2e_v3_multi_{}.bin",
+        std::process::id()
+    ));
+    let multi: Vec<u8> = (0..(128 * 1024)).map(|i| (i % 251) as u8).collect();
+    {
+        let mut f = tokio::fs::File::create(&tmp_multi).await.expect("create multi");
+        f.write_all(&multi).await.expect("write multi");
+    }
+    let started_multi = start_direct_sender(
+        tmp_multi.clone(),
+        "alpha-bear-cosmic-delta".to_string(),
+        cfg_dir_a.clone(),
+    )
+    .await
+    .expect("start multi sender");
+    let multi_token = started_multi.token_compact.clone();
+    let out_multi = std::env::temp_dir().join(format!(
+        "e2e_v3_MULTI_RECEIVED_{}.bin",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&out_multi);
+    let result_multi = timeout(
+        Duration::from_secs(15),
+        receive_direct_file(multi_token, out_multi.clone(), 5),
+    )
+    .await
+    .expect("multi receive timed out")
+    .expect("multi receive failed");
+    let got_multi = std::fs::read(&out_multi).expect("read multi");
+    assert_eq!(got_multi, multi, "multi-chunk bytes match");
+    assert_eq!(result_multi.bytes_written as usize, multi.len());
+    println!(
+        "[e2e] multi-chunk OK — {} bytes ({} chunks)",
+        result_multi.bytes_written,
+        (multi.len() + 65535) / 65536
+    );
+    drop(started_multi);
+    let _ = std::fs::remove_file(&tmp_multi);
+    let _ = std::fs::remove_file(&out_multi);
+    let out2 = std::env::temp_dir().join(format!(
+        "e2e_v3_RECEIVED2_{}.html",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&out2);
+    let result2 = timeout(
+        Duration::from_secs(15),
+        receive_direct_file(v3_token.clone(), out2.clone(), 5),
+    )
+    .await
+    .expect("second receive timed out")
+    .expect("second receive failed");
+    let got2 = std::fs::read(&out2).expect("read second file");
+    assert_eq!(got2, original, "second-receive bytes match");
+    assert_eq!(result2.bytes_written as usize, original.len());
+    println!(
+        "[e2e] double-receive OK — {} bytes",
+        result2.bytes_written
+    );
+
     // 8. Cleanup.
     drop(started);
     let _ = std::fs::remove_file(&tmp);
