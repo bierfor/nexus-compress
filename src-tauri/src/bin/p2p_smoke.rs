@@ -61,10 +61,14 @@
 mod p2p_tunnel;
 
 // p2p_tunnel now depends on p2p_auth (Sprint 5.5 pre-auth
-// HMAC). Bring it in via the same #[path] trick so the
-// `crate::p2p_auth` reference inside p2p_tunnel resolves.
-
-
+// HMAC) and p2p_config (Sprint 5.5.1 transport mode + token
+// store). Bring both in via the same #[path] trick so the
+// `crate::p2p_auth` and `crate::p2p_config` references inside
+// p2p_tunnel resolve.
+#[path = "../p2p_auth.rs"]
+mod p2p_auth;
+#[path = "../p2p_config.rs"]
+mod p2p_config;
 
 use std::path::PathBuf;
 use std::process::Command;

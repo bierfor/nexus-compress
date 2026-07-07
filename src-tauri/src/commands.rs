@@ -612,3 +612,96 @@ pub async fn p2p_receive_cmd(req: serde_json::Value) -> Result<P2pReceiveResp, S
         output_path: result.output_path.to_string_lossy().to_string(),
     })
 }
+
+// ============================================================================
+//  Sprint 5.5.1 — tunnel config + transport mode commands
+// ============================================================================
+
+/// Returned by `p2p_get_tunnel_config_cmd`. `has_token` is true
+/// iff a token is currently stored in the OS keyring. The
+/// token itself is never returned (it's a secret).
+#[derive(Serialize)]
+pub struct P2pTunnelConfigResp {
+    pub mode: String,
+    pub hostname: Option<String>,
+    pub has_token: bool,
+}
+
+#[tauri::command]
+pub async fn p2p_get_tunnel_config_cmd(
+    app: tauri::AppHandle,
+) -> Result<P2pTunnelConfigResp, String> {
+    use tauri::Manager; // brings .path() into scope on AppHandle
+    use p2p_tunnel::p2p_config::{load_tunnel_config, TokenStore};
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app_data_dir: {}", e))?;
+    let cfg = load_tunnel_config(&app_data_dir)?;
+    let has_token = p2p_tunnel::p2p_config::default_token_store()
+        .get_token()?
+        .is_some();
+    Ok(P2pTunnelConfigResp {
+        mode: match cfg.mode {
+            p2p_tunnel::p2p_config::TransportMode::Quick => "quick".to_string(),
+            p2p_tunnel::p2p_config::TransportMode::Named => "named".to_string(),
+            p2p_tunnel::p2p_config::TransportMode::Direct => "direct".to_string(),
+        },
+        hostname: cfg.hostname,
+        has_token,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct P2pSaveTunnelConfigReq {
+    pub mode: String,
+    pub hostname: Option<String>,
+    /// Required iff mode == "named". The token is validated
+    /// (length, base64 charset) and then written to the OS
+    /// keyring. The token is NEVER persisted to disk.
+    pub token: Option<String>,
+}
+
+#[tauri::command]
+pub async fn p2p_save_tunnel_config_cmd(
+    app: tauri::AppHandle,
+    req: serde_json::Value,
+) -> Result<(), String> {
+    use tauri::Manager; // brings .path() into scope on AppHandle
+    use p2p_tunnel::p2p_config::{
+        default_token_store, save_tunnel_config, validate_hostname, validate_token,
+        TokenStore, TransportMode, TunnelConfig,
+    };
+    let req: P2pSaveTunnelConfigReq = serde_json::from_value(req)
+        .map_err(|e| format!("invalid save_tunnel_config request: {}", e))?;
+    let mode = match req.mode.as_str() {
+        "quick" => TransportMode::Quick,
+        "named" => TransportMode::Named,
+        "direct" => TransportMode::Direct,
+        other => return Err(format!("invalid transport mode: {}", other)),
+    };
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app_data_dir: {}", e))?;
+    // Validate and normalize hostname (only relevant for Named
+    // mode, but we validate if present).
+    let hostname = req
+        .hostname
+        .as_deref()
+        .map(validate_hostname)
+        .transpose()?;
+    let hostname = hostname.map(|s| s.strip_prefix("https://").unwrap_or(&s).to_string());
+    // Validate the token (if provided). This is the FIRST
+    // place we touch the secret — the token is in memory
+    // only, never on disk.
+    if let Some(token) = req.token.as_deref() {
+        if !token.is_empty() {
+            validate_token(token)?;
+            default_token_store().set_token(token)?;
+        }
+    }
+    let cfg = TunnelConfig { mode, hostname };
+    save_tunnel_config(&app_data_dir, &cfg)?;
+    Ok(())
+}

@@ -213,6 +213,182 @@ export function ConfigPanel({
       >
         self-test
       </button>
+
+      <TunnelSettingsPanel />
+    </div>
+  );
+}
+
+// ============================================================================
+//  TunnelSettingsPanel — Sprint 5.5.1
+// ============================================================================
+//
+// Configures the P2P tunnel transport mode and the Cloudflare
+// tunnel credentials. The token is stored in the OS keyring
+// (Keychain on macOS, Credential Manager on Windows, Secret
+// Service on Linux) — never on disk. The hostname is a public
+// field saved in `nexus_config.json` inside the app data dir.
+
+import { useEffect, useState } from "react";
+
+const isTauri =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+async function tauriInvoke<T>(
+  cmd: string,
+  args: Record<string, unknown> = {}
+): Promise<T> {
+  if (!isTauri) {
+    console.log(`[stub] invoke ${cmd}`, args);
+    return {} as T;
+  }
+  const invoke = (window as any).__TAURI_INTERNALS__.invoke;
+  return await invoke(cmd, args);
+}
+
+function TunnelSettingsPanel() {
+  const [mode, setMode] = useState<"quick" | "named" | "direct">("quick");
+  const [hostname, setHostname] = useState<string>("");
+  const [token, setToken] = useState<string>("");
+  const [hasToken, setHasToken] = useState<boolean>(false);
+  const [status, setStatus] = useState<string>("");
+  const [busy, setBusy] = useState<boolean>(false);
+
+  // Load current config on mount.
+  useEffect(() => {
+    tauriInvoke<{ mode: string; hostname: string | null; has_token: boolean }>(
+      "p2p_get_tunnel_config_cmd"
+    )
+      .then((r) => {
+        setMode(r.mode as "quick" | "named" | "direct");
+        setHostname(r.hostname ?? "");
+        setHasToken(r.has_token);
+      })
+      .catch((e) => setStatus(`load error: ${e}`));
+  }, []);
+
+  const onSave = async () => {
+    setBusy(true);
+    setStatus("");
+    try {
+      await tauriInvoke("p2p_save_tunnel_config_cmd", {
+        req: {
+          mode,
+          hostname: mode === "named" ? hostname : null,
+          // Only send the token if the user actually typed one.
+          // Empty string = "no change". Omit = "no change" too.
+          token: token || null,
+        },
+      });
+      // Refresh to see updated has_token.
+      const r = await tauriInvoke<{ has_token: boolean }>(
+        "p2p_get_tunnel_config_cmd"
+      );
+      setHasToken(r.has_token);
+      setToken(""); // clear sensitive input
+      setStatus("✓ saved");
+    } catch (e: any) {
+      setStatus(`✗ ${e?.message ?? e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 pt-3 border-t border-bg-border space-y-2">
+      <div className="text-[10px] tracking-[0.3em] uppercase text-cyan-400">
+        ⚙ tunnel transport (Sprint 5.5.1)
+      </div>
+
+      {/* Mode selector */}
+      <div className="flex flex-col gap-1">
+        <label className="text-[9px] tracking-widest uppercase text-zinc-500">
+          mode
+        </label>
+        <select
+          value={mode}
+          onChange={(e) => setMode(e.target.value as any)}
+          disabled={busy}
+          className="bg-bg-base border border-bg-border text-zinc-200 text-[11px] px-2 py-1 font-mono"
+        >
+          <option value="quick">quick — anonymous (rate-limited by Cloudflare)</option>
+          <option value="named">named — per-account tunnel (no rate limit)</option>
+          <option value="direct" disabled>
+            direct — LAN/P2P (Sprint 5.5.2)
+          </option>
+        </select>
+      </div>
+
+      {/* Named-mode fields */}
+      {mode === "named" && (
+        <>
+          <div className="flex flex-col gap-1">
+            <label className="text-[9px] tracking-widest uppercase text-zinc-500">
+              cloudflare tunnel hostname
+            </label>
+            <input
+              type="text"
+              value={hostname}
+              onChange={(e) => setHostname(e.target.value)}
+              placeholder="p2p.example.com"
+              disabled={busy}
+              className="bg-bg-base border border-bg-border text-zinc-200 text-[11px] px-2 py-1 font-mono"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[9px] tracking-widest uppercase text-zinc-500">
+              tunnel token (stored in OS keyring — never on disk)
+              {hasToken && (
+                <span className="ml-2 text-matrix-500">[token saved]</span>
+              )}
+            </label>
+            <input
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder={
+                hasToken
+                  ? "paste new token to replace, or leave blank to keep current"
+                  : "paste the token from Cloudflare dashboard"
+              }
+              disabled={busy}
+              autoComplete="off"
+              className="bg-bg-base border border-bg-border text-zinc-200 text-[11px] px-2 py-1 font-mono"
+            />
+          </div>
+        </>
+      )}
+
+      {/* Save button */}
+      <button
+        onClick={onSave}
+        disabled={busy || (mode === "named" && !hostname)}
+        className="btn w-full"
+      >
+        {busy ? "saving…" : "save tunnel settings"}
+      </button>
+
+      {status && (
+        <div
+          className={
+            "text-[10px] font-mono " +
+            (status.startsWith("✓")
+              ? "text-matrix-500"
+              : status.startsWith("✗")
+              ? "text-err"
+              : "text-zinc-500")
+          }
+        >
+          {status}
+        </div>
+      )}
+
+      <div className="text-[9px] text-zinc-600 tracking-wider leading-relaxed">
+        Quick mode is the default — works out of the box, but
+        Cloudflare throttles after a few connections. Named mode
+        requires a free Cloudflare account; see README for the
+        5-minute setup.
+      </div>
     </div>
   );
 }

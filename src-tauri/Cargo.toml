@@ -32,6 +32,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # Crypto building blocks (re-declared because the src-tauri crate
 # is a separate compilation unit from the parent nexus-compress).
+keyring = { version = "2.3", features = ["security-framework", "winapi", "secret-service"] } # OS-native secret storage (Keychain/Credential Mgr/Secret Service)
 hex = "0.4"                   # hex::encode / hex::decode for SHA-256 + filename hash
 sha2 = "0.10"                 # SHA-256 (keyed)
 hkdf = "0.12"                 # HKDF-SHA256 for session key derivation

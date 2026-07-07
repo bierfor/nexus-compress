@@ -1772,3 +1772,87 @@ The codebase no longer references any of these abandoned modules.
 ## License
 
 MIT.
+---
+
+## P2P Tunnel — Sprint 5.5.1
+
+The P2P tunnel lets you send a file to a friend over the internet
+without setting up a server. The architecture is:
+
+```
+SENDER                          CLOUDFLARE              RECEIVER
+  ├─ axum HTTP (port 49152+)         edge                 ├─ reqwest
+  ├─ SPAKE2 + Argon2id + AES-256-GCM ◄── TLS ──────────►  └─ decrypt
+  └─ pre-auth HMAC (anti-DoS)                             
+```
+
+### Transport modes
+
+| Mode | Requires | Stable? | Notes |
+|---|---|---|---|
+| **Quick** (default) | nothing | No — rate-limited by Cloudflare after 3-5 connections | For casual one-off use. |
+| **Named** | a free Cloudflare account | Yes — your own DNS, no rate limit | For serious use. |
+| **Direct** (Sprint 5.5.2) | LAN/port-forward | Coming soon | No Cloudflare dependency. |
+
+### Quick mode
+
+Click **GENERATE CODE** in the Send panel. The app spawns a
+`cloudflared --url` Quick Tunnel and shows you a 4-word code
+plus a token. Send both to the receiver. They paste the token
+into the Receive panel and click **START RECEIVING**.
+
+Cloudflare's public Quick Tunnel API throttles aggressive
+use (Error 1015). For sustained use, switch to **Named**.
+
+### Named mode — 5-minute setup
+
+1. **Create a free Cloudflare account** at
+   <https://dash.cloudflare.com/sign-up>.
+2. **Add your domain** to Cloudflare (or use a free `*.example.dev`
+   Cloudflare-managed domain if you don't own one).
+3. **Install `cloudflared`** on your machine and log in:
+   ```bash
+   cloudflared tunnel login
+   ```
+4. **Create a tunnel:**
+   ```bash
+   cloudflared tunnel create nexus-share
+   ```
+   This prints a long base64 token — copy it.
+5. **Create a DNS record** that points to the tunnel:
+   ```bash
+   cloudflared tunnel route dns nexus-share p2p.your-domain.com
+   ```
+6. **Open Nexus → Config panel → Tunnel transport:**
+   - Set **mode** to `named`.
+   - Set **hostname** to `p2p.your-domain.com` (the DNS record
+     you just created).
+   - Paste the **tunnel token** from step 4.
+   - Click **Save tunnel settings**.
+
+The token is stored in your OS keyring (macOS Keychain, Windows
+Credential Manager, Linux Secret Service) — never on disk.
+
+7. **Click GENERATE CODE** in the Send panel. The receiver
+   connects to `https://p2p.your-domain.com` and goes through
+   the same SPAKE2 + pre-auth HMAC + AES-256-GCM flow as Quick
+   mode. The connection is end-to-end encrypted: Cloudflare
+   only sees ciphertext.
+
+### Direct mode (Sprint 5.5.2)
+
+Not yet implemented. Will use mDNS for LAN discovery, UPnP for
+NAT traversal, and a direct TCP connection (no Cloudflare).
+Switch to Direct in the Config panel to see the "Coming soon"
+placeholder.
+
+### Security layers (from outer to inner)
+
+| Layer | Cost per request | Defends against |
+|---|---|---|
+| **Per-IP rate limit** | 0μs (blacklisted) | DoS, scrapers |
+| **Pre-auth HMAC** | ~5μs | Scanners without the code |
+| **SPAKE2** | ~500μs (Ed25519) | Proves both sides have the code |
+| **AES-256-GCM per chunk** | native speed | Tampering, content leak |
+
+All four layers MUST pass for the receiver to get a byte.

@@ -8,6 +8,7 @@
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 mod commands;
+mod p2p_config;
 mod p2p_tunnel;
 
 use std::sync::Arc;
@@ -46,6 +47,8 @@ fn main() {
             commands::p2p_send_start_cmd,
             commands::p2p_send_abort_cmd,
             commands::p2p_receive_cmd,
+            commands::p2p_get_tunnel_config_cmd,
+            commands::p2p_save_tunnel_config_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusRAR Tauri app");
