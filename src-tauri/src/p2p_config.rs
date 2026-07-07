@@ -102,6 +102,12 @@ pub const SERVICE_TYPE: &str = "_nexus-share._tcp.local";
 /// the prefix to decide which decode path to take.
 pub const TOKEN_PREFIX_V2: &str = "nx:2:";
 
+/// Wire prefix for v3 tokens (Sprint 5.5.4). v3 = Direct Mode
+/// with an open UPnP port mapping: carries the sender's public
+/// IP and external port so a receiver on a different network
+/// can connect without depending on mDNS.
+pub const TOKEN_PREFIX_V3: &str = "nx:3:";
+
 /// Length (in hex chars) of the service-name hash. 6 hex chars
 /// = 24 bits = ~16M unique codes — collision probability for
 /// one sender session is effectively zero.
@@ -451,6 +457,122 @@ fn validate_v2_code(code: &str) -> Result<(), String> {
 }
 
 // ============================================================================
+//  v3 token (Sprint 5.5.4) — Direct Mode + UPnP cross-NAT
+// ============================================================================
+//
+// v3 token format:
+//
+//   nx:3:relay:<external_ip>:<external_port>:<service_hash>:<code>
+//
+//    ^   ^      ^            ^               ^              ^
+//    |   |      |            |               |              +-- 4-word passphrase
+//    |   |      |            |               +-- 6-hex service hash (same as v2)
+//    |   |      |            +-- port the UPnP mapping is reachable on (public)
+//    |   |      +-- sender's public IP (from router's GetExternalIPAddress)
+//    |   +-- mode marker ('relay' = via open UPnP hole)
+//    +-- version
+//
+// The receiver tries <external_ip>:<external_port> first (2s TCP
+// connect timeout). If that fails — typically because the receiver
+// is on the same LAN as the sender and the router blocks NAT
+// loopback — it falls back to mDNS browse on <service_hash>.
+//
+// PRIVACY: the public IP is in plaintext. Anyone who sees the
+// token (shoulder-surfing, accidental paste into a public chat)
+// knows the sender's home network IP. This is an accepted
+// tradeoff for direct mode without a relay — the alternative is
+// Cloudflare or a TURN server (which leaks the same info to the
+// relay operator anyway). The UI must clear the token from
+// display shortly after pairing to mitigate the persistence
+// risk.
+
+/// Parsed v3 token. The receiver uses the public endpoint first
+/// and falls back to mDNS via `service_hash` if the public IP
+/// isn't reachable (NAT loopback blocked).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct P2pTokenV3 {
+    pub external_ip: std::net::Ipv4Addr,
+    pub external_port: u16,
+    pub service_hash: String,
+    pub code: String,
+}
+
+/// Format a v3 token from its parts. Pure constructor.
+pub fn format_v3_token(
+    external_ip: std::net::Ipv4Addr,
+    external_port: u16,
+    service_hash: &str,
+    code: &str,
+) -> String {
+    format!(
+        "{}relay:{}:{}:{}:{}",
+        TOKEN_PREFIX_V3,
+        external_ip,
+        external_port,
+        service_hash,
+        code
+    )
+}
+
+/// Parse a v3 token string. Returns the parsed parts on success
+/// or a human-readable error on failure.
+pub fn parse_v3_token(s: &str) -> Result<P2pTokenV3, String> {
+    let body = s
+        .strip_prefix(TOKEN_PREFIX_V3)
+        .ok_or_else(|| {
+            format!(
+                "P2P v3 token must start with '{}', got: {}",
+                TOKEN_PREFIX_V3,
+                &s.chars().take(8).collect::<String>()
+            )
+        })?;
+    // nx:3:relay:<ip>:<port>:<hash>:<code>
+    // We splitn(5, ':') to allow the code to contain ':' (it
+    // shouldn't, but defense in depth — code is just 4 words).
+    let parts: Vec<&str> = body.splitn(5, ':').collect();
+    if parts.len() != 5 {
+        return Err(format!(
+            "P2P v3 token must have 5 colon-separated parts after nx:3: \
+             (mode:ip:port:hash:code, got {})",
+            parts.len()
+        ));
+    }
+    let mode = parts[0];
+    if mode != "relay" {
+        return Err(format!(
+            "P2P v3 token mode must be 'relay' (got '{}')",
+            mode
+        ));
+    }
+    let external_ip: std::net::Ipv4Addr = parts[1]
+        .parse()
+        .map_err(|e| format!("P2P v3 external_ip invalid: {}", e))?;
+    let external_port: u16 = parts[2]
+        .parse()
+        .map_err(|e| format!("P2P v3 external_port invalid: {}", e))?;
+    if external_port == 0 {
+        return Err("P2P v3 external_port must be non-zero".to_string());
+    }
+    let service_hash = parts[3];
+    if service_hash.len() != SERVICE_HASH_LEN
+        || !service_hash.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(format!(
+            "P2P v3 service_hash must be {} hex chars (got '{}')",
+            SERVICE_HASH_LEN, service_hash
+        ));
+    }
+    let code = parts[4];
+    validate_v2_code(code)?; // same format as v2
+    Ok(P2pTokenV3 {
+        external_ip,
+        external_port,
+        service_hash: service_hash.to_string(),
+        code: code.to_string(),
+    })
+}
+
+// ============================================================================
 //  Tests
 // ============================================================================
 
@@ -710,5 +832,139 @@ mod tests {
             derive_mdns_service_name(&parsed.code),
             format!("{}.{}", recovered_short, SERVICE_TYPE)
         );
+    }
+
+    // --- v3 token (Sprint 5.5.4 cross-NAT Direct Mode) ----------------
+
+    #[test]
+    fn parse_v3_token_accepts_well_formed() {
+        let ip: std::net::Ipv4Addr = "203.0.113.42".parse().unwrap();
+        let token = format_v3_token(ip, 49152, "abc123", "alpha-bear-cosmic-delta");
+        assert!(token.starts_with("nx:3:relay:"));
+        let parsed = parse_v3_token(&token).expect("parse");
+        assert_eq!(parsed.external_ip, ip);
+        assert_eq!(parsed.external_port, 49152);
+        assert_eq!(parsed.service_hash, "abc123");
+        assert_eq!(parsed.code, "alpha-bear-cosmic-delta");
+    }
+
+    #[test]
+    fn parse_v3_token_roundtrip() {
+        let ip: std::net::Ipv4Addr = "198.51.100.7".parse().unwrap();
+        let token = format_v3_token(ip, 54321, "deadbe", "tiger-river-mountain-cloud");
+        let parsed = parse_v3_token(&token).expect("parse");
+        let reserialized = format_v3_token(
+            parsed.external_ip,
+            parsed.external_port,
+            &parsed.service_hash,
+            &parsed.code,
+        );
+        assert_eq!(token, reserialized);
+    }
+
+    #[test]
+    fn parse_v3_token_rejects_wrong_prefix() {
+        // v1 and v2 prefixes must not parse as v3.
+        assert!(parse_v3_token("nx:1:foo").is_err());
+        assert!(parse_v3_token("nx:2:direct:abc:alpha-bear-cosmic-delta").is_err());
+        assert!(parse_v3_token("garbage").is_err());
+        assert!(parse_v3_token("").is_err());
+    }
+
+    #[test]
+    fn parse_v3_token_rejects_wrong_mode() {
+        let bad = format!(
+            "{}direct:203.0.113.42:49152:abc123:alpha-bear-cosmic-delta",
+            TOKEN_PREFIX_V3
+        );
+        assert!(parse_v3_token(&bad).is_err());
+    }
+
+    #[test]
+    fn parse_v3_token_rejects_bad_ip() {
+        // Not an IPv4 address.
+        let bad = format!(
+            "{}relay:not-an-ip:49152:abc123:alpha-bear-cosmic-delta",
+            TOKEN_PREFIX_V3
+        );
+        assert!(parse_v3_token(&bad).is_err());
+        // IPv6 is not accepted in v3 (we only have IPv4 mDNS).
+        let bad = format!(
+            "{}relay:2001:db8::1:49152:abc123:alpha-bear-cosmic-delta",
+            TOKEN_PREFIX_V3
+        );
+        assert!(parse_v3_token(&bad).is_err());
+    }
+
+    #[test]
+    fn parse_v3_token_rejects_bad_port() {
+        // Port 0.
+        let bad = format!(
+            "{}relay:203.0.113.42:0:abc123:alpha-bear-cosmic-delta",
+            TOKEN_PREFIX_V3
+        );
+        assert!(parse_v3_token(&bad).is_err());
+        // Non-numeric port.
+        let bad = format!(
+            "{}relay:203.0.113.42:high:abc123:alpha-bear-cosmic-delta",
+            TOKEN_PREFIX_V3
+        );
+        assert!(parse_v3_token(&bad).is_err());
+        // Port too large.
+        let bad = format!(
+            "{}relay:203.0.113.42:99999999:abc123:alpha-bear-cosmic-delta",
+            TOKEN_PREFIX_V3
+        );
+        assert!(parse_v3_token(&bad).is_err());
+    }
+
+    #[test]
+    fn parse_v3_token_rejects_bad_hash() {
+        // Hash too short.
+        let bad = format!(
+            "{}relay:203.0.113.42:49152:ab:alpha-bear-cosmic-delta",
+            TOKEN_PREFIX_V3
+        );
+        assert!(parse_v3_token(&bad).is_err());
+        // Hash non-hex.
+        let bad = format!(
+            "{}relay:203.0.113.42:49152:zzzzzz:alpha-bear-cosmic-delta",
+            TOKEN_PREFIX_V3
+        );
+        assert!(parse_v3_token(&bad).is_err());
+    }
+
+    #[test]
+    fn parse_v3_token_rejects_bad_code() {
+        // Code not 4 words.
+        let bad = format!(
+            "{}relay:203.0.113.42:49152:abc123:alpha-bear-cosmic",
+            TOKEN_PREFIX_V3
+        );
+        assert!(parse_v3_token(&bad).is_err());
+        // Empty code.
+        let bad = format!(
+            "{}relay:203.0.113.42:49152:abc123:",
+            TOKEN_PREFIX_V3
+        );
+        assert!(parse_v3_token(&bad).is_err());
+    }
+
+    #[test]
+    fn v3_token_v2_token_have_distinct_prefixes() {
+        // The receiver dispatches on prefix. If the prefixes
+        // collide, the dispatcher misroutes. This test is a
+        // regression guard against future prefix drift.
+        let v2 = format_v2_token("abc123", "alpha-bear-cosmic-delta");
+        let v3 = format_v3_token(
+            "203.0.113.42".parse().unwrap(),
+            49152,
+            "abc123",
+            "alpha-bear-cosmic-delta",
+        );
+        assert!(v2.starts_with(TOKEN_PREFIX_V2));
+        assert!(v3.starts_with(TOKEN_PREFIX_V3));
+        assert!(!v2.starts_with(TOKEN_PREFIX_V3));
+        assert!(!v3.starts_with(TOKEN_PREFIX_V2));
     }
 }

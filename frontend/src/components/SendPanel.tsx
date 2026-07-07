@@ -44,6 +44,10 @@ interface SendStartResp {
   code: string;
   filename: string;
   file_size: number;
+  upnp_status: {
+    external_ip: string;
+    external_port: number;
+  } | null;
 }
 
 interface TunnelConfigInfo {
@@ -59,6 +63,14 @@ export function SendPanel() {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState<"token" | "code" | null>(null);
   const [cfg, setCfg] = useState<TunnelConfigInfo | null>(null);
+  // Sprint 5.5.4: track whether the token has been "consumed"
+  // (user clicked copy OR 5s elapsed since the sender started).
+  // After that, the token text on screen is replaced with
+  // a "copied to clipboard" hint — the plaintext token still
+  // lives in `resp.token` but isn't rendered anymore. This
+  // mitigates the privacy risk of the public IP being
+  // shoulder-surfed from a screen at a coffee shop.
+  const [tokenHidden, setTokenHidden] = useState(false);
   const abortInFlight = useRef(false);
 
   // Read the current transport mode on mount so the user sees
@@ -77,7 +89,26 @@ export function SendPanel() {
     })();
   }, []);
 
-  const tokenKind = resp ? (resp.token.startsWith("nx:2:") ? "v2" : "v1") : null;
+  const tokenKind = resp
+    ? resp.token.startsWith("nx:3:")
+      ? "v3"
+      : resp.token.startsWith("nx:2:")
+      ? "v2"
+      : "v1"
+    : null;
+
+  // Privacy mitigation (Sprint 5.5.4): after the user copies
+  // the token OR after 5s of display, hide the token text from
+  // screen. The token still exists in `resp.token` (for any
+  // re-copy via clipboard) but is not rendered anymore.
+  useEffect(() => {
+    if (!resp) {
+      setTokenHidden(false);
+      return;
+    }
+    const timer = setTimeout(() => setTokenHidden(true), 5000);
+    return () => clearTimeout(timer);
+  }, [resp]);
 
   const onPick = useCallback(async () => {
     try {
@@ -220,11 +251,44 @@ export function SendPanel() {
               {resp.filename} · {sizeLabel}
             </div>
             <button
-              onClick={() => onCopy(resp.code, "code")}
+              onClick={() => {
+                onCopy(resp.code, "code");
+                setTokenHidden(true); // privacy: hide token once user starts sharing
+              }}
               className="mt-2 px-2 py-0.5 border border-matrix-500 text-matrix-500 hover:bg-matrix-500/10 text-[9px] tracking-widest uppercase"
             >
               {copied === "code" ? "✓ copied" : "copy code"}
             </button>
+          </div>
+
+          {/* UPnP status (Sprint 5.5.4 Phase 3) — visible feedback
+              before the user even looks at the token. Tells them
+              whether the transfer will work cross-NAT or not. */}
+          <div
+            className={`border p-2 text-[10px] tracking-wider ${
+              resp.upnp_status
+                ? "border-matrix-500 bg-matrix-500/5 text-matrix-400"
+                : "border-amber-500 bg-amber-500/5 text-amber-400"
+            }`}
+          >
+            {resp.upnp_status ? (
+              <>
+                ✓ UPnP hole open — external {resp.upnp_status.external_ip}:
+                {resp.upnp_status.external_port}
+                <br />
+                <span className="text-[9px] text-zinc-500">
+                  Cross-NAT ready. The receiver can be on any network.
+                </span>
+              </>
+            ) : (
+              <>
+                ⚠ UPnP unavailable — falling back to LAN-only
+                <br />
+                <span className="text-[9px] text-zinc-500">
+                  Receiver must be on the same Wi-Fi as you.
+                </span>
+              </>
+            )}
           </div>
 
           {/* Token (the machine-friendly part) */}
@@ -232,17 +296,30 @@ export function SendPanel() {
             <div className="flex items-center justify-between text-[10px] tracking-widest text-zinc-500 uppercase mb-2">
               <span>or send the full token</span>
               <button
-                onClick={() => onCopy(resp.token, "token")}
+                onClick={() => {
+                  onCopy(resp.token, "token");
+                  setTokenHidden(true); // privacy: hide after copy
+                }}
                 className="px-2 py-0.5 border border-cyan-500 text-cyan-400 hover:bg-cyan-500/10"
               >
                 {copied === "token" ? "✓ copied" : "copy token"}
               </button>
             </div>
-            <div className="text-[10px] text-zinc-400 break-all bg-bg-surface p-2 max-h-24 overflow-y-auto">
-              {resp.token}
-            </div>
+            {tokenHidden ? (
+              <div className="text-[10px] text-zinc-500 italic bg-bg-surface p-2 border border-zinc-700">
+                ▎ token hidden for privacy (public IP exposure).
+                Click <em>copy token</em> again to paste from clipboard
+                history, or use the 4-word code above (works the same).
+              </div>
+            ) : (
+              <div className="text-[10px] text-zinc-400 break-all bg-bg-surface p-2 max-h-24 overflow-y-auto">
+                {resp.token}
+              </div>
+            )}
             <div className="text-[9px] text-zinc-600 tracking-wider mt-2">
-              {tokenKind === "v2"
+              {tokenKind === "v3"
+                ? "v3 cross-NAT token: includes your public IP + UPnP port. The receiver tries this first; falls back to LAN mDNS if their router blocks NAT loopback. Auto-hidden after 5s."
+                : tokenKind === "v2"
                 ? "Direct Mode v2 token: service hash + code. The receiver's mDNS browse finds your machine on the LAN — no URL, no Cloudflare. Requires same Wi-Fi."
                 : "v1 token includes the cloudflared URL, the code, the file hash, and SHA-256. The receiver just needs this and the 4-word code."}
             </div>

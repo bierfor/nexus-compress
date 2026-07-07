@@ -504,9 +504,20 @@ pub struct P2pSendStartReq {
 }
 
 #[derive(Serialize)]
+pub struct UpnpStatusInfo {
+    /// Public IP the sender is reachable at from the internet
+    /// (from UPnP GetExternalIPAddress). Format: dotted-quad.
+    pub external_ip: String,
+    /// Port the UPnP mapping is on (= the sender's local axum
+    /// port for Direct Mode).
+    pub external_port: u16,
+}
+
+#[derive(Serialize)]
 pub struct P2pSendStartResp {
     /// base64url-encoded token (the thing to share with the
-    /// receiver). Includes URL, code, salt, file size, sha256.
+    /// receiver). v1 for Quick/Named, v2 for Direct LAN-only,
+    /// v3 for Direct cross-NAT (with UPnP hole).
     pub token: String,
     /// The code we used, regardless of whether the user
     /// supplied it or we generated it. The UI shows this in
@@ -517,6 +528,11 @@ pub struct P2pSendStartResp {
     /// Plaintext size in bytes (so the UI can show
     /// "Sending 5.3 MB" before the connection starts).
     pub file_size: u64,
+    /// Sprint 5.5.4 Phase 3: UPnP hole status. `Some` means
+    /// the sender has an open port mapping and the token is v3
+    /// (cross-NAT capable). `None` means UPnP was unavailable
+    /// and the token is v2 (LAN-only).
+    pub upnp_status: Option<UpnpStatusInfo>,
 }
 
 #[tauri::command]
@@ -553,11 +569,16 @@ pub async fn p2p_send_start_cmd(
         .unwrap_or("file")
         .to_string();
     let file_size = started.token.size;
+    let upnp_status = started.upnp_info.as_ref().map(|info| UpnpStatusInfo {
+        external_ip: info.external_ip.to_string(),
+        external_port: info.external_port,
+    });
     let resp = P2pSendStartResp {
         token: started.token_compact.clone(),
         code: started.token.code.clone(),
         filename,
         file_size,
+        upnp_status,
     };
     *state.active.lock().await = Some(started);
     Ok(resp)

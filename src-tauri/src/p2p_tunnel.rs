@@ -726,6 +726,11 @@ pub struct StartedSend {
     pub token_compact: String,
     pub tunnel: TunnelHandle,
     pub server_task: JoinHandle<Result<(), String>>,
+    /// Sprint 5.5.4 Phase 3: info about the open UPnP port
+    /// mapping (if any). `Some` means the token is v3 (cross-NAT
+    /// capable). `None` means LAN-only (v2 token). The UI uses
+    /// this to render the "UPnP hole open / disabled" status.
+    pub upnp_info: Option<crate::upnp_hole::UpnpHoleInfo>,
 }
 
 /// Spawn a Named Tunnel via `cloudflared tunnel run --token X`.
@@ -1145,7 +1150,7 @@ pub async fn start_direct_sender(
     // UPnP is disabled or the search fails, we silently fall
     // back to LAN-only mDNS — the receiver on the same Wi-Fi
     // still works.
-    let upnp_hole = match crate::upnp_hole::UpnpHole::open(local_port) {
+    let upnp_outcome = match crate::upnp_hole::UpnpHole::open(local_port) {
         Ok((hole, info)) => {
             eprintln!(
                 "[p2p] UPnP hole opened: external={}:{} -> internal={}:{}",
@@ -1154,7 +1159,7 @@ pub async fn start_direct_sender(
                 info.internal_ip,
                 info.internal_port
             );
-            Some(hole)
+            Some((hole, info))
         }
         Err(e) => {
             eprintln!(
@@ -1163,6 +1168,41 @@ pub async fn start_direct_sender(
             );
             None
         }
+    };
+
+    // Sprint 5.5.4 Phase 3: if the UPnP hole opened, emit a
+    // v3 token that carries the public IP. Otherwise emit v2
+    // (LAN-only, mDNS discovery). The receiver dispatches on
+    // the prefix — v3 tries the public IP first, falls back to
+    // mDNS if NAT loopback is blocked.
+    let (token_compact, upnp_info) = match &upnp_outcome {
+        Some((_, info)) => {
+            let v3 = p2p_config::format_v3_token(
+                info.external_ip,
+                info.external_port,
+                &service_hash,
+                &code,
+            );
+            (v3, Some(info.clone()))
+        }
+        None => {
+            let v2 = p2p_config::format_v2_token(&service_hash, &code);
+            (v2, None)
+        }
+    };
+    let token = P2pToken {
+        v: if upnp_info.is_some() { 3 } else { 2 },
+        url: format!("direct://{}:{}", service_short, local_port),
+        salt: URL_SAFE_NO_PAD.encode(salt),
+        code: code.clone(),
+        fhash: hex::encode(fhash),
+        size: plaintext_size,
+        sha256: hex::encode(expected_sha256),
+    };
+
+    let (upnp_hole, _) = match upnp_outcome {
+        Some((h, i)) => (Some(h), Some(i)),
+        None => (None, None),
     };
 
     let tunnel = TunnelHandle {
@@ -1176,27 +1216,103 @@ pub async fn start_direct_sender(
         token_compact,
         tunnel,
         server_task,
+        upnp_info,
     })
 }
 
-/// Receive a file sent via Direct Mode. Parses a v2 token,
-/// resolves the sender via mDNS, and reuses the existing
-/// `receive_send_file` pipeline.
+/// Receive a file sent via Direct Mode. Dispatches on the
+/// token prefix:
+///   - v2 (nx:2:...): mDNS browse only.
+///   - v3 (nx:3:...): direct TCP to external_ip:external_port
+///     first (2s timeout), fall back to mDNS on failure. The
+///     fallback exists because some routers block NAT loopback
+///     (hairpinning) — when the receiver is on the same LAN as
+///     the sender, the public IP can be unreachable from inside
+///     even though UPnP hole is open.
 pub async fn receive_direct_file(
-    token_v2_compact: String,
+    token_compact: String,
     output_path: PathBuf,
     timeout_secs: u64,
 ) -> Result<ReceiveResult, String> {
-    // 1. Parse v2 token.
-    let v2 = p2p_config::parse_v2_token(&token_v2_compact)?;
-    // 2. Browse mDNS for the sender.
+    if token_compact.starts_with(p2p_config::TOKEN_PREFIX_V3) {
+        receive_v3_with_fallback(token_compact, output_path, timeout_secs).await
+    } else {
+        receive_v2_via_mdns(token_compact, output_path, timeout_secs).await
+    }
+}
+
+/// v2 path: mDNS-only, no UPnP hole expected. Preserved from
+/// Sprint 5.5.2 Phase 1.
+async fn receive_v2_via_mdns(
+    token_compact: String,
+    output_path: PathBuf,
+    timeout_secs: u64,
+) -> Result<ReceiveResult, String> {
+    let v2 = p2p_config::parse_v2_token(&token_compact)?;
     let (ip, port) = resolve_direct_service(&v2.service_hash, timeout_secs).await?;
     let url = format!("http://{}:{}", ip, port);
-    // 3. Decode the v2 token into a v1-style P2pToken. We need
-    //    salt + sha256 + size, which live in the receiver's
-    //    expectations; v2 only carries code + service_hash. So
-    //    we fetch /meta from the sender first (it's public —
-    //    no HMAC) to get those fields.
+    fetch_meta_and_receive(url, v2.code, output_path).await
+}
+
+/// v3 path: try the public IP first, fall back to mDNS. The
+/// public-IP attempt is a simple TCP connect with a short
+/// timeout — we're not sending any HTTP yet, just verifying
+/// the hole is reachable. If it works, we use it; if it
+/// times out or refuses, we assume NAT loopback and fall back.
+async fn receive_v3_with_fallback(
+    token_compact: String,
+    output_path: PathBuf,
+    timeout_secs: u64,
+) -> Result<ReceiveResult, String> {
+    let v3 = p2p_config::parse_v3_token(&token_compact)?;
+    eprintln!(
+        "[p2p] v3 token: trying external={}:{} (2s timeout) then mDNS fallback",
+        v3.external_ip, v3.external_port
+    );
+    // 2-second probe to the public endpoint.
+    let external_reachable =
+        probe_tcp(v3.external_ip, v3.external_port, Duration::from_secs(2)).await;
+    let (url, used_endpoint) = if external_reachable {
+        let u = format!("http://{}:{}", v3.external_ip, v3.external_port);
+        eprintln!("[p2p] v3: external endpoint reachable, using it");
+        (u, "external")
+    } else {
+        eprintln!(
+            "[p2p] v3: external endpoint unreachable, falling back to mDNS"
+        );
+        let (ip, port) =
+            resolve_direct_service(&v3.service_hash, timeout_secs).await?;
+        (format!("http://{}:{}", ip, port), "lan")
+    };
+    let result = fetch_meta_and_receive(url, v3.code, output_path).await?;
+    eprintln!("[p2p] v3 transfer complete (used {} endpoint)", used_endpoint);
+    Ok(result)
+}
+
+/// Quick TCP probe. Returns true if the connect succeeds within
+/// the timeout, false on timeout or refused.
+async fn probe_tcp(
+    ip: std::net::Ipv4Addr,
+    port: u16,
+    timeout: Duration,
+) -> bool {
+    let connect_fut = tokio::net::TcpStream::connect((ip, port));
+    match tokio::time::timeout(timeout, connect_fut).await {
+        Ok(Ok(_stream)) => {
+            // Connection succeeded. Drop the stream.
+            true
+        }
+        Ok(Err(_e)) => false, // connection refused or other IO error
+        Err(_) => false,      // timed out
+    }
+}
+
+/// Fetch /meta from the sender and run the v1 receive flow.
+async fn fetch_meta_and_receive(
+    url: String,
+    code: String,
+    output_path: PathBuf,
+) -> Result<ReceiveResult, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -1231,12 +1347,11 @@ pub async fn receive_direct_file(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "/meta missing 'sha256'".to_string())?
         .to_string();
-    // 4. Build a v1 P2pToken and run the existing receive flow.
     let token_v1 = P2pToken {
-        v: 2, // v2 in spirit; the v1 parser accepts any v.
+        v: 3, // we accept any v in the parser
         url,
         salt,
-        code: v2.code.clone(),
+        code,
         fhash,
         size,
         sha256,
@@ -1417,6 +1532,7 @@ pub async fn start_sender(
         token_compact,
         tunnel,
         server_task,
+        upnp_info: None,
     })
 }
 
