@@ -7,11 +7,13 @@
 //!   nexus d <input.nexus|nxar> <output>
 //!   nexus bench                          # run corpus benchmark
 //!
-//! Compression backends (v4 default, v5 = LZMA via xz2):
+//! Compression backends (v4 default, v5 = LZMA via xz2, v6 = v5 + smart preprocessor):
 //!   v4          — multi-stream LZ77 + rANS + dict codec (default)
 //!   v5          — LZMA level 6 (balanced, fast)
 //!   v5-min      — LZMA level 6 + minify pre-filter
 //!   v5-extreme  — LZMA level 9 (max ratio)
+//!   v6          — LZMA + swc AST minify (for .js/.ts/.tsx/.jsx) OR conservative minify
+//!   v6-extreme  — same as v6 but LZMA level 9
 
 use std::env;
 use std::fs;
@@ -20,7 +22,7 @@ use std::path::Path;
 use nexus_compress::engine;
 
 fn print_help() {
-    eprintln!("nexus CLI — NexusCompress v4 + v5 LZMA");
+    eprintln!("nexus CLI — NexusCompress v4 + v5 LZMA + v6 AST-aware");
     eprintln!();
     eprintln!("USAGE:");
     eprintln!("    nexus c [OPTIONS] <input> <output>");
@@ -28,14 +30,17 @@ fn print_help() {
     eprintln!("    nexus bench");
     eprintln!();
     eprintln!("OPTIONS:");
-    eprintln!("    --backend NAME  v4 | v5 | v5-min | v5-extreme   (default: v4)");
-    eprintln!("    --minify        apply the conservative minify pre-filter");
+    eprintln!("    --backend NAME  v4 | v5 | v5-min | v5-extreme | v6 | v6-extreme");
+    eprintln!("                    (default: v4)");
+    eprintln!("    --minify        apply the conservative minify pre-filter (v5-min)");
     eprintln!("    -h, --help      show this help");
     eprintln!();
     eprintln!("EXAMPLES:");
     eprintln!("    nexus c big.txt out.nxs              # default v4");
     eprintln!("    nexus c --backend v5 code.js out.lz   # LZMA balanced");
     eprintln!("    nexus c --backend v5-min src out.lz  # LZMA + minify (lossless)");
+    eprintln!("    nexus c --backend v6 app.tsx out.lz  # LZMA + swc AST minify (lossy)");
+    eprintln!("    nexus c --backend v6-extreme code.js out.lz  # LZMA -9 + swc");
     eprintln!("    nexus c --backend v5-extreme big.nxs tiny.lz  # LZMA -9 (max ratio)");
     eprintln!("    nexus d out.nxs big.txt              # auto-detect v4/v5");
 }
@@ -110,17 +115,25 @@ fn main() {
                 );
             } else {
                 let bytes = fs::read(input).expect("read input");
-                let out =
-                    engine::compress_with(backend_name, &bytes, minify).expect("compress");
+                let out = if matches!(backend_name, "v6" | "v6-extreme") {
+                    // v6 needs the file extension to pick the right
+                    // preprocessor. engine::compress_with only does
+                    // conservative minify unconditionally, so we
+                    // call the v6 entry point directly.
+                    let ext = input.extension().and_then(|e| e.to_str());
+                    let level = if backend_name == "v6-extreme" { 9 } else { 6 };
+                    engine::compress_v6(&bytes, ext, level)
+                } else {
+                    engine::compress_with(backend_name, &bytes, minify).expect("compress")
+                };
                 fs::write(output, &out).expect("write output");
                 let ratio = bytes.len() as f64 / out.len().max(1) as f64;
                 eprintln!(
-                    "{} -> {} ({:.2}x, {}, minify={})",
+                    "{} -> {} ({:.2}x, {})",
                     positional[1],
                     output,
                     ratio,
                     backend_name,
-                    minify
                 );
             }
         }

@@ -121,16 +121,56 @@ pub fn compress_with(
         "v5" => Ok(LzmaEngine::new(6).compress(&payload)),
         "v5-min" => Ok(LzmaEngine::new(9).compress(&payload)),
         "v5-extreme" => Ok(LzmaEngine::new(9).compress(&payload)),
+        "v6" => Ok(compress_v6(input, None, 6)),
+        "v6-extreme" => Ok(compress_v6(input, None, 9)),
         other => Err(format!(
-            "unknown backend '{other}' (use v4, v5, v5-min, v5-extreme)"
+            "unknown backend '{other}' (use v4, v5, v5-min, v5-extreme, v6, v6-extreme)"
         )),
     }
+}
+
+/// v6 backend: LZMA + smart preprocessor.
+///
+/// The preprocessor is chosen by file extension when `ext_hint` is
+/// `Some`, otherwise by content sniffing:
+/// - `.js` / `.jsx` / `.mjs` / `.cjs` / `.ts` / `.tsx`:
+///   `swc_core` AST minify (lossy — drops comments, formatting,
+///   identifier names; preserves runtime semantics).
+/// - Anything else that looks like text: conservative
+///   `crate::minify` (lossless — strips comments, collapses
+///   whitespace, but keeps all original characters).
+/// - Binary content: pass through unchanged.
+///
+/// **Honest contract:** v6 output is NOT byte-identical to the
+/// input. After decompression you get the minified source (or the
+/// original if the file was binary). The `ext_hint` lets the CLI
+/// pass the file extension from the path so we can pick the right
+/// preprocessor without sniffing.
+pub fn compress_v6(input: &[u8], ext_hint: Option<&str>, lzma_level: u32) -> Vec<u8> {
+    let ext = ext_hint
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_js_family = matches!(
+        ext.as_str(),
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx"
+    );
+    let pre: Vec<u8> = if is_js_family {
+        // AST minify. Lossy. If parsing fails (rare for .js/.ts),
+        // the ast_minify module falls back to passing the input
+        // through unchanged.
+        crate::ast_minify::minify(input).bytes
+    } else {
+        // Conservative text minify. Returns input unchanged for
+        // binary content (detected via NUL bytes / non-UTF-8).
+        crate::minify::minify(input)
+    };
+    LzmaEngine::new(lzma_level).compress(&pre)
 }
 
 /// All backends registered with their public names. Used by the
 /// CLI's `--help` and the Tauri settings panel.
 pub fn list_backends() -> &'static [&'static str] {
-    &["v4", "v5", "v5-min", "v5-extreme"]
+    &["v4", "v5", "v5-min", "v5-extreme", "v6", "v6-extreme"]
 }
 
 // ---------------------------------------------------------------------------

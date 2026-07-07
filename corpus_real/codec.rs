@@ -1,0 +1,846 @@
+//! Top-level codec — pipeline orchestrator.
+//!
+//! ## v2 pipeline (Format v2 — current)
+//! 1. Split input via CDC (Gear hash, min=4K avg=32K max=64K).
+//! 2. For each chunk:
+//!    a. Compute FNV-1a hash, check dedup table.
+//!    b. If duplicate: emit `BlockType::Duplicate` referencing original.
+//!    c. If unique: classify, then LZ77 with optimal-parsing DP (v2 cost
+//!       model: literal=13 bits, match=32 bits → optimal wins on L>=3).
+//!    d. rANS-encode the literal bytes.
+//!    e. Write op stream: 1 byte flag per literal (no placeholder),
+//!       4 bytes per match (u16 dist + u8 len).
+//!    f. If compressed payload >= raw block size: fall back to `Raw`.
+//! 3. Emit header with version=3.
+//!
+//! ## Decoder
+//! Reads header version. Handles v0, v2, and v3 compressed payloads.
+//! Maintains `Vec<Vec<u8>>` cache for Duplicate lookups.
+//!
+//! ## v3 multi-stream rANS (the current default)
+//!
+//! Instead of one shared rANS stream for everything, v3 splits the
+//! compressed payload into three independent rANS streams with their
+//! own frequency tables:
+//!
+//! 1. **Literals stream** — raw byte values from `Op::Lit(b)` entries.
+//! 2. **Lengths stream** — match lengths (u8, 1..=255).
+//! 3. **Distances stream** — match distances, encoded as TWO u8
+//!    symbols per match (low byte, then high byte) so we keep the
+//!    256-symbol rANS alphabet while gaining entropy benefit on the
+//!    high byte (which is heavily skewed toward small values for
+//!    local references in structured data).
+//!
+//! An op-flags stream (one byte per op: 0 = literal, 1 = match) tells
+//! the decoder how to interleave the three streams.
+//!
+//! Why this wins even without changing LZ77:
+//! - Distance's high byte is non-uniform (most distances < 256 for
+//!   source code) → rANS gives big wins.
+//! - Length has its own skewed distribution (3, 4, 8, 16, ... are
+//!   common) → rANS picks this up.
+//! - Literals stay where they were (already optimal in v2).
+//! - Total: lazy matching finds matches that the v3 format can encode
+//!   more cheaply.
+
+use crate::cdc;
+use crate::classifier::{classify, BlockStats};
+use crate::dedup::{DedupResult, DedupTable};
+use crate::format::{
+    BlockHeader, BlockType, NexusHeader, VERSION_V0, VERSION_V2, VERSION_V3,
+};
+use crate::lz77::{MatchDecoder, MatchFinder, Op};
+use crate::rans_v4::{decode_table, rans_decode, FreqTable};
+use std::io::{Cursor, Read};
+
+const TAG_RAW: u8 = 1;
+const TAG_RANS_LITERALS_V0: u8 = 2;
+const TAG_DUPLICATE: u8 = 3;
+const TAG_RANS_LITERALS_V2: u8 = 4;
+const TAG_V3_MULTISTREAM: u8 = 5;
+const TAG_V3_MULTISTREAM_RLE: u8 = 7;
+const TAG_V3_MULTISTREAM_DICT: u8 = 8;
+
+/// CDC chunk size parameters.
+///
+/// `max = 64 KB` is the sweet spot:
+/// - On uniform/repetitive data, the Gear hash never finds a natural
+///   boundary, so we hit max_chunk → chunks align at 64K offsets →
+///   dedup matches them across copies. This preserves fixed-block
+///   performance on the pathological cases.
+/// - On real data with content variation, the Gear hash finds natural
+///   boundaries every ~32 KB (avg). When a file is modified between
+///   versions (the CDC use case), the boundaries before the
+///   modification point stay aligned → dedup matches across versions.
+/// - Matches the LZ77 window size, so dedup and LZ77 cooperate: a
+///   duplicate chunk never loses intra-block compression quality
+///   versus treating it as a normal block.
+const CDC_MIN_CHUNK: usize = 4 * 1024; // 4 KB
+const CDC_AVG_BITS: u32 = 15; // 2^15 = 32 KB average
+const CDC_MAX_CHUNK: usize = 64 * 1024; // 64 KB (== LZ77 window)
+
+/// Premium compression mode: uses the optimal LZ77 parser for the
+/// standard v3 path. ~8.8× slower than `compress` for marginal or
+/// zero ratio gain (see "Sprint 2.9" in README for the bench).
+///
+/// Kept as a separate entry point so the default `compress` stays
+/// fast. The Tauri API exposes it via `CompressionLevel::Premium`.
+pub fn compress_premium(input: &[u8]) -> Vec<u8> {
+    // For now, premium is the same as fast on the v4.5/v4.8 paths
+    // (which is where most compression happens — the LOCAL and
+    // fixed-256 dict codecs use lazy LZ77 internally and are
+    // unaffected by the per-block optimal vs lazy choice). The
+    // v3 path (where optimal was tried in sprint 2.9) is rarely
+    // hit on the corpus.
+    //
+    // Future work: wire the optimal DP into `encode_v45_multistream`
+    // and `encode_v45_multistream_local` so the dict paths also
+    // benefit. The cost model in `src/cost.rs` would need a
+    // per-block entropy hookup first.
+    compress(input)
+}
+
+pub fn compress(input: &[u8]) -> Vec<u8> {
+    let total_uncompressed = input.len() as u64;
+
+    // Content-defined chunking: variable-size blocks aligned to content
+    // boundaries. Each chunk is then dedup'd + LZ77 + rANS compressed.
+    let chunk_specs: Vec<(usize, usize)> = if input.is_empty() {
+        vec![]
+    } else {
+        cdc::chunkify(input, CDC_MIN_CHUNK, CDC_MAX_CHUNK, CDC_AVG_BITS)
+    };
+
+    // Slice the input into chunks per the CDC boundaries
+    let chunks: Vec<&[u8]> = chunk_specs
+        .iter()
+        .map(|&(off, len)| &input[off..off + len])
+        .collect();
+
+    let mut out = Vec::with_capacity(input.len() + 64);
+    let header = NexusHeader {
+        version: VERSION_V3,
+        flags: 0,
+        block_count: chunks.len() as u32,
+        uncompressed_total_size: total_uncompressed,
+    };
+    header.write(&mut out).unwrap();
+
+    let mut dedup = DedupTable::new();
+    // Sequential counter of unique (non-duplicate, non-empty) blocks.
+    // The decoder's cache[unique_counter] matches this counter, so
+    // Duplicate references resolve correctly. (Earlier versions used
+    // `block_id` (the chunk index) and the indices diverged whenever
+    // any block was marked as a duplicate, causing "Duplicate references
+    // unknown block id" panics on large files.)
+    let mut unique_counter: u32 = 0;
+    // Cache of unique-block contents, indexed by unique_counter. Used
+    // to verify hash matches when dedup.lookup returns Duplicate (to
+    // rule out FNV-1a collisions, which would cause silent corruption).
+    let mut unique_contents: Vec<Vec<u8>> = Vec::new();
+
+    for (block_id, block) in chunks.iter().enumerate() {
+        let _ = block_id; // block_id is no longer the dedup key.
+
+        // Dedup check (only for non-empty blocks).
+        if !block.is_empty() {
+            // The closure looks up the prior block's content by
+            // unique_id so we can verify the hash match. Returns
+            // None if the unique_id is out of range (defensive).
+            let original_content = |orig_id: u32| -> Option<Vec<u8>> {
+                unique_contents.get(orig_id as usize).cloned()
+            };
+            match dedup.lookup(block, unique_counter, original_content) {
+                DedupResult::Duplicate { original_id } => {
+                    // Emit Duplicate block: payload = [tag][u32 original_id]
+                    let mut payload = Vec::with_capacity(5);
+                    payload.push(TAG_DUPLICATE);
+                    payload.extend_from_slice(&original_id.to_le_bytes());
+                    let bh = BlockHeader {
+                        block_type: BlockType::Duplicate,
+                        uncompressed_size: block.len() as u32,
+                        compressed_size: payload.len() as u32,
+                    };
+                    bh.write(&mut out).unwrap();
+                    out.extend_from_slice(&payload);
+                    continue;
+                }
+                DedupResult::Unique { .. } => {
+                    // The dedup table recorded this block at
+                    // unique_counter; we'll increment after the
+                    // normal-compression path below.
+                }
+            }
+        }
+
+        // Normal compression path
+        let mut block_type = if block.is_empty() {
+            BlockType::Unknown
+        } else {
+            classify(block)
+        };
+        let stats = if block.is_empty() {
+            BlockStats {
+                size: 0,
+                entropy: 0.0,
+                printable_ratio: 0.0,
+                struct_score: 0.0,
+                run_avg: 0.0,
+            }
+        } else {
+            crate::classifier::compute_stats(block)
+        };
+        let payload = encode_block(block, &mut block_type, &stats);
+        let bh = BlockHeader {
+            block_type,
+            uncompressed_size: block.len() as u32,
+            compressed_size: payload.len() as u32,
+        };
+        bh.write(&mut out).unwrap();
+
+        // Record this block as a new unique entry (indexed by
+        // unique_counter, the same index the decoder will use).
+        if !block.is_empty() {
+            unique_contents.push(block.to_vec());
+            unique_counter += 1;
+        }
+        out.extend_from_slice(&payload);
+    }
+    out
+}
+
+fn encode_block(block: &[u8], block_type: &mut BlockType, stats: &BlockStats) -> Vec<u8> {
+    if block.is_empty() {
+        return vec![];
+    }
+
+    // Try the standard v3 multistream path.
+    let standard = encode_v3_multistream(block).map(|mut payload| {
+        payload.insert(0, TAG_V3_MULTISTREAM);
+        payload
+    });
+
+    // Try the RLE pre-filter path. RLE shrinks input when there are runs
+    // of ≥2 same bytes; it expands when bytes are all unique AND have
+    // values >= 0x80 (because each high byte becomes a 2-byte "run of 1").
+    //
+    // Gating heuristic: only try RLE when the block has a non-trivial
+    // average run length (>= 1.1 means at least 10% of adjacent byte pairs
+    // are equal). On blocks where this isn't true, the standard path is
+    // faster and produces equivalent output — RLE would just be wasted
+    // LZ77+rans work to confirm the same answer.
+    let rle_path = if stats.run_avg >= 1.1 {
+        let rle_block = crate::rle::compress_rle(block);
+        if rle_block.len() < block.len() {
+            encode_v3_multistream(&rle_block).map(|mut payload| {
+                payload.insert(0, TAG_V3_MULTISTREAM_RLE);
+                payload
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Try the v4.5 dict-aware path. This is the most expensive path
+    // (5 rANS streams, 2-bit op-flags, dict lookup per LZ77 step) so
+    // we ONLY try it when the pre-scan suggests dict refs will help
+    // (select != NONE) and the block is large enough that the table
+    // overhead (≈5 KB for 5 tables) is amortized.
+    let dict_path = if block.len() >= 8 * 1024
+        && crate::dict_codec::should_try_v45(block)
+    {
+        crate::dict_codec::encode_v45_multistream(block).map(|mut payload| {
+            payload.insert(0, TAG_V3_MULTISTREAM_DICT);
+            payload
+        })
+    } else {
+        None
+    };
+
+    // Try the v4.8 LOCAL path. Builds a per-block sub-dict from the
+    // top-K entries of the full 5348-entry trained dict. Uses a
+    // 669-byte bitmask (5348 bits) to mark which entries are active.
+    // Wins when the block has many dict matches AND the fixed 256-entry
+    // compact sub-dict doesn't cover the most-frequent entries.
+    //
+    // Gated by `quick_entropy_gate` (NOT `should_try_v45`) so the
+    // LOCAL path isn't held back by the 500-byte sample bias in
+    // `dict_select_for_block`. For files with non-uniform entropy
+    // distribution (e.g. `mixed.bin`, which has a ~5KB random header
+    // followed by 60KB of natural text in a single CDC block), the
+    // 500-byte sample sees the random header tail and incorrectly
+    // rejects blocks that would win on the dict. The LOCAL encoder
+    // is self-gating: `select_local_dict_ids` returns 0 matches for
+    // truly random blocks, so the function returns None cheaply.
+    let local_path = if block.len() >= 8 * 1024
+        && crate::dict_codec::quick_entropy_gate(block)
+    {
+        crate::dict_codec::encode_v45_multistream_local(block).map(|mut payload| {
+            payload.insert(0, TAG_V3_MULTISTREAM_DICT);
+            payload
+        })
+    } else {
+        None
+    };
+
+    // Pick the smallest of (standard, rle, dict, local, none).
+    let candidates: Vec<(usize, Vec<u8>)> = [
+        standard.map(|p| (0usize, p)),
+        rle_path.map(|p| (1usize, p)),
+        dict_path.map(|p| (2usize, p)),
+        local_path.map(|p| (3usize, p)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if candidates.is_empty() {
+        *block_type = BlockType::Raw;
+        let mut raw = Vec::with_capacity(1 + block.len());
+        raw.push(TAG_RAW);
+        raw.extend_from_slice(block);
+        return raw;
+    }
+
+    candidates
+        .into_iter()
+        .min_by_key(|(_, p)| p.len())
+        .map(|(_, p)| p)
+        .unwrap()
+}
+
+/// Build the v3 multistream payload (without the leading tag byte) for
+/// the given input data. Returns None if the encoded form is not smaller
+/// than the input (incompressible).
+fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
+    if data.is_empty() {
+        return None;
+    }
+
+    // 1. LZ77 with hash chains + lazy matching.
+    //
+    //    v3 still uses lazy matching (same as v2). Optimal parsing is
+    //    now in better shape thanks to per-byte rANS distance (the
+    //    close-distance bias is real now) but we keep lazy default
+    //    because it still wins on source code (lazy finds 30.30x on
+    //    Sprint 2.9 re-enabled the optimal parser as an experimental
+    //    option (see `compression_level` in src/api.rs). The default
+    //    remains lazy because, even with the v2-cost-model
+    //    correction (literal=8, match=17, threshold=4 — see
+    //    `src/cost.rs`), the optimal DP is 8.8× slower and the
+    //    ratio is unchanged or slightly worse than lazy. The DP's
+    //    future-cost estimate (all-literals lookahead) is still too
+    //    coarse to consistently beat lazy's greedy+1-lookahead.
+    //    See "Sprint 2.9: optimal parser (the final boss)" in
+    //    README for the full bench.
+    let mut mf = MatchFinder::new();
+    let ops = mf.encode(data);
+
+    // 2. Split ops into THREE independent streams for v3.
+    //
+    //    Why three: LZ77 op data has different statistics per field.
+    //    - Literals: full byte range (0..=255), skewed toward ASCII.
+    //    - Lengths: small range (3..=255), highly skewed toward 3-16.
+    //    - Distances: 1..=65535, with high byte biased toward 0
+    //      (most matches are local in structured data).
+    //
+    //    Mixing them in one rANS table destroys each field's local
+    //    entropy. Separate tables let rANS exploit each field's
+    //    specific distribution.
+    let mut literals: Vec<u8> = Vec::new();
+    let mut lengths: Vec<u8> = Vec::new();
+    let mut dist_lows: Vec<u8> = Vec::new();
+    let mut dist_highs: Vec<u8> = Vec::new();
+    for op in &ops {
+        match op {
+            Op::Lit(b) => literals.push(*b),
+            Op::Match { dist, len } => {
+                lengths.push(*len as u8);
+                dist_lows.push((*dist & 0xFF) as u8);
+                dist_highs.push(((*dist >> 8) & 0xFF) as u8);
+            }
+            Op::DictRef { .. } => unreachable!(
+                "DictRef ops are only produced by encode_with_dict, which the codec \
+                 does not call yet. This is a bug."
+            ),
+        }
+    }
+
+    // 3. Build frequency tables and rANS-encode each stream.
+    //
+    //    Sprint 2.7: the 4 base v3 streams now use SPARSE encoding
+    //    (32-byte bitmask + densified rANS table). Previously each
+    //    table was a dense 256-entry rANS table (~1027 bytes) with
+    //    "ghost" entries for symbols that never appeared in the
+    //    block. Sparse encoding drops the table to ~50-200 bytes
+    //    per stream, saving ~800-900 bytes per stream × 4 streams
+    //    = ~3-4 KB per block. This is a generalization of the dict
+    //    sparse encoding from sprint 2.6.
+    let (lit_table_section, lit_stream) = crate::rans_v4::sparse_rans_encode_u8(&literals, 12);
+    let (len_table_section, len_stream) = crate::rans_v4::sparse_rans_encode_u8(&lengths, 12);
+    let (dist_lo_table_section, dist_lo_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_lows, 12);
+    let (dist_hi_table_section, dist_hi_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_highs, 12);
+
+    // 4. Op-flags stream (one byte per op: 0 = literal, 1 = match).
+    let mut ops_bytes = Vec::with_capacity(ops.len() + 4);
+    ops_bytes.extend_from_slice(&(ops.len() as u32).to_le_bytes());
+    for op in &ops {
+        match op {
+            Op::Lit(_) => ops_bytes.push(0),
+            Op::Match { .. } => ops_bytes.push(1),
+            Op::DictRef { .. } => unreachable!(
+                "DictRef ops not handled by codec yet (see lz77.rs::encode_with_dict)"
+            ),
+        }
+    }
+
+    // 5. Compressed payload (v3 format, no leading tag here — caller adds it).
+    //    Layout:
+    //      [u32 lit_table_len][u32 lit_stream_len]
+    //      [u32 len_table_len][u32 len_stream_len]
+    //      [u32 dist_lo_table_len][u32 dist_lo_stream_len]
+    //      [u32 dist_hi_table_len][u32 dist_hi_stream_len]
+    //      [u32 ops_len]
+    //      [lit_table_section][lit_stream]
+    //      [len_table_section][len_stream]
+    //      [dist_lo_table_section][dist_lo_stream]
+    //      [dist_hi_table_section][dist_hi_stream]
+    //      [ops_bytes]
+    //
+    //    Each table_section is [32 bytes bitmask][densified rANS table].
+    //    The densified rANS table uses the SAME encode_table format
+    //    as the dense table — only n_symbols changes.
+    let mut out = Vec::with_capacity(
+        8 * 8 + lit_table_section.len()
+            + lit_stream.len()
+            + len_table_section.len()
+            + len_stream.len()
+            + dist_lo_table_section.len()
+            + dist_lo_stream.len()
+            + dist_hi_table_section.len()
+            + dist_hi_stream.len()
+            + ops_bytes.len(),
+    );
+    push_u32(&mut out, lit_table_section.len() as u32);
+    push_u32(&mut out, lit_stream.len() as u32);
+    push_u32(&mut out, len_table_section.len() as u32);
+    push_u32(&mut out, len_stream.len() as u32);
+    push_u32(&mut out, dist_lo_table_section.len() as u32);
+    push_u32(&mut out, dist_lo_stream.len() as u32);
+    push_u32(&mut out, dist_hi_table_section.len() as u32);
+    push_u32(&mut out, dist_hi_stream.len() as u32);
+    push_u32(&mut out, ops_bytes.len() as u32);
+    out.extend_from_slice(&lit_table_section);
+    out.extend_from_slice(&lit_stream);
+    out.extend_from_slice(&len_table_section);
+    out.extend_from_slice(&len_stream);
+    out.extend_from_slice(&dist_lo_table_section);
+    out.extend_from_slice(&dist_lo_stream);
+    out.extend_from_slice(&dist_hi_table_section);
+    out.extend_from_slice(&dist_hi_stream);
+    out.extend_from_slice(&ops_bytes);
+
+    if out.len() >= data.len() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Build a rANS frequency table with custom precision. Lower precision
+/// (e.g., 8 bits) gives smaller tables at the cost of slightly less
+/// accurate probability estimates. For small-alphabet streams (match
+/// fields in v3) 8 bits is plenty and saves ~150 bytes per table.
+#[allow(dead_code)] // experimental helper kept for future sparse-stream work
+fn build_table_with_precision(data: &[u8], scale_bits: u32) -> FreqTable {
+    let mut counts = [0u32; 256];
+    for &b in data {
+        counts[b as usize] += 1;
+    }
+    let mut table = FreqTable::from_counts(&counts);
+    // Override the auto-picked scale_bits with the requested one (if it fits).
+    // If the requested precision is too small for the total, fall back to
+    // auto-picked. rANS needs scale_bits s.t. 2^scale_bits >= total.
+    if (1u32 << scale_bits) >= table.total && scale_bits > 0 {
+        table.scale_bits = scale_bits;
+    }
+    table
+}
+
+#[inline]
+fn push_u32(buf: &mut Vec<u8>, v: u32) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+#[inline]
+fn read_u32(buf: &[u8], off: &mut usize) -> u32 {
+    let v = u32::from_le_bytes(buf[*off..*off + 4].try_into().unwrap());
+    *off += 4;
+    v
+}
+
+pub fn decompress(input: &[u8]) -> Vec<u8> {
+    let mut cursor = Cursor::new(input);
+    let header = NexusHeader::read(&mut cursor).expect("invalid .nexus header");
+    assert!(
+        header.version == VERSION_V0
+            || header.version == VERSION_V2
+            || header.version == VERSION_V3
+            || header.version == VERSION_V3,
+        "unsupported .nexus version {} (expected {}, {}, or {})",
+        header.version, VERSION_V0, VERSION_V2, VERSION_V3
+    );
+    let mut out = Vec::with_capacity(header.uncompressed_total_size as usize);
+
+    // Cache of decoded blocks for Duplicate lookup
+    let mut cache: Vec<Vec<u8>> = Vec::new();
+
+    for block_idx in 0..header.block_count {
+        let bh = BlockHeader::read(&mut cursor).expect("invalid block header");
+        let mut payload = vec![0u8; bh.compressed_size as usize];
+        cursor.read_exact(&mut payload).unwrap();
+
+        let block = decode_block(&payload, bh.uncompressed_size as usize, bh.block_type, &mut cache, header.version);
+        eprintln!("[decompress] block {} of {}: type={:?} uncompressed={} compressed={} decoded={}",
+            block_idx, header.block_count, bh.block_type, bh.uncompressed_size, bh.compressed_size, block.len());
+        out.extend_from_slice(&block);
+    }
+    out
+}
+
+fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType, cache: &mut Vec<Vec<u8>>, _version: u8) -> Vec<u8> {
+    if uncompressed_size == 0 {
+        return vec![];
+    }
+    assert!(!payload.is_empty(), "empty payload for non-empty block");
+
+    // Duplicate block: payload = [tag][u32 original_id]
+    if payload[0] == TAG_DUPLICATE || block_type == BlockType::Duplicate {
+        let original_id =
+            u32::from_le_bytes(payload[1..5].try_into().unwrap()) as usize;
+        let original = cache
+            .get(original_id)
+            .unwrap_or_else(|| panic!(
+                "Duplicate references unknown block id {} (cache.len()={}, block_type={:?})",
+                original_id, cache.len(), block_type
+            ));
+        return original.clone();
+    }
+
+    if payload[0] == TAG_RAW {
+        let raw = payload[1..].to_vec();
+        cache.push(raw.clone());
+        return raw;
+    }
+
+    // v3: multi-stream rANS — split into lit / len / dist_lo / dist_hi
+    if payload[0] == TAG_V3_MULTISTREAM {
+        return decode_block_v3(payload, cache, false);
+    }
+    // v3 + RLE pre-filter: same as above, but RLE-decode the LZ77 output.
+    if payload[0] == TAG_V3_MULTISTREAM_RLE {
+        return decode_block_v3(payload, cache, true);
+    }
+    // v4.5: dict-aware path with 5 rANS streams and 2-bit op-flags.
+    // The decoder re-loads the same sub-dict based on the dict_select
+    // field in the payload (same file-baked dicts as the encoder used).
+    if payload[0] == TAG_V3_MULTISTREAM_DICT {
+        let block = crate::dict_codec::decode_v45_multistream(&payload[1..]);
+        cache.push(block.clone());
+        return block;
+    }
+
+    // v0 / v2: single rANS stream
+    let is_v2 = payload[0] == TAG_RANS_LITERALS_V2;
+    if !is_v2 {
+        assert_eq!(
+            payload[0], TAG_RANS_LITERALS_V0,
+            "unsupported block tag {}",
+            payload[0]
+        );
+    }
+
+    // RANS-compressed block. Layout differs between v0 and v2:
+    //   v0: [tag=2][u32 table_len][u32 rans_len][table][rans][ops]
+    //   v2: [tag=4][u32 table_len][u32 rans_len][table][rans][ops]
+    //      (same header layout, different op-stream encoding)
+    let table_len = u32::from_le_bytes(payload[1..5].try_into().unwrap()) as usize;
+    let rans_len = u32::from_le_bytes(payload[5..9].try_into().unwrap()) as usize;
+    let table_bytes = &payload[9..9 + table_len];
+    let rans_payload = &payload[9 + table_len..9 + table_len + rans_len];
+    let ops_bytes = &payload[9 + table_len + rans_len..];
+
+    let table = decode_table(table_bytes);
+
+    let n_ops = u32::from_le_bytes(ops_bytes[0..4].try_into().unwrap()) as usize;
+    let mut ops: Vec<Op> = Vec::with_capacity(n_ops);
+    let mut p = 4usize;
+    let mut n_literals = 0usize;
+    for _ in 0..n_ops {
+        let flag = ops_bytes[p];
+        p += 1;
+        match flag {
+            0 => {
+                // Literal: v0 has placeholder byte, v2 does not.
+                if is_v2 {
+                    ops.push(Op::Lit(0)); // placeholder, overwritten by rANS later
+                } else {
+                    ops.push(Op::Lit(ops_bytes[p]));
+                    p += 1;
+                }
+                n_literals += 1;
+            }
+            1 => {
+                let (dist, len) = if is_v2 {
+                    // v2: u16 distance + u8 length
+                    let d = u16::from_le_bytes(ops_bytes[p..p + 2].try_into().unwrap()) as u32;
+                    p += 2;
+                    let l = ops_bytes[p] as u32;
+                    p += 1;
+                    (d, l)
+                } else {
+                    // v0: u32 distance + u32 length
+                    let d = u32::from_le_bytes(ops_bytes[p..p + 4].try_into().unwrap());
+                    p += 4;
+                    let l = u32::from_le_bytes(ops_bytes[p..p + 4].try_into().unwrap());
+                    p += 4;
+                    (d, l)
+                };
+                ops.push(Op::Match { dist, len });
+            }
+            _ => panic!("unknown op flag {}", flag),
+        }
+    }
+
+    let decoded_lits = rans_decode(rans_payload, &table, n_literals);
+
+    let mut lit_iter = decoded_lits.into_iter();
+    for op in ops.iter_mut() {
+        if let Op::Lit(slot) = op {
+            *slot = lit_iter.next().expect("ran out of decoded literals") as u8;
+        }
+    }
+
+    let mut md = MatchDecoder::new();
+    let decoded = md.decode(&ops);
+
+    // Add to cache for future Duplicate references
+    cache.push(decoded.clone());
+
+    decoded
+}
+
+/// v3 multi-stream decoder.
+///
+/// Reads 4 rANS streams (literals, lengths, dist_low, dist_high) and
+/// reconstructs the op stream from the interleave flags. Each rANS
+/// stream has its own frequency table.
+///
+/// `was_rle`: if true, the input was RLE-pre-filtered before LZ77, so
+/// the LZ77 output must be RLE-decoded to recover the original block.
+fn decode_block_v3(payload: &[u8], cache: &mut Vec<Vec<u8>>, was_rle: bool) -> Vec<u8> {
+    let mut off = 1usize; // skip TAG_V3_MULTISTREAM or TAG_V3_MULTISTREAM_RLE
+
+    // Read the 9 u32 sizes
+    let lit_table_len = read_u32(payload, &mut off) as usize;
+    let lit_stream_len = read_u32(payload, &mut off) as usize;
+    let len_table_len = read_u32(payload, &mut off) as usize;
+    let len_stream_len = read_u32(payload, &mut off) as usize;
+    let dist_lo_table_len = read_u32(payload, &mut off) as usize;
+    let dist_lo_stream_len = read_u32(payload, &mut off) as usize;
+    let dist_hi_table_len = read_u32(payload, &mut off) as usize;
+    let dist_hi_stream_len = read_u32(payload, &mut off) as usize;
+    let ops_len = read_u32(payload, &mut off) as usize;
+
+    // Slice each section
+    let lit_table_bytes = &payload[off..off + lit_table_len];
+    off += lit_table_len;
+    let lit_stream = &payload[off..off + lit_stream_len];
+    off += lit_stream_len;
+
+    let len_table_bytes = &payload[off..off + len_table_len];
+    off += len_table_len;
+    let len_stream = &payload[off..off + len_stream_len];
+    off += len_stream_len;
+
+    let dist_lo_table_bytes = &payload[off..off + dist_lo_table_len];
+    off += dist_lo_table_len;
+    let dist_lo_stream = &payload[off..off + dist_lo_stream_len];
+    off += dist_lo_stream_len;
+
+    let dist_hi_table_bytes = &payload[off..off + dist_hi_table_len];
+    off += dist_hi_table_len;
+    let dist_hi_stream = &payload[off..off + dist_hi_stream_len];
+    off += dist_hi_stream_len;
+
+    let ops_bytes = &payload[off..off + ops_len];
+
+    // Decode the rANS streams.
+    //
+    //    Sprint 2.7: each table_section starts with a 32-byte bitmask
+    //    followed by the densified rANS table. `sparse_rans_decode_u8`
+    //    reads the bitmask, remaps dense indices to original u8 values,
+    //    and returns the original stream.
+    let n_ops = u32::from_le_bytes(ops_bytes[0..4].try_into().unwrap()) as usize;
+    let flags: Vec<u8> = ops_bytes[4..4 + n_ops].to_vec();
+
+    // Count how many literals vs matches so we know how much to decode from each
+    let n_lits = flags.iter().filter(|&&f| f == 0).count();
+    let n_matches = n_ops - n_lits;
+
+    let lit_values = crate::rans_v4::sparse_rans_decode_u8(lit_table_bytes, lit_stream, n_lits);
+    let len_values = crate::rans_v4::sparse_rans_decode_u8(len_table_bytes, len_stream, n_matches);
+    let dist_lo_values = crate::rans_v4::sparse_rans_decode_u8(dist_lo_table_bytes, dist_lo_stream, n_matches);
+    let dist_hi_values = crate::rans_v4::sparse_rans_decode_u8(dist_hi_table_bytes, dist_hi_stream, n_matches);
+
+    // Reconstruct ops by interleaving per the flags
+    let mut ops: Vec<Op> = Vec::with_capacity(n_ops);
+    let mut lit_iter = lit_values.into_iter();
+    let mut len_iter = len_values.into_iter();
+    let mut dlo_iter = dist_lo_values.into_iter();
+    let mut dhi_iter = dist_hi_values.into_iter();
+    for &flag in &flags {
+        match flag {
+            0 => {
+                ops.push(Op::Lit(lit_iter.next().expect("ran out of literals")));
+            }
+            1 => {
+                let l = len_iter.next().expect("ran out of lengths") as u32;
+                let lo = dlo_iter.next().expect("ran out of dist_lows") as u32;
+                let hi = dhi_iter.next().expect("ran out of dist_highs") as u32;
+                ops.push(Op::Match {
+                    dist: lo | (hi << 8),
+                    len: l,
+                });
+            }
+            _ => panic!("unknown op flag {}", flag),
+        }
+    }
+
+    let mut md = MatchDecoder::new();
+    let mut decoded = md.decode(&ops);
+    if was_rle {
+        decoded = crate::rle::decompress_rle(&decoded);
+    }
+    cache.push(decoded.clone());
+    decoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_small_text() {
+        let data = b"The quick brown fox jumps over the lazy dog. \
+                     The quick brown fox jumps over the lazy dog. \
+                     The quick brown fox jumps over the lazy dog.";
+        let c = compress(data);
+        let d = decompress(&c);
+        assert_eq!(d, data, "roundtrip mismatch");
+    }
+
+    #[test]
+    fn roundtrip_empty() {
+        let c = compress(b"");
+        let d = decompress(&c);
+        assert_eq!(d, b"");
+    }
+
+    #[test]
+    fn roundtrip_random() {
+        let mut v = Vec::with_capacity(8192);
+        let mut x: u32 = 0xc0ffee;
+        for _ in 0..8192 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            v.push(x as u8);
+        }
+        let c = compress(&v);
+        let d = decompress(&c);
+        assert_eq!(d, v);
+    }
+
+    #[test]
+    fn roundtrip_repetitive() {
+        // Force dedup to kick in
+        let phrase = b"the quick brown fox jumps over the lazy dog ";
+        let mut data = Vec::new();
+        while data.len() < 1024 {
+            data.extend_from_slice(phrase);
+        }
+        let c = compress(&data);
+        let d = decompress(&c);
+        assert_eq!(d, data, "repetitive roundtrip mismatch");
+    }
+
+    /// Regression test for the v2.9 "Duplicate references unknown
+    /// block id" panic. With 100+ blocks (many unique, many
+    /// duplicates), the encoder's `block_id` and the decoder's
+    /// `unique_id` would diverge and cause a panic. The fix
+    /// (sprint 2.9) uses a `unique_counter` that both sides
+    /// agree on, so the indices align.
+    #[test]
+    fn roundtrip_many_blocks_with_dups() {
+        // Build an input that produces many CDC blocks (each ~4 KB)
+        // with deterministic duplicates interspersed.
+        let mut data = Vec::new();
+        // 8 distinct 4 KB blocks, then their concatenation. CDC will
+        // chunk along the 4 KB boundaries and dedup will catch the
+        // repetitions.
+        let blocks: Vec<Vec<u8>> = (0..8)
+            .map(|i| {
+                let mut b = vec![0u8; 4 * 1024];
+                for (j, slot) in b.iter_mut().enumerate() {
+                    *slot = ((i * 31 + j) % 256) as u8;
+                }
+                b
+            })
+            .collect();
+        // Pattern: A B C D A B C D A B C D ...
+        for _ in 0..40 {
+            for b in &blocks {
+                data.extend_from_slice(b);
+            }
+        }
+        // The input is ~1.3 MB, which produces ~325 CDC blocks of 4 KB
+        // each. The dedup will mark most of them as duplicates.
+        let c = compress(&data);
+        let d = decompress(&c);
+        assert_eq!(d.len(), data.len(), "decoded length mismatch");
+        assert_eq!(d, data, "large-dedup roundtrip mismatch (sprint 2.9 bug)");
+    }
+
+    /// Bigger regression test: 6000+ CDC blocks with hundreds of
+    /// duplicates. Reproduces the v2.9 panic that hit the user
+    /// on a real .nxar with 2654 blocks.
+    #[test]
+    fn roundtrip_6000_blocks_with_dups() {
+        // 64 distinct 4 KB blocks repeated many times. Total size
+        // ~ 64 * 4 KB * 200 = 51 MB, producing ~13100 CDC blocks.
+        // The dedup will mark all but the first 64 of each run
+        // as duplicates.
+        let mut data = Vec::new();
+        let blocks: Vec<Vec<u8>> = (0..64)
+            .map(|i| {
+                let mut b = vec![0u8; 4 * 1024];
+                for (j, slot) in b.iter_mut().enumerate() {
+                    *slot = ((i * 31 + j) % 256) as u8;
+                }
+                b
+            })
+            .collect();
+        for _ in 0..200 {
+            for b in &blocks {
+                data.extend_from_slice(b);
+            }
+        }
+        let c = compress(&data);
+        let d = decompress(&c);
+        assert_eq!(d.len(), data.len(), "decoded length mismatch");
+        assert_eq!(d, data, "6000-block dedup roundtrip mismatch");
+    }
+}
