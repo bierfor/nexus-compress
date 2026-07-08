@@ -15,6 +15,7 @@ mod commands;
 mod db;
 mod p2p_config;
 mod p2p_tunnel;
+mod throttle;
 mod upnp_hole;
 
 use std::sync::Arc;

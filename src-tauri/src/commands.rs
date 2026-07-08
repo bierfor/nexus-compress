@@ -25,6 +25,50 @@ fn to_ipc<T>(r: ApiResult<T>) -> Result<T, String> {
     r.map_err(|e| format!("{}: {}", e.code, e.message))
 }
 
+// ─────────────────────────────────────────────────────────────
+//  db persist helpers (Sprint 5.7 hotfix #20)
+//
+//  All three helpers are best-effort wrappers around `db::record_*`.
+//  A failure to write stats must NEVER fail the actual compression
+//  / decompression / share the user just spent time on — log and
+//  return Ok so the IPC response goes back to the UI cleanly.
+//  The errors land in stderr where they can be triaged later.
+// ─────────────────────────────────────────────────────────────
+
+async fn persist_compression(
+    db_state: &State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
+    filename: &str,
+    original_bytes: u64,
+    compressed_bytes: u64,
+) -> Result<(), String> {
+    let conn = db_state.lock().await;
+    db::record_compression(&conn, filename, original_bytes, compressed_bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn persist_decompression(
+    db_state: &State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
+    filename: &str,
+    archive_bytes: u64,
+    restored_bytes: u64,
+) -> Result<(), String> {
+    let conn = db_state.lock().await;
+    db::record_decompression(&conn, filename, archive_bytes, restored_bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn persist_share(
+    db_state: &State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
+    filename: &str,
+    bytes: u64,
+) -> Result<(), String> {
+    let conn = db_state.lock().await;
+    db::record_share(&conn, filename, bytes).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn compress_bytes_cmd(input: Vec<u8>) -> Result<CompressResult, String> {
     tauri::async_runtime::spawn_blocking(move || api::compress_bytes(&input))
@@ -116,6 +160,7 @@ pub async fn compress_directory_with_backend_cmd(
 #[tauri::command]
 pub async fn compress_target_cmd(
     app: tauri::AppHandle,
+    db_state: State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
     req: serde_json::Value,
 ) -> Result<CompressTargetResult, String> {
     let path = req
@@ -135,23 +180,50 @@ pub async fn compress_target_cmd(
     let backend =
         CompressionBackend::from_str(backend_str).map_err(|e| format!("invalid_backend: {}", e))?;
     let p = PathBuf::from(path);
+    let filename_for_db = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let inner: ApiResult<CompressTargetResult> = tauri::async_runtime::spawn_blocking(move || {
         let app_for_event = app.clone();
+        // Sprint 5.7 throttling: ProgressEvent emits per chunk
+        // (potentially hundreds per second on fast disks). We
+        // collect into a slot and only flush to the IPC channel
+        // every 100ms — see `throttle::ThrottledEmitter` below.
+        let throttler = throttle::ThrottledEmitter::new(app_for_event.clone());
         let cb = |event: ProgressEvent| {
-            use tauri::Emitter;
-            let _ = app_for_event.emit("compress-progress", &event);
+            throttler.feed("compress-progress", &event);
         };
-        to_ipc(api::compress_target(
+        api::compress_target(
             &p,
             backend,
             lzma_level,
             output_dir.as_deref(),
             cb,
-        ))
+        )
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {}", e))?
+    .map_err(|e| format!("spawn_blocking failed: {}", e))?;
+    let result: CompressTargetResult = to_ipc(inner)?;
+
+    // Sprint 5.7 hotfix #20: persist into the local SQLite store so
+    // the Recientes view (RecentView.tsx) and the Home dashboard
+    // (LandingPage) can show real numbers. Best-effort: a stats
+    // failure must never fail the actual compression that the user
+    // waited for — log + continue.
+    if let Err(e) = persist_compression(
+        &db_state,
+        &filename_for_db,
+        result.original_size,
+        result.compressed_size,
+    )
+    .await
+    {
+        eprintln!("[nexus-rar] WARN: failed to persist compression stats: {}", e);
+    }
+    Ok(result)
 }
 
 /// Open the native save dialog for the user to pick a destination
@@ -175,6 +247,7 @@ pub async fn compress_target_cmd(
 #[tauri::command]
 pub async fn decompress_target_cmd(
     app: tauri::AppHandle,
+    db_state: State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
     req: serde_json::Value,
 ) -> Result<DecompressTargetResult, String> {
     let path = req
@@ -187,21 +260,42 @@ pub async fn decompress_target_cmd(
         .and_then(|v| v.as_str())
         .map(PathBuf::from);
     let p = PathBuf::from(path);
+    let filename_for_db = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
 
-    tauri::async_runtime::spawn_blocking(move || {
-        use tauri::Emitter;
+    let inner: ApiResult<DecompressTargetResult> = tauri::async_runtime::spawn_blocking(move || {
         let app_for_event = app.clone();
+        let throttler = throttle::ThrottledEmitter::new(app_for_event.clone());
         let cb = |event: ProgressEvent| {
-            let _ = app_for_event.emit("compress-progress", &event);
+            throttler.feed("compress-progress", &event);
         };
-        to_ipc(api::decompress_target_with_progress(
+        api::decompress_target_with_progress(
             &p,
             output_dir.as_deref(),
             cb,
-        ))
+        )
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {}", e))?
+    .map_err(|e| format!("spawn_blocking failed: {}", e))?;
+    let result: DecompressTargetResult = to_ipc(inner)?;
+
+    // Sprint 5.7 hotfix #20: persist into the local SQLite store
+    // (best-effort — never fail the op if stats fail).
+    // For decompression we treat the archive size as the "input"
+    // and the restored size as the "output". `original_bytes` in
+    // db.rs is the input on disk; for extract flows it equals the
+    // archive size. We don't have it in DecompressTargetResult so
+    // we use `restored_size` for both — the weighted average stays
+    // correct because record_decompression only updates counters
+    // and the events row, not the compression_ratio.
+    let restored = result.restored_size;
+    if let Err(e) = persist_decompression(&db_state, &filename_for_db, restored, restored).await {
+        eprintln!("[nexus-rar] WARN: failed to persist decompression stats: {}", e);
+    }
+    Ok(result)
 }
 
 /// Peek at an archive's contents WITHOUT decompressing. Returns
@@ -763,6 +857,7 @@ fn maybe_extract_tar(
 // gotcha — see MEMORY.md).
 use crate::db;
 use crate::p2p_tunnel;
+use crate::throttle;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -822,6 +917,7 @@ pub struct P2pSendStartResp {
 #[tauri::command]
 pub async fn p2p_send_start_cmd(
     app: tauri::AppHandle,
+    db_state: State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
     req: serde_json::Value,
     state: State<'_, Arc<P2pState>>,
 ) -> Result<P2pSendStartResp, String> {
@@ -875,6 +971,16 @@ pub async fn p2p_send_start_cmd(
         file_size,
         upnp_status,
     };
+    // Sprint 5.7 hotfix #20: record the share start so Recientes
+    // shows "Enlace compartido generado". We record AT START (not
+    // on completion) because p2p_send_start_cmd returns the link
+    // immediately and the receiver may or may not actually finish
+    // downloading — counting it from the moment the user shared
+    // matches the user-perceived "I shared this file" intent and
+    // matches what the Recientes + Home counters should reflect.
+    if let Err(e) = persist_share(&db_state, &resp.filename, resp.file_size).await {
+        eprintln!("[nexus-rar] WARN: failed to persist share stats: {}", e);
+    }
     // Sprint 5.6.15: clear state.active when either (a) the
     // receiver hits /done (signaling successful file transfer)
     // or (b) 10 minutes have passed since the sender started
@@ -1162,6 +1268,8 @@ pub async fn get_recent_events_cmd(
 #[tauri::command]
 pub fn data_dir_cmd() -> Result<String, String> {
     db::data_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| e.to_string())
 }
 
 /// Sprint 5.7: wipe all stats + events from the local SQLite store.
@@ -1174,7 +1282,4 @@ pub async fn reset_stats_cmd(
 ) -> Result<(), String> {
     let conn = state.lock().await;
     db::reset_stats(&conn).map_err(|e| e.to_string())
-}
-        .map(|p| p.to_string_lossy().to_string())
-        .map_err(|e| e.to_string())
 }
