@@ -22,6 +22,7 @@ pub mod dict_codec;
 pub mod dictionary;
 pub mod engine;
 pub mod format;
+pub mod fs;
 pub mod lz77;
 pub mod minify;
 pub mod nxar;

@@ -130,6 +130,15 @@ pub fn clamp_preset_for_ram(requested_preset: u32, available_mb: Option<u64>) ->
 /// clamping the preset to whatever the system can afford. Use this
 /// instead of `XzEncoder::new(out, level)` everywhere we compress.
 ///
+/// # Wire format
+///
+/// Returns an `.xz` container stream (LZMA2 filter chain + CRC64
+/// integrity check) — the same wire format that `XzEncoder::new`
+/// produces. **NOT** raw LZMA1 (`.lzma` alone), which would be
+/// produced by `Stream::new_lzma_encoder` and would NOT be decodable
+/// by `XzDecoder::new`. The roundtrip property
+/// `decode(encode(x)) == x` is asserted in `src/engine::tests`.
+///
 /// # Example
 /// ```ignore
 /// let stream = ram::lzma_stream_for_requested_preset(9)?;
@@ -158,7 +167,15 @@ pub fn lzma_stream_for_requested_preset(requested_preset: u32) -> Result<Stream,
         .try_into()
         .map_err(|_| "preset dict size overflows u32".to_string())?;
     opts.dict_size(dict_bytes);
-    Stream::new_lzma_encoder(&opts).map_err(|e| format!("{:?}", e))
+    // Build a filter chain: [LZMA2(opts)] + CRC64 integrity check.
+    // This is what `XzEncoder::new(out, level)` does internally,
+    // so the output is decodable by `XzDecoder::new` (the default
+    // .xz decoder). Using `new_lzma_encoder` here would produce
+    // raw LZMA1 (`.lzma` alone) which the .xz decoder REJECTS.
+    let mut filters = xz2::stream::Filters::new();
+    filters.lzma2(&opts);
+    Stream::new_stream_encoder(&filters, Check::Crc64)
+        .map_err(|e| format!("{:?}", e))
 }
 
 #[cfg(test)]
