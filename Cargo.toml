@@ -1,6 +1,6 @@
 [package]
 name = "nexus-compress"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "NexusCompress - hybrid compressor (LZ77 + rANS + dict codec)"
 license = "MIT"
