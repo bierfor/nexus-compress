@@ -243,6 +243,19 @@ pub fn list_events(conn: &Connection, limit: u32) -> DbResult<Vec<ActivityEvent>
     Ok(rows)
 }
 
+/// Sprint 5.7: user-facing "Clear statistics" action. Wipes BOTH
+/// the `stats` singleton (counters back to zero) and the `events`
+/// timeline. Does NOT touch the schema or any other DB rows (and
+/// does NOT delete the SQLite file itself — use uninstall for that).
+/// Runs inside a transaction so we never end up with a half-cleared DB.
+pub fn reset_stats(conn: &Connection) -> DbResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM events", [])?;
+    tx.execute("DELETE FROM stats", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Writes
 // ─────────────────────────────────────────────────────────────

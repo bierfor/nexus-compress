@@ -78,6 +78,7 @@ fn main() {
             commands::get_stats_cmd,
             commands::get_recent_events_cmd,
             commands::data_dir_cmd,
+            commands::reset_stats_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusRAR Tauri app");

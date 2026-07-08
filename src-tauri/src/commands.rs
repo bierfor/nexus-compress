@@ -1162,6 +1162,19 @@ pub async fn get_recent_events_cmd(
 #[tauri::command]
 pub fn data_dir_cmd() -> Result<String, String> {
     db::data_dir()
+}
+
+/// Sprint 5.7: wipe all stats + events from the local SQLite store.
+/// Triggered by the Settings → Storage → "Borrar estadísticas"
+/// button. The user is asked for confirmation in the UI before
+/// this command is invoked; this command itself does not prompt.
+#[tauri::command]
+pub async fn reset_stats_cmd(
+    state: State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
+) -> Result<(), String> {
+    let conn = state.lock().await;
+    db::reset_stats(&conn).map_err(|e| e.to_string())
+}
         .map(|p| p.to_string_lossy().to_string())
         .map_err(|e| e.to_string())
 }

@@ -105,58 +105,12 @@ export default function Home() {
 }
 
 // ============================================================
-//  Settings — Sprint 5.6.29 hotfix #15 (rev)
+//  Settings — Sprint 5.7 rewrite
 //
-//  Uses the real <ConfigPanel /> for actual configuration
-//  (compression mode, transport, etc.) wrapped in a localized
-//  page header + language switcher. Replaces the inline stub
-//  that was hardcoded Spanish.
+//  Sprint 5.7: extracted to its own component file with tabbed
+//  sidebar navigation (Interfaz / Compresión / Transporte /
+//  Almacenamiento / Acerca de). The page.tsx <Home> component
+//  just imports the new view and drops it in.
 // ============================================================
 
-import { useLocale } from "@/components/LocaleProvider";
-import type { Locale } from "@/lib/i18n";
-import { ConfigPanel } from "@/components/ConfigPanel";
-import { PageHeader } from "@/components/PageHeader";
-import { Languages } from "lucide-react";
-
-function SettingsView() {
-  const { t, locale, setLocale } = useLocale();
-
-  return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="max-w-3xl mx-auto px-8 pt-12 pb-20">
-        <PageHeader title={t("settings.title")} />
-
-        {/* Language switcher — lives at the top of settings */}
-        <div className="mb-10 rounded-2xl bg-white/[0.03] border border-white/[0.08] overflow-hidden">
-          <div className="px-5 py-3 border-b border-white/[0.04] flex items-center gap-2 text-zinc-500 text-[11px] tracking-[0.2em] uppercase">
-            <Languages size={12} />
-            {t("settings.section.language")}
-          </div>
-          <div className="px-5 py-4 flex items-center justify-between">
-            <span className="text-zinc-400 text-[13.5px]">{t("settings.interface.language")}</span>
-            <div className="flex items-center gap-1.5">
-              {(["es", "en", "it"] as Locale[]).map((l) => (
-                <button
-                  key={l}
-                  onClick={() => setLocale(l)}
-                  className={
-                    "px-3 py-1.5 text-[12px] rounded-lg font-mono uppercase tracking-wider transition-colors " +
-                    (locale === l
-                      ? "bg-cyan-500/20 border border-cyan-500/40 text-cyan-300"
-                      : "bg-white/[0.04] border border-white/[0.08] text-zinc-400 hover:text-white hover:border-white/[0.16]")
-                  }
-                >
-                  {l}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Real config panel */}
-        <ConfigPanel />
-      </div>
-    </div>
-  );
-}
+import { SettingsView } from "@/components/SettingsView";
