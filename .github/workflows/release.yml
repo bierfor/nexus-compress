@@ -156,15 +156,22 @@ jobs:
           # for CI sanity checks, but won't ship to end users).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS codesign + notarise
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # macOS codesign + notarise.
+          # Sprint 5.6.29 hotfix #16: only inject the cert when
+          # the password is also present. If APPLE_CERTIFICATE is
+          # set but APPLE_CERTIFICATE_PASSWORD is empty, tauri-action
+          # aborts at `security import` with "One or more parameters
+          # passed to a function were not valid". For the v0.1.1
+          # release we ship unsigned .dmg artifacts (gatekeeper
+          # will warn users, but the binary still runs).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_PASSWORD && secrets.APPLE_CERTIFICATE || '' }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_CERTIFICATE_PASSWORD && secrets.APPLE_SIGNING_IDENTITY || '' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Windows codesign
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          # Windows codesign (only inject when password is present).
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD && secrets.WINDOWS_CERTIFICATE || '' }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         with:
           # Sprint 5.6.28 hotfix #4: explicitly point at the
@@ -302,17 +309,26 @@ jobs:
             echo "::error::${binary} not found at target/${suffix}/release/${binary}"
             exit 1
           fi
-          # p2p_smoke may be under src-tauri/target/release/ (when built
-          # without --target during the test step) or under the
-          # triple subdir. Try the --target location first, then the
-          # host-triple fallback.
-          if [ -f "src-tauri/target/${suffix}/release/${smoke}" ]; then
+          # p2p_smoke lives in src-tauri/ but the workspace target
+          # dir is at the repo root, so binaries end up at:
+          #   1) target/${suffix}/release/${smoke}   ← workspace root, --target build
+          #   2) target/release/${smoke}             ← workspace root, host-triple build
+          #   3) src-tauri/target/${suffix}/release/ ← legacy (per-crate target)
+          #   4) src-tauri/target/release/           ← legacy (per-crate, host-triple)
+          # Try all four in order.
+          if [ -f "target/${suffix}/release/${smoke}" ]; then
+            cp "target/${suffix}/release/${smoke}" "$dir/"
+          elif [ -f "target/release/${smoke}" ]; then
+            cp "target/release/${smoke}" "$dir/"
+            echo "::notice::p2p_smoke was found at host-triple path (target/release/)"
+          elif [ -f "src-tauri/target/${suffix}/release/${smoke}" ]; then
             cp "src-tauri/target/${suffix}/release/${smoke}" "$dir/"
+            echo "::notice::p2p_smoke was found at src-tauri/target/${suffix}/release/"
           elif [ -f "src-tauri/target/release/${smoke}" ]; then
             cp "src-tauri/target/release/${smoke}" "$dir/"
-            echo "::notice::p2p_smoke was found at host-triple path (src-tauri/target/release/)"
+            echo "::notice::p2p_smoke was found at src-tauri/target/release/ (host-triple)"
           else
-            echo "::error::${smoke} not found under src-tauri/target/"
+            echo "::error::${smoke} not found under target/ or src-tauri/target/"
             exit 1
           fi
           if [ -f LICENSE ]; then cp LICENSE "$dir/"; fi
@@ -337,14 +353,25 @@ jobs:
           Write-Host "=== src-tauri/target/release/ ==="
           if (Test-Path "src-tauri/target/release/") { Get-ChildItem "src-tauri/target/release/" | Select-Object -First 20 }
           Copy-Item "target/${{ matrix.target }}/release/$binary" "$dir/$binary"
-          # p2p_smoke fallback (host-triple path) mirrors the bash step.
-          if (Test-Path "src-tauri/target/${{ matrix.target }}/release/$smoke") {
+          # p2p_smoke lives in src-tauri/ but the workspace target
+          # dir is at the repo root, so binaries end up at:
+          #   1) target/${{ matrix.target }}/release/$smoke   ← workspace root, --target build
+          #   2) target/release/$smoke                         ← workspace root, host-triple build
+          #   3) src-tauri/target/${{ matrix.target }}/release/$smoke ← legacy
+          #   4) src-tauri/target/release/$smoke               ← legacy
+          if (Test-Path "target/${{ matrix.target }}/release/$smoke") {
+            Copy-Item "target/${{ matrix.target }}/release/$smoke" "$dir/$smoke"
+          } elseif (Test-Path "target/release/$smoke") {
+            Copy-Item "target/release/$smoke" "$dir/$smoke"
+            Write-Host "::notice::p2p_smoke was found at host-triple path (target/release/)"
+          } elseif (Test-Path "src-tauri/target/${{ matrix.target }}/release/$smoke") {
             Copy-Item "src-tauri/target/${{ matrix.target }}/release/$smoke" "$dir/$smoke"
+            Write-Host "::notice::p2p_smoke was found at src-tauri/target/${{ matrix.target }}/release/"
           } elseif (Test-Path "src-tauri/target/release/$smoke") {
             Copy-Item "src-tauri/target/release/$smoke" "$dir/$smoke"
-            Write-Host "::notice::p2p_smoke was found at host-triple path (src-tauri/target/release/)"
+            Write-Host "::notice::p2p_smoke was found at src-tauri/target/release/ (host-triple)"
           } else {
-            Write-Host "::error::$smoke not found under src-tauri/target/"
+            Write-Host "::error::$smoke not found under target/ or src-tauri/target/"
             exit 1
           }
           if (Test-Path "LICENSE") { Copy-Item LICENSE "$dir/LICENSE" }

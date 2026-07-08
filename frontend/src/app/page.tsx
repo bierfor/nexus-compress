@@ -10,13 +10,33 @@
  *     `lastOp` for the dashboard + to `recentOps` for the history
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { NeoTopBar, type View } from "@/components/NeoTopBar";
 import { LandingPage } from "@/components/LandingPage";
 import { CompressView } from "@/components/CompressView";
 import { DecompressView } from "@/components/DecompressView";
 import { ShareView } from "@/components/ShareView";
 import { NeoDashboard, type LastOp } from "@/components/NeoDashboard";
+import {
+  Archive,
+  FolderOpen,
+  Send,
+  FileText,
+  Search,
+  SlidersHorizontal,
+  Layers,
+  Clock,
+  ChevronRight,
+  ChevronDown,
+  ArrowRight,
+  HardDrive,
+  Pencil,
+  RotateCw,
+  Check,
+  Download,
+  BarChart3,
+  MoreHorizontal,
+} from "lucide-react";
 
 export interface RecentOp extends LastOp {
   id: string;
@@ -178,103 +198,483 @@ function RecentView({
   onNavigate: (v: View) => void;
   onClear: () => void;
 }) {
+  const { t } = useLocale();
+  const [filter, setFilter] = useState<"all" | "compress" | "decompress" | "share">("all");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const pageSize = 8;
+
+  const filtered = useMemo(() => {
+    let list = ops;
+    if (filter !== "all") list = list.filter((op) => op.kind === filter);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter((op) => op.filename.toLowerCase().includes(q));
+    }
+    return list;
+  }, [ops, filter, search]);
+
+  const visible = filtered.slice(0, page * pageSize);
+  const hasMore = filtered.length > visible.length;
+
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-3xl mx-auto px-8 pt-12 pb-20">
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <div className="text-zinc-500 text-[12px] tracking-wide mb-2">
-              <button
-                onClick={() => onNavigate("landing")}
-                className="hover:text-zinc-300"
-              >
-                ← Volver
-              </button>
-            </div>
-            <h1 className="text-white text-[36px] font-semibold tracking-tight">
-              Recientes
-            </h1>
-          </div>
-          {ops.length > 0 && (
-            <button
-              onClick={onClear}
-              className="px-3 py-1.5 text-[12px] text-zinc-500 hover:text-red-400 border border-white/[0.08] hover:border-red-500/30 rounded-lg transition-colors"
-            >
-              Limpiar todo
-            </button>
-          )}
+      <div className="max-w-7xl mx-auto px-8 pt-8 pb-16">
+        {/* Header */}
+        <div className="mb-6">
+          <h1 className="text-white text-[32px] font-semibold tracking-tight leading-tight">
+            {t("recent.title")}
+          </h1>
+          <p className="text-zinc-500 text-[14px] mt-1">
+            {t("recent.subtitle")}
+          </p>
         </div>
 
-        {ops.length === 0 ? (
-          <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] p-12 text-center">
-            <div className="text-zinc-500 text-[13px] mb-4">
-              Aún no hay operaciones recientes.
+        <div className="grid grid-cols-3 gap-5">
+          {/* ── Main column: filter tabs + table ──────────────── */}
+          <div className="col-span-2">
+            {/* Filter row */}
+            <div className="flex items-center gap-2 mb-4 flex-wrap">
+              <FilterTab
+                active={filter === "all"}
+                onClick={() => setFilter("all")}
+                icon={Layers}
+                label={t("recent.filter.all")}
+              />
+              <FilterTab
+                active={filter === "compress"}
+                onClick={() => setFilter("compress")}
+                icon={Archive}
+                label={t("recent.filter.compressed")}
+                tone="cyan"
+              />
+              <FilterTab
+                active={filter === "decompress"}
+                onClick={() => setFilter("decompress")}
+                icon={FolderOpen}
+                label={t("recent.filter.extracted")}
+                tone="amber"
+              />
+              <FilterTab
+                active={filter === "share"}
+                onClick={() => setFilter("share")}
+                icon={Send}
+                label={t("recent.filter.shared")}
+                tone="emerald"
+              />
+              {/* Search */}
+              <div className="flex-1 min-w-[200px] relative">
+                <Search
+                  size={14}
+                  className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none"
+                />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => {
+                    setSearch(e.target.value);
+                    setPage(1);
+                  }}
+                  placeholder={t("recent.search.placeholder")}
+                  className="input pl-10 py-2 text-[12.5px]"
+                />
+              </div>
+              {/* Filter dropdown (visual) */}
+              <button className="btn btn-ghost shrink-0">
+                <SlidersHorizontal size={14} />
+                {t("recent.filter.btn")}
+                <ChevronDown size={12} />
+              </button>
             </div>
-            <button
-              onClick={() => onNavigate("landing")}
-              className="text-cyan-400 hover:text-cyan-300 text-[13px]"
-            >
-              Empezar una operación →
-            </button>
+
+            {/* Files table */}
+            {ops.length === 0 ? (
+              <div className="rounded-2xl glass p-12 text-center">
+                <Clock size={32} className="text-zinc-500 mx-auto mb-3" />
+                <p className="text-zinc-400 text-[13.5px] mb-1 font-medium">
+                  {t("recent.empty.title")}
+                </p>
+                <p className="text-zinc-600 text-[12px] mb-4">
+                  {t("recent.empty.desc")}
+                </p>
+                <button
+                  onClick={() => onNavigate("compress")}
+                  className="btn btn-primary"
+                >
+                  {t("recent.empty.cta")}
+                </button>
+              </div>
+            ) : filtered.length === 0 ? (
+              <div className="rounded-2xl glass p-10 text-center">
+                <Search size={28} className="text-zinc-500 mx-auto mb-3" />
+                <p className="text-zinc-400 text-[13px]">
+                  {t("recent.empty.filtered")}
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="rounded-2xl glass overflow-hidden">
+                  {/* Header row */}
+                  <div className="grid grid-cols-[2.4fr_1fr_0.8fr_1fr_1.2fr_60px] gap-4 px-5 py-3 border-b border-white/[0.06] text-[10px] tracking-[0.2em] uppercase text-zinc-500 font-medium">
+                    <span>{t("recent.col.name")}</span>
+                    <span>{t("recent.col.type")}</span>
+                    <span>{t("recent.col.size")}</span>
+                    <span>{t("recent.col.action")}</span>
+                    <span>{t("recent.col.date")}</span>
+                    <span></span>
+                  </div>
+                  {/* Rows */}
+                  <div className="divide-y divide-white/[0.04]">
+                    {visible.map((op) => (
+                      <RecentTableRow key={op.id} op={op} onNavigate={onNavigate} />
+                    ))}
+                  </div>
+                </div>
+                {hasMore && (
+                  <button
+                    onClick={() => setPage((p) => p + 1)}
+                    className="w-full mt-3 py-2.5 text-[12.5px] text-cyan-400 hover:text-cyan-300 font-medium inline-flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <ChevronDown size={14} className="animate-pulse" />
+                    {t("recent.loadmore")}
+                  </button>
+                )}
+              </>
+            )}
+
+            {/* Footer */}
+            <div className="mt-4 flex items-center justify-between text-[11px] text-zinc-500">
+              <div className="flex items-center gap-2">
+                <HardDrive size={12} className="text-zinc-600" />
+                <span>{t("recent.footer.default")}</span>
+                <span className="text-zinc-300 font-mono">/Users/usuario/NexusRAR</span>
+                <button className="ml-1 text-zinc-500 hover:text-white transition-colors">
+                  <Pencil size={11} />
+                </button>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="relative flex w-2 h-2">
+                    <span className="absolute inline-flex h-full w-full rounded-full opacity-75 animate-ping bg-emerald-400" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400" />
+                  </span>
+                  <span className="text-emerald-400">{t("recent.footer.synced")}</span>
+                </div>
+                <span className="text-zinc-600">
+                  {t("recent.footer.lastsync")}: {t("recent.footer.now")}
+                </span>
+                <button className="text-zinc-500 hover:text-white transition-colors">
+                  <RotateCw size={12} />
+                </button>
+              </div>
+            </div>
           </div>
-        ) : (
-          <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] overflow-hidden divide-y divide-white/[0.04]">
-            {ops.map((op) => (
-              <RecentRow key={op.id} op={op} />
-            ))}
+
+          {/* ── Sidebar ──────────────────────────────────────── */}
+          <div className="space-y-5">
+            {/* Quick actions */}
+            <div className="rounded-2xl glass p-5">
+              <h3 className="text-zinc-300 text-[13px] font-semibold mb-3">
+                {t("recent.sidebar.actions")}
+              </h3>
+              <div className="space-y-1.5">
+                <QuickAction
+                  icon={Archive}
+                  label={t("recent.sidebar.compress")}
+                  onClick={() => onNavigate("compress")}
+                  tone="cyan"
+                />
+                <QuickAction
+                  icon={FolderOpen}
+                  label={t("recent.sidebar.extract")}
+                  onClick={() => onNavigate("decompress")}
+                  tone="amber"
+                />
+                <QuickAction
+                  icon={Send}
+                  label={t("recent.sidebar.share")}
+                  onClick={() => onNavigate("share")}
+                  tone="emerald"
+                />
+                <QuickAction
+                  icon={FileText}
+                  label={t("recent.sidebar.open")}
+                  onClick={() => onNavigate("compress")}
+                  tone="blue"
+                />
+              </div>
+            </div>
+
+            {/* Stats (este mes) */}
+            <div className="rounded-2xl glass p-5">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-zinc-300 text-[13px] font-semibold">
+                  {t("recent.sidebar.stats")}
+                </h3>
+                <button className="text-zinc-500 hover:text-cyan-400 text-[11px] flex items-center gap-1 transition-colors">
+                  {t("recent.sidebar.thismonth")}
+                  <ChevronDown size={11} />
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2.5">
+                <StatBlock
+                  icon={FileText}
+                  value="128"
+                  label={t("recent.sidebar.stats.processed")}
+                  tone="blue"
+                />
+                <StatBlock
+                  icon={Download}
+                  value="24.5 GB"
+                  label={t("recent.sidebar.stats.saved")}
+                  tone="cyan"
+                />
+                <StatBlock
+                  icon={BarChart3}
+                  value="68%"
+                  label={t("recent.sidebar.stats.ratio")}
+                  tone="emerald"
+                />
+                <StatBlock
+                  icon={Clock}
+                  value="32h"
+                  label={t("recent.sidebar.stats.timesaved")}
+                  tone="amber"
+                />
+              </div>
+            </div>
+
+            {/* Activity sidebar (top 3) */}
+            <div className="rounded-2xl glass p-5">
+              <h3 className="text-zinc-300 text-[13px] font-semibold mb-3">
+                {t("recent.sidebar.activity")}
+              </h3>
+              <div className="space-y-2.5">
+                {ops.slice(0, 3).map((op) => (
+                  <RecentSidebarItem key={op.id} op={op} />
+                ))}
+              </div>
+              <button
+                onClick={() => onNavigate("recent")}
+                className="mt-3 text-cyan-400 hover:text-cyan-300 text-[11.5px] font-medium flex items-center gap-1 transition-colors"
+              >
+                {t("recent.sidebar.activity.all")}
+                <ArrowRight size={11} />
+              </button>
+            </div>
           </div>
-        )}
+        </div>
       </div>
     </div>
   );
 }
 
-function RecentRow({ op }: { op: RecentOp }) {
-  const inputSize = op.originalBytes;
-  const outputSize = op.compressedBytes ?? op.restoredBytes ?? 0;
-  const saved = op.compressedBytes ? inputSize - outputSize : 0;
-  const savings = saved > 0 ? saved / inputSize : 0;
-  const kindLabel =
-    op.kind === "share"
-      ? { icon: "🚀", label: "Compartido", color: "emerald" }
-      : op.kind === "compress"
-      ? { icon: "📦", label: "Comprimido", color: "cyan" }
-      : { icon: "📂", label: "Extraído", color: "amber" };
+// ─────────────────────────────────────────────────────────────
+//  Subcomponents
+// ─────────────────────────────────────────────────────────────
 
-  const colorClass =
-    kindLabel.color === "emerald"
-      ? "text-emerald-400"
-      : kindLabel.color === "cyan"
-      ? "text-cyan-400"
-      : "text-amber-400";
-
+function FilterTab({
+  active,
+  onClick,
+  icon: Icon,
+  label,
+  tone = "default",
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: typeof Layers;
+  label: string;
+  tone?: "default" | "cyan" | "amber" | "emerald";
+}) {
+  const toneClass: Record<typeof tone, string> = {
+    default: "text-zinc-400",
+    cyan: "text-cyan-400",
+    amber: "text-amber-400",
+    emerald: "text-emerald-400",
+  };
   return (
-    <div className="px-5 py-4 flex items-center gap-4 text-[13px]">
-      <span className="text-xl">{kindLabel.icon}</span>
-      <div className="flex-1 min-w-0">
-        <div className="text-white truncate" title={op.filename}>
+    <button
+      onClick={onClick}
+      className={
+        "flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[12.5px] font-medium transition-all duration-150 " +
+        (active
+          ? "bg-white/[0.08] border border-white/[0.12] text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"
+          : "bg-white/[0.02] border border-white/[0.06] text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.04]")
+      }
+    >
+      <Icon size={13} className={active ? toneClass[tone] : ""} />
+      {label}
+    </button>
+  );
+}
+
+function QuickAction({
+  icon: Icon,
+  label,
+  onClick,
+  tone,
+}: {
+  icon: typeof Archive;
+  label: string;
+  onClick: () => void;
+  tone: "cyan" | "amber" | "emerald" | "blue";
+}) {
+  const toneClass: Record<typeof tone, string> = {
+    cyan: "bg-cyan-500/10 border-cyan-500/30 text-cyan-400",
+    amber: "bg-amber-500/10 border-amber-500/30 text-amber-400",
+    emerald: "bg-emerald-500/10 border-emerald-500/30 text-emerald-400",
+    blue: "bg-blue-500/10 border-blue-500/30 text-blue-400",
+  };
+  return (
+    <button
+      onClick={onClick}
+      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/[0.03] transition-colors text-left group"
+    >
+      <div className={`w-9 h-9 rounded-lg border flex items-center justify-center ${toneClass[tone]}`}>
+        <Icon size={15} />
+      </div>
+      <span className="text-zinc-200 text-[12.5px] flex-1">{label}</span>
+      <ChevronRight
+        size={14}
+        className="text-zinc-600 group-hover:text-cyan-400 transition-colors"
+      />
+    </button>
+  );
+}
+
+function StatBlock({
+  icon: Icon,
+  value,
+  label,
+  tone,
+}: {
+  icon: typeof FileText;
+  value: string;
+  label: string;
+  tone: "blue" | "cyan" | "emerald" | "amber";
+}) {
+  const toneClass: Record<typeof tone, string> = {
+    blue: "bg-blue-500/10 text-blue-400",
+    cyan: "bg-cyan-500/10 text-cyan-400",
+    emerald: "bg-emerald-500/10 text-emerald-400",
+    amber: "bg-amber-500/10 text-amber-400",
+  };
+  return (
+    <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex items-center gap-2.5">
+      <div
+        className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${toneClass[tone]}`}
+      >
+        <Icon size={15} />
+      </div>
+      <div className="min-w-0">
+        <p className="text-white text-[16px] font-semibold tabular-nums leading-tight">
+          {value}
+        </p>
+        <p className="text-zinc-500 text-[10px] leading-tight truncate">
+          {label}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function RecentTableRow({
+  op,
+  onNavigate,
+}: {
+  op: RecentOp;
+  onNavigate: (v: View) => void;
+}) {
+  const kindMeta = (() => {
+    if (op.kind === "share")
+      return { chip: "Compartido", color: "emerald", icon: Send, ext: ["nxs6", "nxs", "mkv", "zip", "rar"] };
+    if (op.kind === "compress")
+      return { chip: "Comprimido", color: "cyan", icon: Archive, ext: ["nxs6", "nxs", "lz", "zip"] };
+    return { chip: "Extraído", color: "amber", icon: FolderOpen, ext: ["rar", "zip", "7z", "tar"] };
+  })();
+  const Icon = kindMeta.icon;
+  const dest: View =
+    op.kind === "share" ? "share" : op.kind === "compress" ? "compress" : "decompress";
+  const colorTone: Record<string, string> = {
+    cyan: "bg-cyan-500/10 text-cyan-300 border-cyan-500/30",
+    emerald: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+    amber: "bg-amber-500/10 text-amber-300 border-amber-500/30",
+  };
+  return (
+    <div
+      onClick={() => onNavigate(dest)}
+      className="grid grid-cols-[2.4fr_1fr_0.8fr_1fr_1.2fr_60px] gap-4 px-5 py-3 items-center hover:bg-white/[0.03] transition-colors cursor-pointer group"
+    >
+      {/* Nombre + path */}
+      <div className="flex items-center gap-3 min-w-0">
+        <div
+          className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${colorTone[kindMeta.color]}`}
+        >
+          <Icon size={16} />
+        </div>
+        <div className="min-w-0">
+          <p className="text-zinc-100 text-[12.5px] truncate font-medium">
+            {op.filename}
+          </p>
+          <p className="text-zinc-600 text-[10.5px] truncate font-mono mt-0.5">
+            ~/{parentDir(op.filename)}/
+          </p>
+        </div>
+      </div>
+      {/* Tipo (chip) */}
+      <span
+        className={`self-start mt-2 px-2.5 py-0.5 rounded-full text-[10.5px] font-medium border ${colorTone[kindMeta.color]}`}
+      >
+        {kindMeta.chip}
+      </span>
+      {/* Tamaño */}
+      <span className="text-zinc-300 text-[12px] font-mono tabular-nums">
+        {prettyBytes(op.originalBytes)}
+      </span>
+      {/* Acción (verb) */}
+      <span className="text-zinc-300 text-[12px]">
+        {kindMeta.chip}
+      </span>
+      {/* Fecha */}
+      <span className="text-zinc-500 text-[11.5px]">
+        {relativeTime(op.timestamp)}
+      </span>
+      {/* Action button */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+        }}
+        className="text-zinc-500 hover:text-white p-1.5 rounded-md hover:bg-white/[0.05] transition-colors justify-self-end"
+      >
+        <MoreHorizontal size={14} />
+      </button>
+    </div>
+  );
+}
+
+function RecentSidebarItem({ op }: { op: RecentOp }) {
+  const verb =
+    op.kind === "share"
+      ? "Enlace compartido generado"
+      : op.kind === "compress"
+      ? "Comprimido exitosamente"
+      : `Extraído en /Documentos/`;
+  return (
+    <div className="flex items-start gap-2.5">
+      <div className="mt-0.5 w-6 h-6 rounded-md bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+        <Check size={11} />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-zinc-200 text-[12px] truncate font-medium">
           {op.filename}
-        </div>
-        <div className="text-zinc-600 text-[11.5px] mt-0.5">
-          {relativeTime(op.timestamp)} · {kindLabel.label} ·{" "}
-          <span className="font-mono tabular-nums">
-            {(op.durationMs / 1000).toFixed(1)}s
-          </span>
-        </div>
+        </p>
+        <p className="text-zinc-500 text-[10.5px] mt-0.5 truncate">
+          {verb}
+        </p>
       </div>
-      <div className="text-right text-[12px] tabular-nums">
-        {op.compressedBytes && (
-          <div className={`${colorClass}`}>
-            −{(savings * 100).toFixed(0)}%
-          </div>
-        )}
-        <div className="text-zinc-600 text-[10.5px] font-mono">
-          {prettyBytes(inputSize)}
-          {outputSize > 0 && outputSize !== inputSize && (
-            <> → {prettyBytes(outputSize)}</>
-          )}
-        </div>
-      </div>
+      <span className="text-zinc-600 text-[10.5px] shrink-0">
+        {relativeTime(op.timestamp)}
+      </span>
     </div>
   );
 }
@@ -284,7 +684,16 @@ function relativeTime(ts: number): string {
   if (diff < 60_000) return "ahora";
   if (diff < 3_600_000) return `hace ${Math.floor(diff / 60_000)} min`;
   if (diff < 86_400_000) return `hace ${Math.floor(diff / 3_600_000)} h`;
-  return `hace ${Math.floor(diff / 86_400_000)} d`;
+  if (diff < 7 * 86_400_000) return `hace ${Math.floor(diff / 86_400_000)} d`;
+  // 7+ days: show date
+  const d = new Date(ts);
+  return d.toLocaleDateString("es-ES", { day: "numeric", month: "short" });
+}
+
+function parentDir(filename: string): string {
+  // Strip extension, take basename, return a fake "~/<dir>/" hint.
+  const stem = filename.replace(/\.[^.]+$/, "");
+  return stem.length > 18 ? stem.slice(0, 18) + "…" : stem;
 }
 
 function prettyBytes(n: number): string {
