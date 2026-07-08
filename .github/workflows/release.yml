@@ -360,7 +360,30 @@ jobs:
           if (Test-Path "src-tauri/target/$suffix/release/") { Get-ChildItem "src-tauri/target/$suffix/release/" | Select-Object -First 20 }
           Write-Host "=== src-tauri/target/release/ ==="
           if (Test-Path "src-tauri/target/release/") { Get-ChildItem "src-tauri/target/release/" | Select-Object -First 20 }
-          Copy-Item "target/${{ matrix.target }}/release/$binary" "$dir/$binary"
+          # Sprint 5.7.1 hotfix #20: the previous Copy-Item
+          # was a hard path (`target/x86_64-pc-windows-msvc/release/nexus.exe`),
+          # but on the Windows runner that path was empty
+          # (the workspace --target build emits binaries
+          # to `target/release/`, the host triple, not
+          # `target/x86_64-pc-windows-msvc/release/`).
+          # The result was the package step failing with
+          # `nexus.exe not found` on every Windows run.
+          # Fix: same fallback chain as `p2p_smoke` below.
+          if (Test-Path "target/${{ matrix.target }}/release/$binary") {
+            Copy-Item "target/${{ matrix.target }}/release/$binary" "$dir/$binary"
+          } elseif (Test-Path "target/release/$binary") {
+            Copy-Item "target/release/$binary" "$dir/$binary"
+            Write-Host "::notice::$binary was found at host-triple path (target/release/)"
+          } elseif (Test-Path "src-tauri/target/${{ matrix.target }}/release/$binary") {
+            Copy-Item "src-tauri/target/${{ matrix.target }}/release/$binary" "$dir/$binary"
+            Write-Host "::notice::$binary was found at src-tauri/target/${{ matrix.target }}/release/"
+          } elseif (Test-Path "src-tauri/target/release/$binary") {
+            Copy-Item "src-tauri/target/release/$binary" "$dir/$binary"
+            Write-Host "::notice::$binary was found at src-tauri/target/release/ (host-triple)"
+          } else {
+            Write-Host "::error::$binary not found under target/ or src-tauri/target/"
+            exit 1
+          }
           # p2p_smoke lives in src-tauri/ but the workspace target
           # dir is at the repo root, so binaries end up at:
           #   1) target/${{ matrix.target }}/release/$smoke   ← workspace root, --target build
