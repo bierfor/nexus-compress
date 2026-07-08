@@ -213,7 +213,7 @@ jobs:
             src-tauri/target
             C:\Users\runneradmin\.cargo\registry
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-           restore-keys: |
+          restore-keys: |
              ${{ matrix.target }}-cargo-
 
       # Sprint 5.6.28 hotfix #8: build-engine compiles
