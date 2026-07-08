@@ -99,11 +99,16 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Frontend · install + build
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Frontend · install + build (pnpm)
         working-directory: frontend
         run: |
-          npm ci
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Tauri · bundle via tauri-action
         uses: tauri-apps/tauri-action@v0
@@ -183,24 +188,46 @@ jobs:
             ${{ matrix.target }}-cargo-
 
       - name: cargo build --release
-        run: cargo build --release --target ${{ matrix.target }} --bin nexus --bin p2p_smoke
+        run: |
+          # Sprint 5.6.28 hotfix: nexus lives in the engine
+          # crate (repo root), p2p_smoke lives in the Tauri
+          # crate (src-tauri). Run them separately so each
+          # picks the right Cargo.toml.
+          cargo build --release --target ${{ matrix.target }} --bin nexus
+          (cd src-tauri && cargo build --release --target ${{ matrix.target }} --bin p2p_smoke)
 
       - name: Test (where Linux is fastest)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           cargo test --release --bins
-          cargo test --release --bin p2p_smoke
+          (cd src-tauri && cargo test --release --bin p2p_smoke)
 
-      - name: Package engine binary
+      - name: Package engine binary (Linux/macOS — bash + zip)
+        if: matrix.target != 'x86_64-pc-windows-msvc'
+        run: |
+          suffix="${{ matrix.target }}"
+          binary="nexus"
+          smoke="p2p_smoke"
+          dir="engine-${suffix}"
+          mkdir -p "$dir"
+          cp "target/${suffix}/release/${binary}" "$dir/"
+          cp "src-tauri/target/${suffix}/release/${smoke}" "$dir/"
+          if [ -f LICENSE ]; then cp LICENSE "$dir/"; fi
+          if [ -f README.md ]; then cp README.md "$dir/"; fi
+          (cd "$dir" && zip -r "../${dir}.zip" .)
+          rm -rf "$dir"
+
+      - name: Package engine binary (Windows — PowerShell)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
           $suffix = "${{ matrix.target }}"
-          $binary = if ($suffix -like '*windows*') { 'nexus.exe' } else { 'nexus' }
-          $smoke  = if ($suffix -like '*windows*') { 'p2p_smoke.exe' } else { 'p2p_smoke' }
+          $binary = 'nexus.exe'
+          $smoke  = 'p2p_smoke.exe'
           $dir = "engine-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/$binary" "$dir/$binary"
-          Copy-Item "target/${{ matrix.target }}/release/$smoke"  "$dir/$smoke"
+          Copy-Item "src-tauri/target/${{ matrix.target }}/release/$smoke"  "$dir/$smoke"
           if (Test-Path "LICENSE") { Copy-Item LICENSE "$dir/LICENSE" }
           if (Test-Path "README.md") { Copy-Item README.md "$dir/README.md" }
           Compress-Archive -Path "$dir/*" -DestinationPath "$dir.zip"

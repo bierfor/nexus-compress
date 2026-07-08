@@ -58,19 +58,32 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Frontend · install + build
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Frontend · install + build (pnpm)
         run: |
           cd frontend
-          npm ci
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Engine · cargo build --release
-        run: cargo build --release --bin nexus --bin p2p_smoke --bin e2e_v3
+        # Sprint 5.6.28 hotfix: `cargo build --bin p2p_smoke`
+        # without `--manifest-path` fails because p2p_smoke lives
+        # in the src-tauri crate, not the root engine crate.
+        # So we run the engine bins from the repo root, and the
+        # Tauri bins (p2p_smoke, e2e_v3, nexus-rar) from src-tauri/.
+        run: |
+          cargo build --release --bin nexus
+          (cd src-tauri && cargo build --release --bin p2p_smoke --bin e2e_v3)
 
       - name: Engine · cargo test --release
         run: cargo test --release --bins
 
       - name: P2P transport · cargo test --bin p2p_smoke
+        working-directory: src-tauri
         run: cargo test --release --bin p2p_smoke
 
       - name: Clippy · lint (warnings reported, not enforced)
@@ -119,17 +132,21 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Frontend · install + build
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Frontend · install + build (pnpm)
         run: |
           cd frontend
-          npm ci
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Tauri · cargo check (GUI bundle requires codesign;
                                   certs only on release flow)
-        run: |
-          cd src-tauri
-          cargo check --release --bin nexus-rar
+        working-directory: src-tauri
+        run: cargo check --release --bin nexus-rar
 
   # ─────────────────────────────────────────────────────────────
   #  Windows: builds (signing lives in release flow)
@@ -161,19 +178,23 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Frontend · install + build (PowerShell)
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Frontend · install + build (pnpm, PowerShell)
         shell: pwsh
         run: |
           cd frontend
-          npm ci
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Tauri · cargo check (GUI bundle requires WIX; signing
                                  only on release flow)
         shell: pwsh
-        run: |
-          cd src-tauri
-          cargo check --release --bin nexus-rar
+        working-directory: src-tauri
+        run: cargo check --release --bin nexus-rar
 
   # ─────────────────────────────────────────────────────────────
   #  fmt-and-lint: fast overall path indicator on PRs

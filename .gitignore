@@ -8,6 +8,11 @@ gen/
 frontend/.next/
 frontend/out/
 frontend/node_modules/
+# Sprint 5.6.28: project uses pnpm (pnpm-lock.yaml is the
+# source of truth). Keep npm's package-lock.json out of the
+# repo so contributors running `npm install` by accident
+# don't accidentally generate one and create drift.
+frontend/package-lock.json
 
 # Tauri build artifacts (release binaries)
 src-tauri/target/release/.fingerprint/
