@@ -48,7 +48,7 @@ import {
 } from "lucide-react";
 
 import type { Locale } from "@/lib/i18n";
-import { ConfigPanel } from "@/components/ConfigPanel";
+import { CompressionPanel, TunnelPanel } from "@/components/ConfigPanel";
 
 type SectionId =
   | "interface"
@@ -296,7 +296,10 @@ function CompressionSection() {
       wide
     >
       <div className="p-5">
-        <ConfigPanel />
+        {/* Just the compression piece — mode cards + strength + self-test.
+            No language picker, no tunnel config, no about — those have
+            their own dedicated sidebar tabs. */}
+        <CompressionPanel />
       </div>
     </SectionCard>
   );
@@ -310,7 +313,7 @@ function CompressionSection() {
 // ─────────────────────────────────────────────────────────────
 
 function TransportSection() {
-  const { t, locale } = useLocale();
+  const { t } = useLocale();
   return (
     <SectionCard
       icon={Network}
@@ -318,76 +321,13 @@ function TransportSection() {
       desc={t("settings.transport.desc")}
       wide
     >
-      <div className="p-5 space-y-3">
-        <TunnelModeSummary
-          id="quick"
-          icon="🚀"
-          title={t("settings.tunnel.mode.quick")}
-          desc={t("settings.tunnel.mode.quick.desc")}
-          badge={t("settings.tunnel.mode.quick.badge")}
-          tone="amber"
-        />
-        <TunnelModeSummary
-          id="named"
-          icon="☁️"
-          title={t("settings.tunnel.mode.named")}
-          desc={t("settings.tunnel.mode.named.desc")}
-          badge={t("settings.tunnel.mode.named.badge")}
-          tone="violet"
-        />
-        <TunnelModeSummary
-          id="direct"
-          icon="📡"
-          title={t("settings.tunnel.mode.direct")}
-          desc={t("settings.tunnel.mode.direct.desc")}
-          badge={t("settings.tunnel.mode.direct.badge")}
-          tone="emerald"
-        />
-        <p className="text-zinc-600 text-[11px] leading-relaxed pt-2 italic">
-          {locale === "es"
-            ? "Para cambiar el modo activo o configurar el tunnel named (hostname + token), abrí la sección Compresión → 'Transporte P2P'."
-            : locale === "it"
-              ? "Per cambiare la modalità attiva o configurare il tunnel named (hostname + token), apri la sezione Compressione → 'Trasporto P2P'."
-              : "To change the active mode or configure a named tunnel (hostname + token), open the Compression section → 'P2P transport'."}
-        </p>
-      </div>
+      {/* Mount the real TunnelPanel here — mode selector +
+          named-mode hostname + token + Save. Same state as the
+          legacy ConfigPanel-composed version, but reachable from
+          its own sidebar tab instead of being buried in the
+          composite. */}
+      <TunnelPanel />
     </SectionCard>
-  );
-}
-
-function TunnelModeSummary({
-  id,
-  icon,
-  title,
-  desc,
-  badge,
-  tone,
-}: {
-  id: "quick" | "named" | "direct";
-  icon: string;
-  title: string;
-  desc: string;
-  badge: string;
-  tone: "amber" | "violet" | "emerald";
-}) {
-  const tones = {
-    amber: "text-amber-300 bg-amber-500/10 border-amber-500/30",
-    violet: "text-violet-300 bg-violet-500/10 border-violet-500/30",
-    emerald: "text-emerald-300 bg-emerald-500/10 border-emerald-500/30",
-  };
-  return (
-    <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
-      <div className="flex items-center gap-2 mb-1.5">
-        <span className="text-xl">{icon}</span>
-        <p className="font-semibold text-white text-[13.5px] flex-1">{title}</p>
-        <span
-          className={`px-2 py-0.5 rounded text-[10px] font-mono tracking-wider border ${tones[tone]}`}
-        >
-          {badge}
-        </span>
-      </div>
-      <p className="text-zinc-500 text-[12px] leading-relaxed">{desc}</p>
-    </div>
   );
 }
 
