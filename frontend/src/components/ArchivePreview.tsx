@@ -40,6 +40,7 @@ function fmtBytes(n: number): string {
 
 const KIND_LABEL: Record<string, string> = {
   nxs6: "SOLID v6 (single LZMA stream)",
+  "nxs6-truncated": "NXS6 (TOC unreadable — try decompress)",
   nxar: "NXAR (lossless v4)",
   v4: "single-file v4",
   "v5-v6-single": "single-file v5/v6 (LZMA)",

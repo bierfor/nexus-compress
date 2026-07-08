@@ -241,16 +241,21 @@ export function DecompressView({
     if (!isTauri) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      // Sprint 5.6.29 hotfix #19: the previous filter list was
-      // restricting to .tar / .nxs* / .lz / etc. AND had the broken
-      // `extensions: ["*"]` last entry. For a generic archiver
-      // browser we drop the filter entirely so users can pick
-      // ANY file. The backend (`peek_archive_target_cmd`) detects
-      // the format from the magic bytes, not the extension, so
-      // opening "archive.zip" or "backup" (no extension) both work.
+      // macOS Sequoia / Sonoma bug: when no `filters` is set on
+      // a file picker, the native NSOpenPanel sometimes defaults
+      // to "folders only" mode and the user can't see regular
+      // files. Pass an explicit "All files" filter with `["*"]`
+      // to force the standard file-selection mode. The
+      // "NexusCompress archives" filter is a convenience for
+      // users who want to see their .nxs / .nxs6 / .nxe / .nxr
+      // / .lz / .nxar files first.
       const result = await open({
         multiple: false,
         directory: false,
+        filters: [
+          { name: "All files", extensions: ["*"] },
+          { name: "NexusCompress archives", extensions: ["nxs", "nxs6", "nxe", "nxr", "lz", "nxar"] },
+        ],
       });
       if (typeof result === "string") acceptPath(result);
     } catch (e) {

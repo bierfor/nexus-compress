@@ -14,7 +14,7 @@
 //! the return values to the frontend via JSON.
 
 use nexus_compress::api::{
-    self, ApiResult, BackendInfo, CompressResult, CompressTargetResult, CompressionBackend,
+    self, ApiError, ApiResult, BackendInfo, CompressResult, CompressTargetResult, CompressionBackend,
     CompressionLevel, DecompressResult, DecompressTargetResult, EngineInfo, PeekResult,
     ProgressEvent, SelfTestResult,
 };
@@ -177,6 +177,20 @@ pub async fn compress_target_cmd(
         .get("output_dir")
         .and_then(|v| v.as_str())
         .map(PathBuf::from);
+    // Sprint 5.7.2 PR #4: optional encryption. When the frontend
+    // includes `password` in the req, we route to the encrypted
+    // pipeline (v4 codec + AES-256-GCM + optional Reed-Solomon).
+    // The `recovery_level` string ("off" / "low" / "high") defaults
+    // to "low" (10 % parity) when password is set, matching the
+    // design doc's "recovery on by default" choice.
+    let password: Option<String> = req
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let recovery_str: Option<String> = req
+        .get("recovery_level")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let backend =
         CompressionBackend::from_str(backend_str).map_err(|e| format!("invalid_backend: {}", e))?;
     let p = PathBuf::from(path);
@@ -196,13 +210,30 @@ pub async fn compress_target_cmd(
         let cb = |event: ProgressEvent| {
             throttler.feed("compress-progress", &event);
         };
-        api::compress_target(
-            &p,
-            backend,
-            lzma_level,
-            output_dir.as_deref(),
-            cb,
-        )
+        // Two paths: encrypted (password is set) or plain.
+        // We keep the dispatch in one function so the frontend
+        // doesn't have to call different commands; the password
+        // is the only signal that decides the branch.
+        if let Some(pwd) = password.as_deref() {
+            let recovery = match recovery_str.as_deref() {
+                Some(s) => api::RecoveryLevel::from_str(s)
+                    .map_err(|e| ApiError::new("compress.invalid_recovery_level", e))?,
+                None => api::RecoveryLevel::default(),
+            };
+            let opts = api::CompressWithPasswordOptions {
+                password: pwd.as_bytes(),
+                recovery,
+            };
+            api::compress_target_with_password(&p, &opts, cb)
+        } else {
+            api::compress_target(
+                &p,
+                backend,
+                lzma_level,
+                output_dir.as_deref(),
+                cb,
+            )
+        }
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))?;
@@ -302,6 +333,14 @@ pub async fn decompress_target_cmd(
 /// the file list, total uncompressed size, and archive kind.
 /// The frontend uses this to render a WinRAR-style preview
 /// before the user commits to extracting.
+///
+/// Sprint 5.7.2: extended to handle encrypted archives. The
+/// optional `password` field in the req enables the unlock path
+/// — when set, the encrypted archive is decrypted (GCM-verified)
+/// and the underlying NXS file list is returned. When the password
+/// is wrong, the GCM auth fails and we return a clear error code
+/// (the frontend renders this as "✗ wrong password" in the
+/// ArchivePreview component).
 #[tauri::command]
 pub async fn peek_archive_target_cmd(req: serde_json::Value) -> Result<PeekResult, String> {
     let path = req
@@ -309,10 +348,19 @@ pub async fn peek_archive_target_cmd(req: serde_json::Value) -> Result<PeekResul
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing 'path' in req".to_string())?
         .to_string();
+    let password: Option<String> = req
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let p = PathBuf::from(path);
-    tauri::async_runtime::spawn_blocking(move || to_ipc(api::peek_archive_target(&p)))
-        .await
-        .map_err(|e| format!("spawn_blocking failed: {}", e))?
+    tauri::async_runtime::spawn_blocking(move || {
+        match password.as_deref() {
+            Some(pwd) => to_ipc(api::peek_archive_target_with_password(&p, pwd.as_bytes())),
+            None => to_ipc(api::peek_archive_target(&p)),
+        }
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {}", e))?
 }
 
 // ============================================================================

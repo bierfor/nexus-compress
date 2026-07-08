@@ -139,6 +139,15 @@ export function CompressView({
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [pathInput, setPathInput] = useState("");
+  // Sprint 5.7.2: encryption orchestrator state. The password
+  // and recovery level flow into the `compress_target_cmd`
+  // Tauri call; if `password` is set, the backend routes to
+  // the encrypted pipeline (v4 + AES-256-GCM + optional
+  // Reed-Solomon).
+  const [encrypt, setEncrypt] = useState(false);
+  const [password, setPassword] = useState<string>("");
+  const [recoveryLevel, setRecoveryLevel] = useState<"off" | "low" | "high">("low");
+  const [showPwd, setShowPwd] = useState(false);
   // FolderOpen + Plus icons for the new btn-ghost / btn-primary buttons
   // are imported at the top of the file.
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
@@ -264,9 +273,17 @@ export function CompressView({
       const result = await open({
         multiple: true,
         directory: false,
-        // No `filters` → the native panel shows ALL files and
-        // accepts any extension. This is what users expect for
-        // a generic compressor.
+        // macOS Sequoia / Sonoma bug: when no `filters` is set,
+        // the native NSOpenPanel sometimes defaults to "folders
+        // only" mode and the user can't see regular files. Pass
+        // an explicit "All files" filter with `["*"]` to force
+        // the standard file-selection mode. On other platforms
+        // the `["*"]` is treated as a wildcard and shows every
+        // file, which is what a generic compressor wants.
+        filters: [
+          { name: "All files", extensions: ["*"] },
+          { name: "Archives", extensions: ["nxs", "nxs6", "nxe", "nxr", "lz", "zip", "tar", "gz"] },
+        ],
       });
       if (Array.isArray(result)) acceptPaths(result);
       else if (typeof result === "string") acceptPaths([result]);
@@ -321,6 +338,13 @@ export function CompressView({
     const m = MODES.find((x) => x.id === mode)!;
     const inputPath = files[0];
     const inputFilename = inputPath.split("/").pop() || "archivo";
+    // Guard: encryption requires a non-empty password. We don't
+    // fail the click silently — show an error and bail.
+    if (encrypt && !password) {
+      setError("encryption enabled but no password set");
+      setBusy(false);
+      return;
+    }
     try {
       const lastResult: CompressResult = await tauriInvoke("compress_target_cmd", {
         req: {
@@ -328,14 +352,21 @@ export function CompressView({
           backend: m.backend,
           lzma_level: m.lzma,
           output_dir: destDir || null,
+          // Sprint 5.7.2: optional encryption. When `password`
+          // is set, the backend routes to the encrypted pipeline
+          // (v4 + AES-256-GCM + optional Reed-Solomon). When
+          // `password` is null, the existing plain path runs.
+          password: encrypt ? password : null,
+          recovery_level: encrypt ? recoveryLevel : null,
         },
       });
       const durationMs = Date.now() - startTime;
       const savings = lastResult.compressed_size / lastResult.original_size;
       const savingsPct = Math.round((1 - savings) * 100);
+      const lockEmoji = encrypt ? "🔒 " : "";
       setToast({
         kind: "ok",
-        msg: `✓ ${inputFilename} → ${prettyBytes(lastResult.compressed_size)} (${savingsPct}% más pequeño) en ${(durationMs / 1000).toFixed(1)}s`,
+        msg: `✓ ${lockEmoji}${inputFilename} → ${prettyBytes(lastResult.compressed_size)} (${savingsPct}% más pequeño) en ${(durationMs / 1000).toFixed(1)}s`,
       });
       onComplete({
         kind: "compress",
@@ -345,6 +376,7 @@ export function CompressView({
         durationMs,
       });
       setFiles([]);
+      setPassword(""); // wipe the in-memory password after success
     } catch (e: any) {
       const msg = String(e?.message ?? e);
       setError(msg);
@@ -581,6 +613,98 @@ export function CompressView({
               {t("compress.dest.change")}
             </button>
           </div>
+        </div>
+
+        {/* Sprint 5.7.2: encryption + recovery panel. Toggle to
+            enable AES-256-GCM, choose a recovery level, type a
+            password. The panel collapses when encryption is off
+            (the default — 7z-style "off by default" UX would be
+            too aggressive; matching the design doc, encryption
+            is opt-in but enabled by default in production). */}
+        <div className="mb-4 panel p-3 flex flex-col gap-2">
+          <label className="flex items-center justify-between cursor-pointer">
+            <span className="metric-label flex items-center gap-2">
+              <span className="text-amber-400">🔒</span>
+              encryption
+            </span>
+            <span className="flex items-center gap-2">
+              <span className="text-[10px] text-zinc-500 uppercase tracking-wider">
+                {encrypt ? "on" : "off"}
+              </span>
+              <input
+                type="checkbox"
+                checked={encrypt}
+                onChange={(e) => setEncrypt(e.target.checked)}
+                disabled={busy}
+                className="w-4 h-4 accent-cyan-500 cursor-pointer disabled:opacity-50"
+              />
+            </span>
+          </label>
+
+          {encrypt && (
+            <div className="flex flex-col gap-2 mt-1 pt-2 border-t border-zinc-800">
+              {/* Password input + visibility toggle */}
+              <div className="relative">
+                <input
+                  type={showPwd ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="archive password"
+                  autoComplete="new-password"
+                  spellCheck={false}
+                  disabled={busy}
+                  className="w-full bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 pr-9 text-[12px] font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500 focus:bg-zinc-900 disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPwd((s) => !s)}
+                  tabIndex={-1}
+                  disabled={busy}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-cyan-400 text-[14px] leading-none disabled:opacity-50"
+                  title={showPwd ? "hide password" : "show password"}
+                >
+                  {showPwd ? "🙈" : "👁"}
+                </button>
+              </div>
+
+              {/* Recovery level radio group. Default "low" (10%
+                  parity, matches the 7z UX). */}
+              <div className="flex flex-col gap-1.5">
+                <div className="text-[10px] text-zinc-500 uppercase tracking-wider">
+                  recovery (Reed-Solomon)
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(
+                    [
+                      { v: "off", label: "off", desc: "0% overhead" },
+                      { v: "low", label: "low", desc: "1 / 10 files" },
+                      { v: "high", label: "high", desc: "2-3 / 8 files" },
+                    ] as const
+                  ).map((opt) => {
+                    const active = recoveryLevel === opt.v;
+                    return (
+                      <button
+                        key={opt.v}
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setRecoveryLevel(opt.v)}
+                        className={`px-2 py-1.5 rounded border text-[10.5px] font-mono transition-colors disabled:opacity-50 ${
+                          active
+                            ? "border-cyan-500 bg-cyan-500/10 text-cyan-300"
+                            : "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300"
+                        }`}
+                      >
+                        <div className="font-medium">{opt.label}</div>
+                        <div className="text-[9px] text-zinc-500 mt-0.5">
+                          {opt.desc}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Progress (only when compressing) */}

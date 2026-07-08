@@ -993,6 +993,23 @@ impl Default for RecoveryLevel {
     fn default() -> Self { Self::Low }
 }
 
+impl RecoveryLevel {
+    /// Parse from a lowercase string ("off" / "low" / "high").
+    /// Used by the Tauri command to translate the
+    /// `recovery_level` field of the JSON req.
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "low" => Ok(Self::Low),
+            "high" => Ok(Self::High),
+            other => Err(format!(
+                "unknown recovery level '{}' (use 'off' | 'low' | 'high')",
+                other
+            )),
+        }
+    }
+}
+
 /// User-supplied options for `compress_target_with_password`.
 /// Mirrors the CLI's `--password P [--recovery off|low|high]`.
 #[derive(Debug, Clone)]
@@ -1413,19 +1430,50 @@ pub fn peek_archive_target(input_path: &Path) -> ApiResult<PeekResult> {
 
     if &bytes[..5] == crate::solid_archive::MAGIC {
         // NXS6: parse the TOC inline (no LZMA decode).
-        let (entries, total) = crate::solid_archive::peek_toc(&bytes)
-            .map_err(|e| ApiError::new("solid.peek_failed", e))?;
-        let files: Vec<ArchivePreviewEntry> = entries
-            .into_iter()
-            .map(|e| ArchivePreviewEntry {
-                path: e.name,
-                size: e.original_size,
-                is_dir: false,
-            })
-            .collect();
+        // We wrap the SOLID parse in a permissive match: if the
+        // TOC is corrupt (truncated header, wrong version byte,
+        // mismatched n_files, etc.) we DON'T surface the raw
+        // `parse solid toc: ...` technical message — the user
+        // just sees a clear "format not recognized" and the
+        // ArchivePreview falls back to a "single file" entry
+        // with the on-disk size. The user can still try to
+        // decompress (the full decoder has more tolerance for
+        // partial TOCs than `peek_toc` does).
+        let (archive_kind, files, total) = match crate::solid_archive::peek_toc(&bytes) {
+            Ok((entries, total)) => {
+                let files: Vec<ArchivePreviewEntry> = entries
+                    .into_iter()
+                    .map(|e| ArchivePreviewEntry {
+                        path: e.name,
+                        size: e.original_size,
+                        is_dir: false,
+                    })
+                    .collect();
+                let n = files.len() as u64;
+                ("nxs6", files, total)
+            }
+            Err(_e) => {
+                // TOC was corrupt or the file is truncated.
+                // Return a "synthetic single-file" entry so the
+                // user at least sees the archive's on-disk size
+                // + a marker that the file list couldn't be
+                // parsed. The full decompressor will give a
+                // better error if the data is actually unreadable.
+                let files = vec![ArchivePreviewEntry {
+                    path: input_path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "archive".to_string()),
+                    size: compressed_size,
+                    is_dir: false,
+                }];
+                ("nxs6-truncated", files, compressed_size)
+            }
+        };
+        let n = files.len() as u64;
         Ok(PeekResult {
-            archive_kind: "nxs6",
-            n_files: files.len() as u64,
+            archive_kind,
+            n_files: n,
             total_uncompressed: total,
             compressed_size,
             files,
@@ -1497,6 +1545,132 @@ pub fn peek_archive_target(input_path: &Path) -> ApiResult<PeekResult> {
             total_uncompressed: bytes.len() as u64, // lower bound
             compressed_size: bytes.len() as u64,
             files: vec![], // populated only after password + decrypt
+        })
+    } else {
+        Err(ApiError::new(
+            "peek.unknown_format",
+            format!(
+                "unknown archive format (magic: {:02x}{:02x}{:02x}{:02x}…)",
+                bytes[0], bytes[1], bytes[2], bytes[3]
+            ),
+        ))
+    }
+}
+
+/// Peek at an encrypted archive (NXE\0 / NXR\0 magic) with a
+/// password. Decrypts the archive, then runs the existing
+/// `peek_archive_target` on the reconstructed NXS buffer to
+/// extract the file list. On wrong password, the GCM auth check
+/// in `encrypted::decompress_encrypted` fails and we return
+/// `ApiError::code = "encrypted.wrong_password"` (the frontend
+/// maps this to the "✗ wrong password" line in the preview).
+///
+/// The recovered file list is the SAME format that the plain
+/// `peek_archive_target` returns, so the ArchivePreview component
+/// doesn't need a special "encrypted unlock" path — it just
+/// re-fetches with the password and re-renders the same list.
+pub fn peek_archive_target_with_password(
+    input_path: &Path,
+    password: &[u8],
+) -> ApiResult<PeekResult> {
+    use crate::encrypted::decompress_encrypted;
+    let bytes = std::fs::read(input_path).map_err(|e| {
+        ApiError::new("peek.read_failed", format!("read: {}", e))
+    })?;
+    // Decrypt the archive. GCM auth failure = wrong password.
+    let decompressed = decompress_encrypted(&bytes, password).map_err(|e| {
+        // Distinguish "wrong password" (GCM auth fail) from
+        // other decrypt errors. The encrypted module's
+        // CryptoError::Decrypt carries the GCM failure message
+        // ("aead: ..."), so we string-match for it.
+        let s = e.to_string();
+        if s.contains("aead") || s.contains("Decrypt") {
+            ApiError::new("encrypted.wrong_password", "wrong password")
+        } else {
+            ApiError::new("encrypted.decompress_failed", s)
+        }
+    })?;
+    // Now run the existing peek on the reconstructed NXS buffer.
+    // We invoke the inner logic by calling the dispatch
+    // directly on the bytes in memory. Refactor: build a
+    // PeekResult from the in-memory bytes without going back
+    // through the filesystem.
+    peek_archive_bytes(&decompressed)
+}
+
+/// Inner: peek from in-memory bytes (used by both
+/// `peek_archive_target` and `peek_archive_target_with_password`).
+fn peek_archive_bytes(bytes: &[u8]) -> ApiResult<PeekResult> {
+    if bytes.len() < 5 {
+        return Err(ApiError::new(
+            "peek.too_short",
+            format!("buffer too short ({} bytes)", bytes.len()),
+        ));
+    }
+    if &bytes[..5] == crate::solid_archive::MAGIC {
+        let (entries, total) = crate::solid_archive::peek_toc(bytes)
+            .map_err(|e| ApiError::new("solid.peek_failed", e))?;
+        let files: Vec<ArchivePreviewEntry> = entries
+            .into_iter()
+            .map(|e| ArchivePreviewEntry {
+                path: e.name,
+                size: e.original_size,
+                is_dir: false,
+            })
+            .collect();
+        let n = files.len() as u64;
+        Ok(PeekResult {
+            archive_kind: "nxs6",
+            n_files: n,
+            total_uncompressed: total,
+            compressed_size: bytes.len() as u64,
+            files,
+        })
+    } else if &bytes[..4] == b"NXAR\n" {
+        let entries = crate::nxar::peek_archive(bytes)
+            .map_err(|e| ApiError::new("nxar.peek_failed", e))?;
+        let files: Vec<ArchivePreviewEntry> = entries
+            .into_iter()
+            .map(|e| ArchivePreviewEntry {
+                path: e.path,
+                size: e.original_size,
+                is_dir: false,
+            })
+            .collect();
+        let n = files.len() as u64;
+        let total: u64 = files.iter().map(|f| f.size).sum();
+        Ok(PeekResult {
+            archive_kind: "nxar",
+            n_files: n,
+            total_uncompressed: total,
+            compressed_size: bytes.len() as u64,
+            files,
+        })
+    } else if &bytes[..4] == b"NXS\x00" {
+        let compressed_size = bytes.len() as u64;
+        Ok(PeekResult {
+            archive_kind: "v4",
+            n_files: 1,
+            total_uncompressed: compressed_size,
+            compressed_size,
+            files: vec![ArchivePreviewEntry {
+                path: "<single-file v4 stream>".to_string(),
+                size: compressed_size,
+                is_dir: false,
+            }],
+        })
+    } else if bytes[0] == 0x05 {
+        let compressed_size = bytes.len() as u64;
+        Ok(PeekResult {
+            archive_kind: "v5-v6-single",
+            n_files: 1,
+            total_uncompressed: compressed_size,
+            compressed_size,
+            files: vec![ArchivePreviewEntry {
+                path: "<single-file v5/v6 LZMA stream>".to_string(),
+                size: compressed_size,
+                is_dir: false,
+            }],
         })
     } else {
         Err(ApiError::new(
