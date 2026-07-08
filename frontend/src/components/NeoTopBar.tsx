@@ -1,31 +1,29 @@
 "use client";
 
-/**
- * NeoTopBar — minimal top bar (Sprint 5.6 "Neo Terminal").
- *
- * - Brand mark on the left
- * - Centered nav: Inicio · Recientes · Ajustes
- * - Right side: a single settings button (no clutter)
- *
- * Active nav item is highlighted with a subtle accent dot.
- */
+import { useLocale } from "@/components/LocaleProvider";
 
-export type View = "landing" | "compress" | "decompress" | "share" | "settings" | "recent";
+export type View =
+  | "landing"
+  | "compress"
+  | "decompress"
+  | "share"
+  | "settings"
+  | "recent";
 
 export function NeoTopBar({
   view,
   onNavigate,
-  onSettings,
 }: {
   view: View;
   onNavigate: (v: View) => void;
-  onSettings: () => void;
 }) {
+  const { t } = useLocale();
+
   const navItems: { id: View; label: string }[] = [
-    { id: "landing", label: "Inicio" },
-    { id: "recent", label: "Recientes" },
-    { id: "share", label: "Compartir" },
-    { id: "settings", label: "Ajustes" },
+    { id: "landing",  label: t("nav.home")     },
+    { id: "recent",   label: t("nav.recent")   },
+    { id: "share",    label: t("nav.share")    },
+    { id: "settings", label: t("nav.settings") },
   ];
 
   return (
@@ -34,7 +32,7 @@ export function NeoTopBar({
       className="h-14 flex items-center justify-between px-8 shrink-0 select-none border-b border-white/[0.04] backdrop-blur-md bg-black/20"
     >
       {/* Brand */}
-      <div className="flex items-center gap-2.5">
+      <div className="flex items-center gap-2.5 w-[120px]">
         <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-400 to-blue-500 flex items-center justify-center text-black font-bold text-[14px]">
           ▣
         </div>
@@ -63,8 +61,12 @@ export function NeoTopBar({
         })}
       </nav>
 
-      {/* Right spacer for symmetry */}
-      <div className="w-[120px]" />
+      {/* Version */}
+      <div className="w-[120px] flex justify-end">
+        <span className="text-zinc-600 text-[11px] font-mono tracking-wide">
+          v0.1.0
+        </span>
+      </div>
     </header>
   );
 }
