@@ -3030,6 +3030,9 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 name = "nexus-compress"
 version = "0.1.1"
 dependencies = [
+ "aead",
+ "aes-gcm",
+ "argon2",
  "filetime",
  "fs2",
  "libc",
@@ -3041,6 +3044,7 @@ dependencies = [
  "tempfile",
  "xattr",
  "xz2",
+ "zeroize",
 ]
 
 [[package]]

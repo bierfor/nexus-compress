@@ -16,6 +16,12 @@ pub mod ast_minify;
 pub mod cdc;
 pub mod classifier;
 pub mod codec;
+/// Sprint 5.7.2 — Block-level AES-256-GCM encryption with
+/// Argon2id KDF. The `derive_key` entry point produces a
+/// `KdfResult` whose `preset_used` field goes straight
+/// into the V3 header's `kdf_params` field, so the
+/// decoder reproduces the same KDF output bit-for-bit.
+pub mod crypto;
 /// Sprint 5.7.2 — Reed-Solomon recovery codec. The `galois`
 /// submodule holds the GF(2^8) finite-field arithmetic
 /// (EXP/LOG tables + the four primitive operations);

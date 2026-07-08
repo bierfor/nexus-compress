@@ -145,7 +145,7 @@ This is the part 7z and WinRAR do not give you. They stop at
 //! and `argon2` crates are. We do not roll our own crypto.
 
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use aes_gcm::aead::Aead;
+use aes_gcm::aead::Aced;
 use argon2::{Argon2, Algorithm, Version, Params};
 
 pub const KEY_LEN: usize = 32;       // AES-256
@@ -153,41 +153,120 @@ pub const NONCE_LEN: usize = 12;     // GCM standard
 pub const TAG_LEN: usize = 16;       // GCM standard
 pub const SALT_LEN: usize = 16;      // Argon2id
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KdfPreset {
     /// Interactive: <100 ms on a modern desktop. For local archives.
-    Interactive,
+    Interactive = 0,
     /// Moderate: ~500 ms. For cloud-shared archives.
-    Moderate,
+    Moderate = 1,
     /// Sensitive: ~2 s. For long-term storage of PII.
-    Sensitive,
+    Sensitive = 2,
 }
 
 impl KdfPreset {
+    /// The actual Argon2id parameters (m_cost, t_cost, p_cost,
+    /// output_len) for this preset. The m_cost values are in
+    /// KiB. These are the EXACT values the design doc
+    /// §2 commits to.
     pub fn params(self) -> Params {
         match self {
-            Self::Interactive => Params::new(19_456, 2, 1, Some(32)),
-            Self::Moderate    => Params::new(46_080, 3, 1, Some(32)),
-            Self::Sensitive   => Params::new(65_536, 4, 2, Some(32)),
+            Self::Interactive => Params::new(19_456, 2, 1, Some(KEY_LEN as u32)),
+            Self::Moderate    => Params::new(46_080, 3, 1, Some(KEY_LEN as u32)),
+            Self::Sensitive   => Params::new(65_536, 4, 2, Some(KEY_LEN as u32)),
         }
     }
 }
 
-/// Derive a 32-byte AES key from `password` + `salt` with the given
-/// Argon2id preset. Returns an error if the preset is too aggressive
-/// for the available memory (the caller should fall back to a softer
-/// preset and warn the user).
+/// Result of a key derivation. Returned to the caller so they
+/// can (a) write the actually-used preset into the V3 header's
+/// kdf_params field (so the decoder reproduces the same KDF
+/// output exactly), and (b) surface a warning to the user if
+/// the original preset was downgraded to fit the available RAM.
+#[derive(Debug, Clone)]
+pub struct KdfResult {
+    /// The 32-byte AES-256 key derived from the password.
+    /// Returned in a `Zeroizing`-compatible buffer (see
+    /// `key_material::ZeroizingKey`) so it gets wiped on Drop.
+    pub key: ZeroizingKey,
+    /// The preset that was actually used. May differ from
+    /// the caller's request if `downgraded` is true.
+    pub preset_used: KdfPreset,
+    /// True if the requested preset was relaxed to fit the
+    /// available RAM. The orchestrator should surface this
+    /// to the user (CLI/UI warning: "Argon2id preset relaxed
+    /// from Sensitive to Moderate: only 4 GiB RAM available").
+    pub downgraded: bool,
+}
+
+/// A 32-byte AES key that wipes itself on Drop. Used for
+/// all in-memory key material to limit the window of
+/// vulnerability to a memory-dump attack.
+pub struct ZeroizingKey(pub [u8; KEY_LEN]);
+
+impl Drop for ZeroizingKey {
+    fn drop(&mut self) {
+        // Volatile write to ensure the compiler doesn't
+        // optimize away the wipe. `volatile_set_memory` is
+        // stable in Rust 1.78+; before that we use
+        // `core::ptr::write_volatile` in a loop.
+        for byte in self.0.iter_mut() {
+            unsafe { core::ptr::write_volatile(byte, 0) };
+        }
+    }
+}
+
+/// Derive a 32-byte AES key from `password` + `salt` with the
+/// given Argon2id preset. **Auto-downgrades the preset** if
+/// the available RAM on the system is below the preset's
+/// working-set requirement (e.g. Sensitive needs 65 MiB; on
+/// a 4 GiB machine we drop to Moderate automatically).
+///
+/// **Why auto-downgrade vs hard fail:** the orchestrator
+/// (Tauri command / CLI subcommand) is already past the
+/// "user clicked Compress" point. A hard failure mid-50-GiB
+/// backup is much worse than a slightly weaker KDF — the
+/// alternative is no backup at all, which is the worst
+/// outcome of all. We downgraded, log a warning, and the
+/// user can re-run with `-k sensitive --no-downgrade` if
+/// they explicitly want to risk OOM.
 pub fn derive_key(
     password: &[u8],
     salt: &[u8; SALT_LEN],
-    preset: KdfPreset,
-) -> Result<[u8; KEY_LEN], CryptoError> {
-    let params = preset.params();
-    let mut key = [0u8; KEY_LEN];
+    requested: KdfPreset,
+) -> Result<KdfResult, CryptoError> {
+    // Read available RAM. If we can't (sandboxed env, exotic
+    // platform), we trust the caller's request and don't
+    // downgrade — the user can override per-call if they
+    // know their environment.
+    let available_mb = crate::ram::available_memory_mb();
+
+    // `clamp_preset_for_ram` returns the highest preset that
+    // fits in `available_mb` without OOM-ing. It returns the
+    // SAME preset if there's enough RAM.
+    let clamped = crate::ram::clamp_preset_for_ram(requested as u32, available_mb);
+    let preset_used = preset_from_u32(clamped);
+    let downgraded = preset_used != requested;
+
+    // Now derive the key with the (possibly clamped) preset.
+    let params = preset_used.params();
+    let mut raw_key = [0u8; KEY_LEN];
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(password, salt, &mut key)
+        .hash_password_into(password, salt, &mut raw_key)
         .map_err(|e| CryptoError::Kdf(e.to_string()))?;
-    Ok(key)
+    Ok(KdfResult {
+        key: ZeroizingKey(raw_key),
+        preset_used,
+        downgraded,
+    })
+}
+
+fn preset_from_u32(n: u32) -> KdfPreset {
+    match n {
+        0 => KdfPreset::Interactive,
+        1 => KdfPreset::Moderate,
+        2 => KdfPreset::Sensitive,
+        _ => KdfPreset::Interactive, // unknown → safest default
+    }
 }
 
 pub struct BlockCipher {

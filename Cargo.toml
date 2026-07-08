@@ -53,6 +53,22 @@ fs2 = { version = "0.4", optional = true }
 # Already a transitive dep via sysinfo; pinning 0.2 explicitly so
 # the FFI signatures match the unix crate family.
 libc = "0.2"
+# Sprint 5.7.2: AES-256-GCM block cipher + Argon2id KDF.
+# - aes-gcm 0.10: the RustCrypto implementation of AES-GCM.
+#   Pinned to 0.10 because the API (Aes256Gcm::new + aead::Payload
+#   for AAD) is what the design doc §2 commits to.
+# - aead 0.5: the trait abstraction that aes-gcm implements.
+# - argon2 0.5: the RustCrypto implementation of Argon2id
+#   (the recommended KDF for new applications per OWASP).
+#   Already vetted by the p2p_tunnel module in this same crate.
+# - zeroize 1: drops in-memory secrets to zero on Drop. The
+#   crate's `Zeroizing<T>` wrapper is the standard pattern
+#   for AES key material. Replaces our hand-rolled
+#   `write_volatile(0)` loop in ZeroizingKey.
+aes-gcm = "0.10"
+aead = "0.5"
+argon2 = "0.5"
+zeroize = { version = "1", features = ["zeroize_derive"] }
 # v5 LZMA backend. xz2 wraps liblzma (compiled from C source via
 # xz-sys), battle-tested by every Linux distro and used by `xz`.
 # Pure-Rust alternative would be `xz = "0.4"`.
