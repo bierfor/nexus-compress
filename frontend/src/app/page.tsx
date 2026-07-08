@@ -32,9 +32,6 @@ export default function Home() {
     setView(v);
   }, []);
 
-  const onSettings = useCallback(() => {
-    setView("settings");
-  }, []);
 
   const onOpComplete = useCallback(
     (op: {
@@ -72,15 +69,28 @@ export default function Home() {
         <div className="absolute bottom-0 right-1/4 w-[600px] h-[600px] rounded-full bg-emerald-500/[0.02] blur-[120px]" />
       </div>
 
-      <NeoTopBar view={view} onNavigate={onNavigate} onSettings={onSettings} />
+      <NeoTopBar view={view} onNavigate={onNavigate} />
 
       <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden">
         {view === "landing" && <LandingPage onNavigate={onNavigate} />}
-        {view === "compress" && <CompressView onComplete={onOpComplete} />}
-        {view === "decompress" && (
-          <DecompressView onComplete={onOpComplete} />
+        {view === "compress" && (
+          <CompressView
+            onComplete={onOpComplete}
+            onNavigate={onNavigate}
+          />
         )}
-        {view === "share" && <ShareView onComplete={onOpComplete} />}
+        {view === "decompress" && (
+          <DecompressView
+            onComplete={onOpComplete}
+            onNavigate={onNavigate}
+          />
+        )}
+        {view === "share" && (
+          <ShareView
+            onComplete={onOpComplete}
+            onNavigate={onNavigate}
+          />
+        )}
         {view === "settings" && <SettingsView />}
         {view === "recent" && (
           <RecentView ops={recentOps} onNavigate={onNavigate} onClear={onClearRecent} />
