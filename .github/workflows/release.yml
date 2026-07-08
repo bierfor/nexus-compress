@@ -32,9 +32,16 @@ jobs:
           - platform: macos-latest
             target: x86_64-apple-darwin
             label: macOS · x86_64
-          - platform: ubuntu-22.04
+          - platform: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             label: Linux · x86_64
+          # Sprint 5.6.28 hotfix #7: bumped ubuntu-22.04 -> 24.04
+          # because the latest tauri-webview2gtk-bindings
+          # requires libsoup-3.0 + javascriptcoregtk-4.1 which
+          # are only in Ubuntu 24.04+ main repos (Ubuntu 22.04
+          # LTS only ships libsoup2.4 + javascriptcoregtk-4.0).
+          # The earlier 22.04 + libsoup2.4 worked for Tauri 2.0
+          # stable but breaks on Tauri 2.1+'s webview dependency.
           # Sprint 5.6.28 hotfix #6: aarch64-unknown-linux-gnu
           # (Linux ARM64) temporarily disabled. Cross-compiling
           # from the x86_64 runner needs a sysroot + pkg-config
@@ -44,7 +51,7 @@ jobs:
           # runners (ubuntu-22.04-arm) but those were in beta
           # at the time of v0.1.1. Linux/arm64 users can build
           # from source or wait for v0.1.2.
-          # - platform: ubuntu-22.04
+          # - platform: ubuntu-24.04
           #   target: aarch64-unknown-linux-gnu
           #   label: Linux · arm64 (disabled per hotfix #6)
           - platform: windows-latest
@@ -81,17 +88,21 @@ jobs:
           brew install create-dmg
 
       # ─── Linux prerequisites
-      - name: Install Linux deps (Tauri 2 system libs)
-        if: matrix.platform == 'ubuntu-22.04'
+      # Sprint 5.6.28 hotfix #7: bumped to libsoup-3.0 +
+      # webkit2gtk-4.1 (the modern Tauri 2.x webview chain
+      # used on Noble+). The 22.04 packages (libsoup2.4 +
+      # webkit2gtk-4.0) fail to build tauri-webview2gtk-bindings.
+      - name: Install Linux deps (Tauri 2.1+ system libs)
+        if: matrix.platform == 'ubuntu-24.04'
         run: |
           sudo apt update
           sudo apt install -y \
-            libwebkit2gtk-4.0-dev \
+            libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            libsoup2.4-dev \
-            libjavascriptcoregtk-4.0-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
             libavahi-client-dev \
             libsecret-1-dev \
             libfuse2
@@ -180,8 +191,7 @@ jobs:
           - x86_64-apple-darwin
           - aarch64-apple-darwin
           - x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-22.04' ||
-                 matrix.target == 'aarch64-unknown-linux-gnu' && 'ubuntu-22.04' ||
+    runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-24.04' ||
                  matrix.target == 'x86_64-apple-darwin' && 'macos-latest' ||
                  matrix.target == 'aarch64-apple-darwin' && 'macos-latest' ||
                  'windows-latest' }}
