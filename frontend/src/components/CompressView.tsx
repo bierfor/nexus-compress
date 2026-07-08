@@ -709,15 +709,41 @@ export function CompressView({
 
         {/* Progress (only when compressing) */}
         {busy && progress && (
-          <div className="mb-10 p-6 rounded-2xl bg-cyan-500/[0.06] border border-cyan-500/20">
+          // Sprint 5.7.2 (commit #12, v0.1.2): the recovery
+          // phase gets its own amber/orange color so the
+          // user can SEE the moment corruption was detected
+          // and RS kicked in. Without this color swap the
+          // event would still fire correctly, but the user
+          // would have to read the bar text to notice.
+          <div
+            className={
+              progress.phase === "recovering"
+                ? "mb-10 p-6 rounded-2xl bg-amber-500/[0.08] border border-amber-500/30"
+                : "mb-10 p-6 rounded-2xl bg-cyan-500/[0.06] border border-cyan-500/20"
+            }
+          >
             <div className="flex items-center justify-between mb-3">
-              <div className="text-cyan-300 text-[11px] tracking-[0.2em] uppercase">
+              <div
+                className={
+                  progress.phase === "recovering"
+                    ? "text-amber-300 text-[11px] tracking-[0.2em] uppercase font-semibold"
+                    : "text-cyan-300 text-[11px] tracking-[0.2em] uppercase"
+                }
+              >
                 {progress.phase === "reading"
                   ? t("compress.phase.reading")
                   : progress.phase === "compressing"
                   ? t("compress.phase.compressing")
+                  : progress.phase === "encrypting"
+                  ? t("compress.phase.encrypting")
+                  : progress.phase === "building"
+                  ? t("compress.phase.building")
                   : progress.phase === "writing"
                   ? t("compress.phase.writing")
+                  : progress.phase === "recovering"
+                  ? "🚨 " + t("compress.phase.recovering")
+                  : progress.phase === "done"
+                  ? t("compress.phase.done")
                   : t("compress.phase.processing")}
               </div>
               <div className="text-white text-[20px] font-semibold tabular-nums">

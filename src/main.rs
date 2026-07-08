@@ -220,7 +220,7 @@ fn main() {
                         recovery: recovery_level,
                         preset: KdfPreset::Interactive,
                     };
-                    let out = compress_encrypted(&bytes, &opts).expect("compress encrypted");
+                    let out = compress_encrypted(&bytes, &opts, |_ev| {}).expect("compress encrypted");
                     fs::write(output, &out).expect("write output");
                     let ratio = bytes.len() as f64 / out.len().max(1) as f64;
                     let label = match recovery_level {
@@ -280,7 +280,7 @@ fn main() {
                     );
                     std::process::exit(2);
                 };
-                let out = decompress_encrypted(&input, pwd.as_bytes())
+                let out = decompress_encrypted(&input, pwd.as_bytes(), |_ev| {})
                     .expect("decompress encrypted");
                 fs::write(&positional[2], &out).expect("write output");
                 eprintln!(

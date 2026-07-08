@@ -119,8 +119,16 @@ const ES = {
   "compress.best.files": "archivos",
   "compress.phase.reading": "Leyendo",
   "compress.phase.compressing": "Comprimiendo",
+  "compress.phase.encrypting": "Cifrando con AES-256-GCM",
+  "compress.phase.building": "Empaquetando archivo final",
   "compress.phase.writing": "Escribiendo",
   "compress.phase.processing": "Procesando",
+  // Sprint 5.7.2 v0.1.2: the marquee recovery event. The
+  // 🚨 prefix is added by the React render so we don't
+  // double it here. Keep the message short — the
+  // amber border + bold label do the heavy lifting.
+  "compress.phase.recovering": "Corrupción detectada — Reparando bloques con Reed-Solomon",
+  "compress.phase.done": "Listo",
 
   // Compress modes
   "mode.fast.title": "Rápido",
@@ -539,8 +547,12 @@ const EN: Record<keyof typeof ES, string> = {
   "compress.best.files": "files",
   "compress.phase.reading": "Reading",
   "compress.phase.compressing": "Compressing",
+  "compress.phase.encrypting": "Encrypting with AES-256-GCM",
+  "compress.phase.building": "Packaging final archive",
   "compress.phase.writing": "Writing",
   "compress.phase.processing": "Processing",
+  "compress.phase.recovering": "Corruption detected — Repairing blocks with Reed-Solomon",
+  "compress.phase.done": "Done",
 
   "mode.fast.title": "Fast",
   "mode.fast.desc": "Great for videos. Quick compression, saves ~10-20%.",
@@ -889,8 +901,12 @@ const IT: Record<keyof typeof ES, string> = {
   "compress.best.files": "file",
   "compress.phase.reading": "Lettura",
   "compress.phase.compressing": "Compressione",
+  "compress.phase.encrypting": "Cifratura AES-256-GCM",
+  "compress.phase.building": "Impacchettamento archivio",
   "compress.phase.writing": "Scrittura",
   "compress.phase.processing": "Elaborazione",
+  "compress.phase.recovering": "Corruzione rilevata — Riparazione blocchi con Reed-Solomon",
+  "compress.phase.done": "Fatto",
 
   // Modes
   "mode.fast.title": "Veloce",

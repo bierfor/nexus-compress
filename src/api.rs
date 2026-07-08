@@ -1151,7 +1151,7 @@ where
             recovery: encrypted_recovery_level(opts.recovery),
             preset: crate::crypto::KdfPreset::Interactive,
         };
-        compress_encrypted(&archive, &enc_opts).map_err(|e| {
+        compress_encrypted(&archive, &enc_opts, |ev| progress(ev)).map_err(|e| {
             ApiError::new("encrypted.compress_failed", e.to_string())
         })?
     } else {
@@ -1162,7 +1162,7 @@ where
             recovery: encrypted_recovery_level(opts.recovery),
             preset: crate::crypto::KdfPreset::Interactive,
         };
-        compress_encrypted(&v4, &enc_opts).map_err(|e| {
+        compress_encrypted(&v4, &enc_opts, |ev| progress(ev)).map_err(|e| {
             ApiError::new("encrypted.compress_failed", e.to_string())
         })?
     };
@@ -1338,7 +1338,7 @@ where
         eta_ms: 0,
     }.with_estimates(start));
 
-    let decompressed = decompress_encrypted(&bytes, password).map_err(|e| {
+    let decompressed = decompress_encrypted(&bytes, password, |ev| progress(ev)).map_err(|e| {
         ApiError::new("encrypted.decompress_failed", e.to_string())
     })?;
 
@@ -1578,7 +1578,11 @@ pub fn peek_archive_target_with_password(
         ApiError::new("peek.read_failed", format!("read: {}", e))
     })?;
     // Decrypt the archive. GCM auth failure = wrong password.
-    let decompressed = decompress_encrypted(&bytes, password).map_err(|e| {
+    // The peek-with-password path doesn't carry a progress
+    // closure — peek is fast (header parse + a few shards
+    // to validate the password) and emits no events. We use
+    // a no-op closure to satisfy the new signature.
+    let decompressed = decompress_encrypted(&bytes, password, |_ev| {}).map_err(|e| {
         // Distinguish "wrong password" (GCM auth fail) from
         // other decrypt errors. The encrypted module's
         // CryptoError::Decrypt carries the GCM failure message
