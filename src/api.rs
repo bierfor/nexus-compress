@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Instant;
 
+use crate::codec;
 use crate::engine;
 
 // Re-export so the Tauri commands and the UI both see the same
@@ -967,6 +968,404 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
     decompress_target_with_progress(input_path, None, |_| {})
 }
 
+// ─────────────────────────────────────────────────────
+//  Sprint 5.7.2 PR #4: encrypted API surface
+// ─────────────────────────────────────────────────────
+
+/// Compression backend selection for `compress_target_with_password`.
+/// The encrypted path always uses the v4 codec internally
+/// (the LZ77+rANS pipeline that powers the multi-stream
+/// format) and wraps its output in the V3 wire format
+/// (NXE\0 / NXR\0 magic, AES-256-GCM per shard, optional
+/// Reed-Solomon parity). See `src/encrypted.rs` for the
+/// full design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecoveryLevel {
+    /// No parity shards. 0 % overhead, no recovery.
+    Off,
+    /// 10 % parity budget. Default.
+    Low,
+    /// 25 % parity budget.
+    High,
+}
+
+impl Default for RecoveryLevel {
+    fn default() -> Self { Self::Low }
+}
+
+/// User-supplied options for `compress_target_with_password`.
+/// Mirrors the CLI's `--password P [--recovery off|low|high]`.
+#[derive(Debug, Clone)]
+pub struct CompressWithPasswordOptions<'a> {
+    /// Raw password bytes. The caller is responsible for any
+    /// encoding (UTF-8 / etc.) — we don't normalize.
+    pub password: &'a [u8],
+    /// Recovery parity level. Defaults to `Low` (10 %) when
+    /// the frontend doesn't specify one, matching the design
+    /// doc's "recovery on by default" choice and the 7z /
+    /// WinRAR UX.
+    pub recovery: RecoveryLevel,
+}
+
+impl<'a> CompressWithPasswordOptions<'a> {
+    /// Convenience constructor: password + recovery level.
+    pub fn new(password: &'a [u8], recovery: RecoveryLevel) -> Self {
+        Self { password, recovery }
+    }
+}
+
+/// Compress a file or directory with the V4 codec, then encrypt
+/// the result with AES-256-GCM (per-shard, `shard_id` in the AAD
+/// for block-shuffling resistance) and optionally append
+/// Reed-Solomon parity shards. The output format is the V3
+/// wire format defined in `format.rs` (NXE\0 / NXR\0 magic).
+///
+/// **Progress semantics:** the wrapped v4 codec emits at most a
+/// few hundred events per file (CDC chunk boundaries). The
+/// `encrypted` path adds a few more events (one per shard for
+/// the encrypt pass, plus a single event after the RS encode).
+/// We translate these to a single `ProgressEvent` stream on the
+/// outside so the frontend doesn't have to know the difference
+/// between plain and encrypted compression.
+///
+/// **Memory:** peak is `data_shards × max(ciphertext_len)` —
+/// for our 64 KiB target shard size that's at most 230 × 80 KiB
+/// ≈ 18 MiB worst case. Acceptable.
+///
+/// **Why a separate function (not just an `Option<...>` on
+/// `compress_target`):** the encrypted path has a different
+/// return type for `compressed_bytes` (it returns the V3 wire
+/// format bytes, not the NXS bytes), a different output
+/// extension (`.nxe` / `.nxr` instead of `.nxs` / `.nxs6`),
+/// and a different progress event shape (encrypt + RS phases
+/// on top of the codec phases). Mixing the two paths in a
+/// single function would make the function signature explode.
+pub fn compress_target_with_password<P>(
+    input_path: &Path,
+    opts: &CompressWithPasswordOptions,
+    mut progress: P,
+) -> ApiResult<CompressTargetResult>
+where
+    P: FnMut(ProgressEvent),
+{
+    use crate::encrypted::{compress_encrypted, EncryptOptions};
+    let start = Instant::now();
+
+    let meta = std::fs::metadata(input_path).map_err(|e| {
+        ApiError::new(
+            "target.not_found",
+            format!("cannot stat {}: {}", input_path.display(), e),
+        )
+    })?;
+
+    let is_dir = meta.is_dir();
+
+    // Single-phase progress emission: tell the frontend we're
+    // "reading" + "encrypting" up front, then emit the final
+    // "done" event. The wrapped v4 codec doesn't expose its
+    // internal CDC events to the outside (and the encrypted
+    // sharding is a single sync pass), so a 3-event lifecycle
+    // is the most granular honest signal we can give the UI.
+    progress(ProgressEvent {
+        phase: "reading".to_string(),
+        current_file: input_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        files_done: 0,
+        files_total: 1,
+        bytes_done: 0,
+        bytes_total: meta.len(),
+        elapsed_ms: 0,
+        bytes_per_sec: 0.0,
+        eta_ms: 0,
+    }.with_estimates(start));
+
+    let bytes = std::fs::read(input_path).map_err(|e| {
+        ApiError::new("target.read_failed", format!("read failed: {}", e))
+    })?;
+
+    progress(ProgressEvent {
+        phase: "compressing".to_string(),
+        current_file: input_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        files_done: 0,
+        files_total: 1,
+        bytes_done: meta.len() as u64,
+        bytes_total: meta.len(),
+        elapsed_ms: 0,
+        bytes_per_sec: 0.0,
+        eta_ms: 0,
+    }.with_estimates(start));
+
+    // The encrypted path operates on raw bytes (it doesn't
+    // know about directory walks). For the directory case we
+    // fall through to `solid_archive::compress` (the v6-solid
+    // NXAR-format path) and encrypt the result. For a single
+    // file we use the v4 codec + encrypt.
+    let compressed = if is_dir {
+        // Walk the directory, get a v6-solid NXS6 archive, then
+        // encrypt it. Two-pass but each pass is single-threaded
+        // for the file enumeration; acceptable for a "secure
+        // backup" UX where the user already expects a few-second
+        // wait.
+        let total_size = walk_dir_total_bytes(input_path);
+        let (dir_result, archive) = compress_directory_with_backend(
+            input_path,
+            CompressionBackend::V6Solid,
+            6,
+        )?;
+        // Emit mid-progress to keep the bar moving.
+        progress(ProgressEvent {
+            phase: "compressing".to_string(),
+            current_file: String::new(),
+            files_done: dir_result.n_files,
+            files_total: dir_result.n_files,
+            bytes_done: total_size,
+            bytes_total: total_size,
+            elapsed_ms: 0,
+            bytes_per_sec: 0.0,
+            eta_ms: 0,
+        }.with_estimates(start));
+        let enc_opts = EncryptOptions {
+            password: opts.password,
+            recovery: encrypted_recovery_level(opts.recovery),
+            preset: crate::crypto::KdfPreset::Interactive,
+        };
+        compress_encrypted(&archive, &enc_opts).map_err(|e| {
+            ApiError::new("encrypted.compress_failed", e.to_string())
+        })?
+    } else {
+        // Single-file path: v4 codec → encrypted.
+        let v4 = codec::compress(&bytes);
+        let enc_opts = EncryptOptions {
+            password: opts.password,
+            recovery: encrypted_recovery_level(opts.recovery),
+            preset: crate::crypto::KdfPreset::Interactive,
+        };
+        compress_encrypted(&v4, &enc_opts).map_err(|e| {
+            ApiError::new("encrypted.compress_failed", e.to_string())
+        })?
+    };
+
+    let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let compressed_size = compressed.len() as u64;
+    let original_size = meta.len();
+    let ratio = if compressed_size == 0 {
+        0.0
+    } else {
+        original_size as f64 / compressed_size as f64
+    };
+
+    // Output extension: `.nxe` (no recovery) or `.nxr` (with
+    // recovery). The wire format's magic byte already encodes
+    // this — the extension is a hint for file pickers and
+    // shell autocompletion.
+    let output_ext = if matches!(opts.recovery, RecoveryLevel::Off) {
+        "nxe"
+    } else {
+        "nxr"
+    };
+
+    // Auto-save next to the input (same logic as `compress_target`).
+    let (mut output_path, _) = compute_output_path_with_ext(
+        input_path,
+        output_ext,
+        is_dir,
+    );
+    if let Some(parent) = input_path.parent() {
+        // `compute_output_path_with_ext` already produces
+        // `<stem>.<ext>` next to the input; nothing to do here.
+        let _ = parent;
+    }
+    let written = std::fs::write(&output_path, &compressed)
+        .map(|_| output_path.clone())
+        .map_err(|e| {
+            eprintln!("warn: could not write encrypted output to {}: {}", output_path, e);
+            e
+        })
+        .ok()
+        .unwrap_or_default();
+
+    progress(ProgressEvent {
+        phase: "done".to_string(),
+        current_file: input_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        files_done: 1,
+        files_total: 1,
+        bytes_done: original_size,
+        bytes_total: original_size,
+        elapsed_ms: 0,
+        bytes_per_sec: 0.0,
+        eta_ms: 0,
+    }.with_estimates(start));
+
+    Ok(CompressTargetResult {
+        is_directory: is_dir,
+        original_size,
+        compressed_size,
+        ratio,
+        compress_time_ms,
+        compressed_bytes: compressed,
+        n_files: if is_dir { walk_dir_count(input_path) } else { 1 },
+        output_path: written,
+        output_ext,
+    })
+}
+
+/// Map our `RecoveryLevel` to the encrypted module's.
+fn encrypted_recovery_level(l: RecoveryLevel) -> crate::encrypted::RecoveryLevel {
+    use crate::encrypted::RecoveryLevel as E;
+    match l {
+        RecoveryLevel::Off => E::Off,
+        RecoveryLevel::Low => E::Low,
+        RecoveryLevel::High => E::High,
+    }
+}
+
+/// Compute the output path with an explicit extension. Mirrors
+/// `compute_output_path` but with a custom ext (so the encrypted
+/// path can use `.nxe` / `.nxr` instead of the codec-specific
+/// `.nxs` / `.lz` / `.nxs6`).
+fn compute_output_path_with_ext(
+    input_path: &Path,
+    output_ext: &'static str,
+    is_dir: bool,
+) -> (String, &'static str) {
+    let parent = input_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let stem_raw = input_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive".to_string());
+    let stem = strip_trailing_dot_star(std::path::Path::new(&stem_raw))
+        .to_string_lossy()
+        .into_owned();
+    let base = parent.join(format!("{}.{}", stem, output_ext));
+    let final_path = strip_trailing_dot_star(&base);
+    (final_path.to_string_lossy().into_owned(), output_ext)
+}
+
+/// Count files in a directory (regular files only) for the
+/// `n_files` field of `CompressTargetResult` in the encrypted
+/// directory path. Used to populate the UI's "X files" stat.
+fn walk_dir_count(root: &Path) -> u64 {
+    fn walk(p: &Path) -> std::io::Result<u64> {
+        let mut n = 0u64;
+        for entry in std::fs::read_dir(p)? {
+            let entry = entry?;
+            let path = entry.path();
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                n += walk(&path)?;
+            } else if ft.is_file() {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+    walk(root).unwrap_or(0)
+}
+
+/// Decompress a V3-format encrypted archive (NXE\0 / NXR\0 magic).
+/// Requires `password`. Dispatches the same way `decompress_target`
+/// does (magic-byte check, then to the encrypted decoder).
+pub fn decompress_target_with_password<P>(
+    input_path: &Path,
+    password: &[u8],
+    mut progress: P,
+) -> ApiResult<DecompressTargetResult>
+where
+    P: FnMut(ProgressEvent),
+{
+    use crate::encrypted::decompress_encrypted;
+    let start = Instant::now();
+    let bytes = std::fs::read(input_path).map_err(|e| {
+        ApiError::new(
+            "decompress.read_failed",
+            format!("read {}: {}", input_path.display(), e),
+        )
+    })?;
+
+    // Two-phase progress: reading + decrypting.
+    progress(ProgressEvent {
+        phase: "reading".to_string(),
+        current_file: input_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        files_done: 0,
+        files_total: 1,
+        bytes_done: 0,
+        bytes_total: bytes.len() as u64,
+        elapsed_ms: 0,
+        bytes_per_sec: 0.0,
+        eta_ms: 0,
+    }.with_estimates(start));
+
+    progress(ProgressEvent {
+        phase: "compressing".to_string(),  // we reuse this phase slot
+        current_file: String::new(),
+        files_done: 0,
+        files_total: 1,
+        bytes_done: bytes.len() as u64,
+        bytes_total: bytes.len() as u64,
+        elapsed_ms: 0,
+        bytes_per_sec: 0.0,
+        eta_ms: 0,
+    }.with_estimates(start));
+
+    let decompressed = decompress_encrypted(&bytes, password).map_err(|e| {
+        ApiError::new("encrypted.decompress_failed", e.to_string())
+    })?;
+
+    let parent = input_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let stem = input_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive".to_string());
+    let out_path = parent.join(format!("{}.out", strip_trailing_dot_star(Path::new(&stem)).to_string_lossy()));
+
+    let restored_size = decompressed.len() as u64;
+    std::fs::write(&out_path, &decompressed).map_err(|e| {
+        ApiError::new(
+            "decompress.write_failed",
+            format!("write {}: {}", out_path.display(), e),
+        )
+    })?;
+
+    progress(ProgressEvent {
+        phase: "done".to_string(),
+        current_file: stem.clone(),
+        files_done: 1,
+        files_total: 1,
+        bytes_done: restored_size,
+        bytes_total: restored_size,
+        elapsed_ms: 0,
+        bytes_per_sec: 0.0,
+        eta_ms: 0,
+    }.with_estimates(start));
+
+    let archive_kind = if bytes.starts_with(b"NXR\0") { "nxr" } else { "nxe" };
+    Ok(DecompressTargetResult {
+        archive_kind,
+        restored_size,
+        n_files: 1,
+        is_directory: false,
+        output_path: out_path.to_string_lossy().into_owned(),
+        decompress_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
 /// One entry in the archive preview — a file or directory inside
 /// the archive, with its uncompressed size.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1072,6 +1471,33 @@ pub fn peek_archive_target(input_path: &Path) -> ApiResult<PeekResult> {
                 is_dir: false,
             }],
         })
+    } else if &bytes[..4] == b"NXE\0" || &bytes[..4] == b"NXR\0" {
+        // Encrypted archive (Sprint 5.7.2). The file list is
+        // INSIDE the encrypted payload, so we can't show it
+        // without the password — but the outer envelope tells
+        // us enough for a useful preview:
+        //
+        // - `NXE\0` = encrypted, no recovery
+        // - `NXR\0` = encrypted + Reed-Solomon parity shards
+        //
+        // We surface the archive's on-disk size (the only
+        // honest metric we have without the key), the recovery
+        // mode, and a clear "password required to list files"
+        // banner. The frontend renders this in the
+        // ArchivePreview component with a lock icon and the
+        // password field right next to it.
+        let kind = if &bytes[..4] == b"NXR\0" {
+            "nxr-encrypted"
+        } else {
+            "nxe-encrypted"
+        };
+        Ok(PeekResult {
+            archive_kind: kind,
+            n_files: 0, // unknown without the password
+            total_uncompressed: bytes.len() as u64, // lower bound
+            compressed_size: bytes.len() as u64,
+            files: vec![], // populated only after password + decrypt
+        })
     } else {
         Err(ApiError::new(
             "peek.unknown_format",
@@ -1089,6 +1515,34 @@ pub fn peek_archive_target(input_path: &Path) -> ApiResult<PeekResult> {
 ///   `/foo/bar.txt.nxs` (v4) / `.lz` (v5) / `.nxs6` (v6-solid)
 /// - Directory input `/foo/bar/` →
 ///   `/foo/bar.nxs6` (v6-solid) or `/foo/bar.nxs` (v4 per-file)
+/// Strip a trailing `.*` from a path. macOS Sequoia's native save
+/// dialog has a well-known bug where typing `foo` in a dialog that
+/// has "All files (*.*)" or "All extensions" selected appends a
+/// literal `.*` to the chosen filename. The result is a file named
+/// `foo.nxs6.*` (or `foo.txt.*`, etc.) — confusing for users, and
+/// for our own backend it would mean a future `foo.nxs6`
+/// decompression would fail (file not found).
+///
+/// This helper is called on both the **output** path (we don't
+/// want to CREATE files with a trailing `.*`) and the **input**
+/// path (defensive: if the user already has a file with a
+/// trailing `.*` — because of a previous save dialog session —
+/// and the extension-less version exists, prefer the extension-
+/// less version so the magic-byte dispatch works).
+///
+/// **NOT** called for files whose literal name contains `.*` in
+/// the middle (e.g. `*.tar.gz` is left alone) — we only strip the
+/// trailing 2-byte `.*` suffix.
+fn strip_trailing_dot_star(p: &Path) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    if s.ends_with(".*") && s.len() > 2 {
+        let trimmed = &s[..s.len() - 2];
+        std::path::PathBuf::from(trimmed)
+    } else {
+        p.to_path_buf()
+    }
+}
+
 fn compute_output_path(
     input_path: &Path,
     backend: CompressionBackend,
