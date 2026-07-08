@@ -479,9 +479,24 @@ type TFunc = (k: any) => string;
 
 function kindLabels(t: TFunc) {
   return {
-    share: { chip: t("recent.kind.share"), color: "emerald", icon: Send },
-    compress: { chip: t("recent.kind.compress"), color: "cyan", icon: Archive },
-    decompress: { chip: t("recent.kind.decompress"), color: "amber", icon: FolderOpen },
+    share: {
+      chip: t("recent.kind.share"),
+      desc: t("recent.desc.share"),
+      color: "emerald",
+      icon: Send,
+    },
+    compress: {
+      chip: t("recent.kind.compress"),
+      desc: t("recent.desc.compress"),
+      color: "cyan",
+      icon: Check,
+    },
+    decompress: {
+      chip: t("recent.kind.decompress"),
+      desc: t("recent.desc.decompress"),
+      color: "amber",
+      icon: FolderOpen,
+    },
   } as const;
 }
 
@@ -698,24 +713,26 @@ function RecentSidebarItem({
   labels: ReturnType<typeof kindLabels>;
 }) {
   const meta = labels[op.kind] ?? labels.compress;
+  const Icon = meta.icon;
+  const toneRing =
+    meta.color === "cyan"
+      ? "bg-cyan-500/10 border-cyan-500/30 text-cyan-400"
+      : meta.color === "emerald"
+        ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+        : "bg-amber-500/10 border-amber-500/30 text-amber-400";
   return (
     <div className="flex items-start gap-2.5">
       <div
-        className={`mt-0.5 w-6 h-6 rounded-md border flex items-center justify-center shrink-0 ${meta.color === "cyan"
-          ? "bg-cyan-500/10 border-cyan-500/30 text-cyan-400"
-          : meta.color === "emerald"
-            ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
-            : "bg-amber-500/10 border-amber-500/30 text-amber-400"
-          }`}
+        className={`mt-0.5 w-6 h-6 rounded-md border flex items-center justify-center shrink-0 ${toneRing}`}
       >
-        <Check size={11} />
+        <Icon size={11} />
       </div>
       <div className="min-w-0 flex-1">
         <p className="text-zinc-200 text-[12px] truncate font-medium">
           {op.filename}
         </p>
         <p className="text-zinc-500 text-[10.5px] mt-0.5 truncate">
-          {meta.chip}
+          {meta.desc}
         </p>
       </div>
       <span className="text-zinc-600 text-[10.5px] shrink-0">
