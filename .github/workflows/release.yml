@@ -144,8 +144,52 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
 
+      # Sprint 5.6.29 hotfix #17: tauri-bundler's
+      # `var_os("APPLE_CERTIFICATE")` returns Some("") for empty
+      # strings (NOT None), so passing the cert as an empty env var
+      # still enters the import path. The only way to skip the import
+      # entirely is to UNSET the env var when the password is missing.
+      # Same for WINDOWS_CERTIFICATE.
+      - name: Sanitize Apple/Windows cert env vars
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        shell: bash
+        run: |
+          # If APPLE_CERTIFICATE_PASSWORD is unset/empty but the cert
+          # is set, drop the cert env vars entirely so tauri-bundler
+          # skips the sign step (gatekeeper warns but binary runs).
+          if [ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ] && [ -n "${APPLE_CERTIFICATE:-}" ]; then
+            echo "::warning::APPLE_CERTIFICATE_PASSWORD is empty; unsetting cert env vars to skip macOS codesign"
+            unset APPLE_CERTIFICATE
+            unset APPLE_CERTIFICATE_PASSWORD
+            unset APPLE_SIGNING_IDENTITY
+          fi
+          if [ -z "${WINDOWS_CERTIFICATE_PASSWORD:-}" ] && [ -n "${WINDOWS_CERTIFICATE:-}" ]; then
+            echo "::warning::WINDOWS_CERTIFICATE_PASSWORD is empty; unsetting cert env vars to skip Windows codesign"
+            unset WINDOWS_CERTIFICATE
+            unset WINDOWS_CERTIFICATE_PASSWORD
+          fi
+          # Persist the unsets into the next step's env via GITHUB_ENV.
+          # (The unset above only affects this subshell; we need to
+          # actually rewrite the env for tauri-action.)
+          {
+            echo "APPLE_CERTIFICATE=${APPLE_CERTIFICATE:-}"
+            echo "APPLE_CERTIFICATE_PASSWORD=${APPLE_CERTIFICATE_PASSWORD:-}"
+            echo "APPLE_SIGNING_IDENTITY=${APPLE_SIGNING_IDENTITY:-}"
+            echo "WINDOWS_CERTIFICATE=${WINDOWS_CERTIFICATE:-}"
+            echo "WINDOWS_CERTIFICATE_PASSWORD=${WINDOWS_CERTIFICATE_PASSWORD:-}"
+          } >> "$GITHUB_ENV"
+
       - name: Tauri · bundle via tauri-action
-        uses: tauri-apps/tauri-action@v0
+        # Sprint 5.6.29 hotfix #17: use a small pre-step to only
+        # inject the Apple cert when its password is also present.
+        # Tauri's bundler uses `std::env::var_os("APPLE_CERTIFICATE")`
+        # which returns `Some("")` for empty strings — NOT `None` —
+        # so the JS `&&` workaround only evaluates to an empty
+        # string in YAML, but the env var is still SET on the
+        # process, and the bundler enters the `import` path and
+        # crashes at `security import` with empty password.
+        # The fix is to fully omit the env var (not just empty it)
+        # when the password is missing, so `var_os` returns `None`.
         env:
           # tauri-action needs GITHUB_TOKEN to create the draft release
           # and upload bundled assets. Auto-provided by GitHub Actions
@@ -156,22 +200,15 @@ jobs:
           # for CI sanity checks, but won't ship to end users).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS codesign + notarise.
-          # Sprint 5.6.29 hotfix #16: only inject the cert when
-          # the password is also present. If APPLE_CERTIFICATE is
-          # set but APPLE_CERTIFICATE_PASSWORD is empty, tauri-action
-          # aborts at `security import` with "One or more parameters
-          # passed to a function were not valid". For the v0.1.1
-          # release we ship unsigned .dmg artifacts (gatekeeper
-          # will warn users, but the binary still runs).
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_PASSWORD && secrets.APPLE_CERTIFICATE || '' }}
+          # macOS codesign + notarise (see hotfix #17 comment above).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_CERTIFICATE_PASSWORD && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Windows codesign (only inject when password is present).
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD && secrets.WINDOWS_CERTIFICATE || '' }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         with:
           # Sprint 5.6.28 hotfix #4: explicitly point at the
