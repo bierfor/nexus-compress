@@ -7,6 +7,11 @@
 //! here is a thin `#[tauri::command]` that delegates to a
 //! corresponding `api::*` function. The Tauri runtime serializes
 //! the return values to the frontend via JSON.
+//!
+//! The mapping is one-to-one with the `api` module: each function
+//! here is a thin `#[tauri::command]` that delegates to a
+//! corresponding `api::*` function. The Tauri runtime serializes
+//! the return values to the frontend via JSON.
 
 use nexus_compress::api::{
     self, ApiResult, BackendInfo, CompressResult, CompressTargetResult, CompressionBackend,
@@ -756,6 +761,7 @@ fn maybe_extract_tar(
 //
 // All three use the single-JSON-arg pattern (Tauri 2.x arg-name
 // gotcha — see MEMORY.md).
+use crate::db;
 use crate::p2p_tunnel;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -1121,4 +1127,41 @@ pub async fn p2p_save_tunnel_config_cmd(
     let cfg = TunnelConfig { mode, hostname };
     save_tunnel_config(&app_data_dir, &cfg)?;
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Sprint 5.7: persistent stats + activity events
+// ─────────────────────────────────────────────────────────────
+
+/// Return the current global counters for the home dashboard.
+/// Tauri serializes this straight to JSON; the frontend reads
+/// the same fields shown in AppStats.
+#[tauri::command]
+pub async fn get_stats_cmd(
+    state: State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
+) -> Result<db::AppStats, String> {
+    let conn = state.lock().await;
+    db::get_stats(&conn).map_err(|e| e.to_string())
+}
+
+/// Return the most recent activity events for the home
+/// "Actividad" / "Actividad reciente" sections. `limit` caps
+/// the result; pass 5 for the sidebar, 30+ for the main panel.
+#[tauri::command]
+pub async fn get_recent_events_cmd(
+    state: State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
+    limit: u32,
+) -> Result<Vec<db::ActivityEvent>, String> {
+    let conn = state.lock().await;
+    db::list_events(&conn, limit).map_err(|e| e.to_string())
+}
+
+/// Returns the absolute path of the data directory used for
+/// the SQLite store. Used by the Settings panel's
+/// "Reveal in Finder / Explorer" action.
+#[tauri::command]
+pub fn data_dir_cmd() -> Result<String, String> {
+    db::data_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| e.to_string())
 }

@@ -38,6 +38,16 @@ sha2 = "0.10"                 # SHA-256 (keyed)
 hkdf = "0.12"                 # HKDF-SHA256 for session key derivation
 hmac = "0.12"                 # HMAC-SHA256 challenge-response auth header
 tokio = { version = "1", features = ["full"] }
+
+# Sprint 5.7 — local stats persistence
+# - `directories` for cross-platform config dirs
+#   (Windows: %APPDATA% / macOS: ~/Library/Application Support /
+#    Linux: $XDG_CONFIG_HOME or ~/.config).
+# - `rusqlite` with `bundled` feature compiles SQLite from source
+#   so the binary has zero system-level C dependencies on any
+#   of the 3 target platforms.
+directories = "5"
+rusqlite = { version = "0.31", features = ["bundled"] }
 flate2 = "1"                  # gzip decompression for cloudflared .tgz
 tar = "0.4"                   # tar extraction for cloudflared tarball
 mdns-sd = "0.11"              # mDNS service discovery for Direct Mode (Sprint 5.5.2)

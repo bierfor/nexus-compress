@@ -12,6 +12,7 @@
 
 mod archive_inspect;
 mod commands;
+mod db;
 mod p2p_config;
 mod p2p_tunnel;
 mod upnp_hole;
@@ -36,6 +37,9 @@ fn main() {
         .manage(Arc::new(commands::P2pState {
             active: Arc::new(tokio::sync::Mutex::new(None)),
         }))
+        .manage(Arc::new(tokio::sync::Mutex::new(
+            db::open().expect("failed to open local stats db"),
+        )))
         .invoke_handler(tauri::generate_handler![
             commands::compress_bytes_cmd,
             commands::decompress_bytes_cmd,
@@ -71,6 +75,9 @@ fn main() {
             commands::p2p_save_tunnel_config_cmd,
             commands::p2p_archive_list_cmd,
             commands::p2p_archive_extract_cmd,
+            commands::get_stats_cmd,
+            commands::get_recent_events_cmd,
+            commands::data_dir_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusRAR Tauri app");
