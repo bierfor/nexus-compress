@@ -38,12 +38,17 @@ async function tauriInvoke<T>(
 
 // Sprint 5.5.5: bypass the Rust pick_save_location_cmd and
 // use the JS API directly.
-async function jsSaveFile(suggestedName: string): Promise<string | null> {
+async function jsSaveFile(
+  suggestedName: string,
+  filters: { name: string; extensions: string[] }[] = [
+    { name: "All files", extensions: ["*"] },
+  ]
+): Promise<string | null> {
   if (!isTauri) return null;
   const { save } = await import("@tauri-apps/plugin-dialog");
   const result = await save({
     defaultPath: suggestedName,
-    filters: [{ name: "All files", extensions: ["*"] }],
+    filters,
   });
   return result ?? null;
 }
@@ -136,18 +141,75 @@ export function ReceivePanel() {
 
   const onPickOutput = useCallback(async () => {
     try {
-      const suggested = total > 0
-        ? defaultFilenameFromToken(token)
-        : "received.bin";
-      const chosen = await jsSaveFile(suggested);
+      // v1: suggested_name is encoded directly in the token.
+      // v2/v3: ask the sender via /meta what the file is called.
+      // unknown: fall back to "received.bin".
+      let suggested: string;
+      if (kind === "v1" && total > 0) {
+        suggested = defaultFilenameFromToken(token);
+      } else if (kind === "v2" || kind === "v3") {
+        suggested = "received.bin";
+        try {
+          const r = await tauriInvoke<{ filename: string | null }>(
+            "p2p_peek_filename_cmd",
+            { req: { token: token.trim(), timeout_secs: 3 } }
+          );
+          if (r?.filename) suggested = r.filename;
+        } catch {
+          // sender unreachable — keep "received.bin"
+        }
+      } else {
+        suggested = "received.bin";
+      }
+      // Sprint 5.6.29 hotfix #15: skip the macOS save dialog.
+      // The save dialog with `extensions: ["*"]` appends a literal
+      // ".*" to the filename, which corrupts the receive. Instead,
+      // we auto-save to ~/Downloads/<filename> with the original
+      // name from the sender. The user can move the file from
+      // Downloads to anywhere else if they want.
+      //
+      // For users who want a custom location, the "Custom..." button
+      // opens the save dialog explicitly with a more specific filter
+      // (see onPickOutputCustom below).
+      const { homeDir, join } = await import("@tauri-apps/api/path");
+      const home = await homeDir();
+      const dest = await join(home, "Downloads", suggested);
+      setOutputPath(dest);
+      setError(null);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
+  }, [token, total, kind]);
+
+  // Optional: open the save dialog explicitly with a filter
+  // tailored to the sender's filename. Still subject to macOS
+  // save-dialog quirks, so use with care.
+  const onPickOutputCustom = useCallback(async () => {
+    try {
+      let suggested: string;
+      if (kind === "v1" && total > 0) {
+        suggested = defaultFilenameFromToken(token);
+      } else {
+        suggested = "received.bin";
+      }
+      // Derive the file's extension so the filter matches it.
+      const dot = suggested.lastIndexOf(".");
+      const ext = dot >= 0 ? suggested.slice(dot + 1) : "";
+      const filters = ext
+        ? [{ name: "File", extensions: [ext] }, { name: "All files", extensions: ["*"] }]
+        : [{ name: "All files", extensions: ["*"] }];
+      const chosen = await jsSaveFile(suggested, filters);
       if (chosen) {
-        setOutputPath(chosen);
+        // Strip any literal ".*" suffix that the dialog may have
+        // appended (macOS save-dialog quirk with `*` filters).
+        const cleaned = chosen.replace(/\.\*$/, "");
+        setOutputPath(cleaned);
         setError(null);
       }
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
-  }, [token, total]);
+  }, [token, kind]);
 
   const onReceive = useCallback(async () => {
     if (!token || !outputPath) return;

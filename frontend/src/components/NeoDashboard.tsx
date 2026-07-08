@@ -2,6 +2,7 @@
 
 import { useLocale } from "@/components/LocaleProvider";
 import { type View } from "@/components/NeoTopBar";
+import { Check, AlertCircle, ChevronRight } from "lucide-react";
 
 export interface LastOp {
   filename: string;
@@ -65,7 +66,9 @@ export function NeoDashboard({
         className="flex items-center gap-2.5 text-zinc-400 hover:text-zinc-200 transition-colors min-w-0"
         title={t("nav.recent")}
       >
-        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${op.status === "ok" ? "bg-emerald-400" : "bg-red-400"}`} />
+        <span className={`shrink-0 ${op.status === "ok" ? "text-emerald-400" : "text-red-400"}`}>
+          {op.status === "ok" ? <Check size={14} strokeWidth={2.5} /> : <AlertCircle size={14} strokeWidth={2.5} />}
+        </span>
         <span className="text-zinc-200 font-medium truncate max-w-[220px]">{op.filename}</span>
         <span className="text-zinc-600">·</span>
         <span className="text-zinc-500 shrink-0">{kindLabel}</span>

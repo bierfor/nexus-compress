@@ -16,6 +16,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { type View } from "@/components/NeoTopBar";
 import { useLocale } from "@/components/LocaleProvider";
+import { FolderOpen, Plus, Archive, CheckCircle2, AlertCircle } from "lucide-react";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -103,6 +104,8 @@ export function CompressView({
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [pathInput, setPathInput] = useState("");
+  // FolderOpen + Plus icons for the new btn-ghost / btn-primary buttons
+  // are imported at the top of the file.
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -322,12 +325,17 @@ export function CompressView({
       {/* Toast notification (success/error after compression) */}
       {toast && (
         <div
-          className={`fixed top-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl shadow-2xl backdrop-blur-md border max-w-2xl animate-[slide-down_0.3s_ease-out] ${
+          className={`fixed top-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3.5 rounded-2xl shadow-2xl backdrop-blur-md border max-w-2xl animate-slide-down flex items-center gap-3 ${
             toast.kind === "ok"
-              ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-100"
-              : "bg-red-500/15 border-red-500/30 text-red-100"
+              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-100"
+              : "bg-rose-500/15 border-rose-500/40 text-rose-100"
           }`}
         >
+          {toast.kind === "ok" ? (
+            <CheckCircle2 size={18} className="text-emerald-400 shrink-0" />
+          ) : (
+            <AlertCircle size={18} className="text-rose-400 shrink-0" />
+          )}
           <div className="text-[13.5px] font-medium">{toast.msg}</div>
         </div>
       )}
@@ -355,14 +363,12 @@ export function CompressView({
         <div className="mb-10">
           {files.length === 0 ? (
             <div
-              className={`relative rounded-3xl border-2 border-dashed transition-all p-16 text-center ${
-                dragOver
-                  ? "border-cyan-400 bg-cyan-500/[0.08]"
-                  : "border-white/[0.08] bg-white/[0.02]"
+              className={`relative p-16 text-center ${
+                dragOver ? "dropzone is-dragover" : "dropzone"
               }`}
             >
-              <div className="text-7xl mb-6 select-none">
-                {dragOver ? "⤓" : "📦"}
+              <div className="text-cyan-400 mb-6 select-none inline-block transition-transform duration-300" style={{ transform: dragOver ? "scale(1.15) rotate(-6deg)" : "scale(1)" }}>
+                <Archive size={64} strokeWidth={1.4} />
               </div>
               <h3 className="text-white text-[20px] font-medium mb-2">
                 {dragOver ? t("compress.drop.active") : t("compress.drop")}
@@ -377,19 +383,21 @@ export function CompressView({
                   onChange={(e) => setPathInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && onAddPath()}
                   placeholder={t("compress.placeholder")}
-                  className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-xl px-4 py-2.5 text-[13px] text-white placeholder-zinc-600 focus:outline-none focus:border-cyan-500/50"
+                  className="input flex-1"
                 />
                 <button
                   onClick={onBrowse}
-                  className="px-4 py-2.5 text-[13px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-xl transition-colors"
+                  className="btn btn-ghost"
                 >
+                  <FolderOpen size={14} />
                   {t("compress.browse")}
                 </button>
                 <button
                   onClick={onAddPath}
                   disabled={!pathInput.trim()}
-                  className="px-4 py-2.5 text-[13px] text-cyan-400 hover:text-cyan-300 border border-cyan-500/30 hover:border-cyan-500/50 rounded-xl transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="btn btn-primary"
                 >
+                  <Plus size={14} />
                   {t("compress.add")}
                 </button>
               </div>

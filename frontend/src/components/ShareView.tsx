@@ -4,6 +4,36 @@ import { useEffect, useState, useCallback } from "react";
 import { type View } from "@/components/NeoTopBar";
 import { PageHeader } from "@/components/PageHeader";
 import { useLocale } from "@/components/LocaleProvider";
+import {
+  Send,
+  FileText,
+  FolderOpen,
+  ArrowRight,
+  Copy,
+  Check,
+  RefreshCw,
+  File,
+  X,
+  Wifi,
+  Globe,
+  AlertCircle,
+  Sparkles,
+  Link as LinkIcon,
+  QrCode,
+  Lock,
+  Shield,
+  Download,
+  Clock,
+  Infinity as InfinityIcon,
+  ChevronDown,
+  Settings2,
+  Server,
+  HardDrive,
+  KeyRound,
+  Eye,
+  EyeOff,
+} from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -35,7 +65,7 @@ function prettyBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(n / (1024 * 1024 / 1024)).toFixed(2)} GB`;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -55,14 +85,45 @@ export function ShareView({
   onNavigate: (v: View) => void;
 }) {
   const { t } = useLocale();
+
+  // Sprint 5.6.29: lift the share state to ShareView so both the
+  // SendPanel (left) and LinkPanel (right) can render from the same
+  // state without prop-drilling or context.
+  const [shareResp, setShareResp] = useState<SendStartResp | null>(null);
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-4xl mx-auto px-8 pt-10 pb-16">
-        <PageHeader title={t("share.title")} onBack={() => onNavigate("landing")}>
-          {t("share.desc")}
-        </PageHeader>
-        <div className="grid grid-cols-2 gap-5">
-          <SendPanel onComplete={onComplete} />
+      <div className="max-w-7xl mx-auto px-8 pt-8 pb-16">
+        {/* Header — title + 3 selling-point pills on the right */}
+        <div className="flex items-start justify-between mb-8 gap-6">
+          <div>
+            <h1 className="text-white text-[32px] font-semibold tracking-tight leading-tight">
+              {t("share.title")}
+            </h1>
+            <p className="text-zinc-500 text-[14px] mt-1.5">
+              {t("share.desc")}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="chip chip-cyan">
+              <InfinityIcon size={11} />
+              {t("share.feature.unlimited")}
+            </span>
+            <span className="chip">{t("share.feature.nostorage")}</span>
+            <span className="chip chip-cyan">
+              <Shield size={11} />
+              {t("share.feature.e2e")}
+            </span>
+          </div>
+        </div>
+
+        {/* 2-column layout: Send flow | Link preview */}
+        <div className="grid grid-cols-2 gap-5 mb-8">
+          <SendPanel onComplete={onComplete} onRespChange={setShareResp} />
+          <LinkPanel resp={shareResp} />
+        </div>
+
+        {/* Receive panel below */}
+        <div className="mt-8">
           <ReceivePanel />
         </div>
       </div>
@@ -76,6 +137,7 @@ export function ShareView({
 
 function SendPanel({
   onComplete,
+  onRespChange,
 }: {
   onComplete: (op: {
     kind: "share";
@@ -83,6 +145,7 @@ function SendPanel({
     originalBytes: number;
     durationMs: number;
   }) => void;
+  onRespChange?: (resp: SendStartResp | null) => void;
 }) {
   const { t } = useLocale();
   const [filePath, setFilePath] = useState<string | null>(null);
@@ -93,6 +156,11 @@ function SendPanel({
   const [pathInput, setPathInput] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [copied, setCopied] = useState<"code" | "token" | null>(null);
+
+  // Sprint 5.6.29: bubble `resp` up to ShareView so LinkPanel can render.
+  useEffect(() => {
+    onRespChange?.(resp);
+  }, [resp, onRespChange]);
 
   const acceptPath = useCallback((p: string | null) => {
     if (p) {
@@ -201,167 +269,220 @@ function SendPanel({
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
-      className="flex flex-col gap-4"
+      className="glass rounded-3xl p-6 flex flex-col gap-5"
     >
-      {/* Column label */}
-      <div className="flex items-center gap-2">
-        <span className="text-emerald-400 text-[18px]">📤</span>
-        <h2 className="text-white text-[16px] font-semibold">{t("share.send.title")}</h2>
+      {/* Step header */}
+      <div className="flex items-center gap-2.5">
+        <div className="w-8 h-8 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300 text-[13px] font-bold">
+          1
+        </div>
+        <div>
+          <h2 className="text-white text-[15px] font-semibold leading-tight">
+            {t("share.send.step1.title")}
+          </h2>
+          <p className="text-zinc-500 text-[11.5px] mt-0.5">
+            {t("share.send.step1.desc")}
+          </p>
+        </div>
       </div>
 
       {!resp ? (
         <>
-          {/* Drop zone */}
+          {/* Dropzone with file icon + CTA button */}
           <div
-            className={`rounded-2xl border-2 border-dashed p-8 text-center transition-colors ${
-              dragOver
-                ? "border-emerald-400 bg-emerald-500/[0.06]"
-                : "border-white/[0.08] bg-white/[0.02]"
-            }`}
+            className={
+              "relative rounded-2xl p-10 text-center transition-all duration-200 cursor-pointer " +
+              (dragOver
+                ? "border-2 border-solid border-cyan-400 bg-cyan-500/[0.10] shadow-[0_0_40px_-8px_rgba(34,211,238,0.5)] scale-[1.01]"
+                : "border-2 border-dashed border-white/[0.10] bg-white/[0.02] hover:border-white/[0.20] hover:bg-white/[0.03]")
+            }
           >
-            <div className="text-4xl mb-3 select-none">{dragOver ? "⤓" : "🚀"}</div>
-            <p className="text-zinc-400 text-[13px] mb-2">
+            {dragOver && (
+              <div className="absolute inset-0 rounded-2xl pointer-events-none animate-pulse-glow" />
+            )}
+            <div
+              className={
+                "mx-auto mb-4 w-16 h-16 rounded-2xl flex items-center justify-center transition-all duration-300 text-blue-500 " +
+                (dragOver
+                  ? "bg-blue-500/20 scale-110 rotate-[-6deg]"
+                  : "bg-blue-500/10 group-hover:scale-105")
+              }
+            >
+              {dragOver ? (
+                <ArrowRight size={28} strokeWidth={2.2} />
+              ) : (
+                <FileText size={28} strokeWidth={1.6} />
+              )}
+            </div>
+            <p className="text-white text-[14px] font-medium mb-1">
               {dragOver ? t("share.send.drop.active") : t("share.send.drop")}
             </p>
-            {/* Sprint 5.6.27: explicit hint about drag-drop being
-                the most reliable path on macOS Sequoia where the
-                native picker is flaky. */}
-            <p className="text-zinc-600 text-[11px] mb-4 max-w-md mx-auto">
+            <p className="text-zinc-500 text-[12px] mb-5">
               {t("share.send.drop.hint")}
             </p>
-            <div className="flex justify-center gap-2 flex-wrap">
-              <button
-                onClick={onBrowseFile}
-                className="px-3 py-1.5 text-[12px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-lg transition-colors"
-                title="Si el picker falla, arrastra o pega la ruta abajo"
-              >
-                {"📄 " + t("share.send.file")}
-              </button>
-              <button
-                onClick={onBrowseFolder}
-                className="px-3 py-1.5 text-[12px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-lg transition-colors"
-                title="Si el picker falla, arrastra o pega la ruta abajo"
-              >
-                {"📁 " + t("share.send.folder")}
-              </button>
-            </div>
+            {/* Solid cyan button (matches mockup — no gradient) */}
+            <button
+              onClick={onBrowseFile}
+              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-blue-500 hover:bg-blue-400 text-white text-[13px] font-semibold transition-all duration-150 hover:-translate-y-px shadow-[0_4px_20px_-6px_rgba(59,130,246,0.55)]"
+            >
+              <File size={14} />
+              {t("share.send.choose")}
+            </button>
           </div>
 
-          {/* Path input — Sprint 5.6.27: this is the RELIABLE
-              primary action. macOS Sequoia native picker is
-              flaky, so we make this bigger and more obvious.
-              User can: type, paste (Cmd+V), or copy a path from
-              Finder via right-click + "Copy ... as Pathname"
-              (Cmd+Opt+C). */}
-          <div>
-            <label className="text-zinc-500 text-[10px] tracking-[0.15em] uppercase mb-1.5 block">
-              {t("share.send.path.label")}
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={pathInput}
-                onChange={(e) => setPathInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && pathInput.trim() && acceptPath(pathInput.trim())}
-                placeholder={t("share.send.path")}
-                className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-xl px-4 py-3 text-[13px] text-white placeholder-zinc-600 focus:outline-none focus:border-emerald-500/40 font-mono"
-              />
-              <button
-                onClick={() => pathInput.trim() && acceptPath(pathInput.trim())}
-                disabled={!pathInput.trim()}
-                className="px-5 py-3 text-[13px] text-emerald-400 border border-emerald-500/30 rounded-xl hover:bg-emerald-500/10 disabled:opacity-30 disabled:cursor-not-allowed transition-colors font-medium"
-              >
-                {t("share.send.use")}
-              </button>
-            </div>
-          </div>
-
-          {/* Selected file */}
+          {/* Selected file preview — matches mockup: gray icon, simple card */}
           {filePath && (
-            <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3 flex items-center gap-3">
-              <span className="text-emerald-400 text-[15px]">📄</span>
-              <span className="flex-1 text-white text-[13px] truncate font-medium">{filename}</span>
-              <button onClick={() => setFilePath(null)} className="text-zinc-600 hover:text-red-400 transition-colors text-[12px]">✕</button>
+            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex items-center gap-3 animate-scale-in">
+              <div className="w-10 h-10 rounded-lg bg-white/[0.05] flex items-center justify-center text-zinc-400 shrink-0">
+                <FileText size={18} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-white text-[13px] truncate font-medium">
+                  {filename}
+                </p>
+                <p className="text-zinc-500 text-[10.5px] mt-0.5">
+                  Listo para compartir
+                </p>
+              </div>
+              <button
+                onClick={() => setFilePath(null)}
+                className="text-zinc-500 hover:text-white transition-colors p-1.5 rounded-md hover:bg-white/[0.05]"
+                aria-label={t("share.send.remove")}
+              >
+                <X size={16} />
+              </button>
             </div>
           )}
 
-          {/* Action */}
-          <div className="flex gap-2">
-            <button
-              onClick={onSend}
-              disabled={!filePath || busy}
-              className="flex-1 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-[14px] font-semibold transition-colors"
-            >
-              {busy ? t("share.send.btn.busy") : t("share.send.btn")}
-            </button>
-            {busy && (
-              <button
-                onClick={onCancel}
-                disabled={cancelling}
-                className="px-4 py-3 rounded-xl border border-white/[0.08] text-zinc-400 hover:text-red-400 hover:border-red-500/30 text-[13px] transition-colors disabled:opacity-40"
-              >
-                {cancelling ? "…" : t("share.send.cancel")}
-              </button>
-            )}
-          </div>
+          {/* Advanced options accordion */}
+          {filePath && (
+            <details className="rounded-xl border border-white/[0.06] bg-white/[0.02] open:bg-white/[0.03] group">
+              <summary className="flex items-center gap-2 px-4 py-3 cursor-pointer list-none select-none text-zinc-400 hover:text-white transition-colors">
+                <Settings2 size={14} />
+                <span className="text-[12px] font-medium flex-1">
+                  {t("share.send.advanced")}
+                </span>
+                <ChevronDown
+                  size={14}
+                  className="transition-transform duration-200 group-open:rotate-180"
+                />
+              </summary>
+              <div className="px-4 pb-4 flex flex-col gap-3 text-[12.5px]">
+                {/* Custom slug */}
+                <div className="flex items-center gap-3">
+                  <LinkIcon size={14} className="text-zinc-500 shrink-0" />
+                  <span className="text-zinc-300 shrink-0">
+                    {t("share.send.customslug")}
+                  </span>
+                  <span className="text-zinc-600 text-[10.5px]">
+                    ({t("share.send.optional")})
+                  </span>
+                  <input
+                    type="text"
+                    placeholder={t("share.send.customslug.placeholder")}
+                    className="input flex-1 py-1.5 text-[12px] font-mono"
+                  />
+                </div>
+                {/* Expiration */}
+                <div className="flex items-center gap-3">
+                  <Clock size={14} className="text-zinc-500 shrink-0" />
+                  <span className="text-zinc-300 shrink-0">
+                    {t("share.send.expiration")}
+                  </span>
+                  <select
+                    defaultValue="7d"
+                    className="ml-auto bg-transparent border border-white/[0.08] rounded-lg px-3 py-1.5 text-[12px] text-zinc-200 focus:outline-none focus:border-cyan-500/50 cursor-pointer hover:border-white/[0.16] transition-colors"
+                  >
+                    <option value="1d">1 {t("share.send.day")}</option>
+                    <option value="7d">7 {t("share.send.days")}</option>
+                    <option value="30d">30 {t("share.send.days")}</option>
+                    <option value="never">{t("share.send.never")}</option>
+                  </select>
+                </div>
+                {/* Download limit */}
+                <div className="flex items-center gap-3">
+                  <Download size={14} className="text-zinc-500 shrink-0" />
+                  <span className="text-zinc-300 shrink-0">
+                    {t("share.send.downloadlimit")}
+                  </span>
+                  <select
+                    defaultValue="none"
+                    className="ml-auto bg-transparent border border-white/[0.08] rounded-lg px-3 py-1.5 text-[12px] text-zinc-200 focus:outline-none focus:border-cyan-500/50 cursor-pointer hover:border-white/[0.16] transition-colors"
+                  >
+                    <option value="none">{t("share.send.unlimited")}</option>
+                    <option value="5">5</option>
+                    <option value="10">10</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </div>
+              </div>
+            </details>
+          )}
+
+          {/* Big gradient CTA */}
+          <button
+            onClick={onSend}
+            disabled={!filePath || busy}
+            className="w-full py-4 rounded-2xl font-semibold text-[14.5px] text-white relative overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 hover:scale-[1.01] active:scale-[0.99] disabled:hover:scale-100"
+            style={{
+              background: busy
+                ? "linear-gradient(135deg, #34d399 0%, #22d3ee 100%)"
+                : "linear-gradient(135deg, #34d399 0%, #10b981 35%, #22d3ee 100%)",
+              boxShadow: !busy && filePath
+                ? "0 8px 32px -8px rgba(34,211,238,0.55), 0 0 0 1px rgba(255,255,255,0.08) inset"
+                : "none",
+            }}
+          >
+            <span className="relative z-10 flex items-center justify-center gap-2">
+              {busy ? (
+                <>
+                  <RefreshCw size={16} className="animate-spin-slow" />
+                  {t("share.send.btn.busy")}
+                </>
+              ) : (
+                <>
+                  <LinkIcon size={16} />
+                  {t("share.send.cta")}
+                </>
+              )}
+            </span>
+          </button>
+          <p className="text-zinc-500 text-[11.5px] text-center -mt-2">
+            {t("share.send.cta.sub")}
+          </p>
         </>
       ) : (
-        /* Code display */
-        <div className="rounded-2xl bg-emerald-500/[0.06] border border-emerald-500/20 p-6 flex flex-col gap-5">
-          {/* Status pill */}
-          <div className={`self-start flex items-center gap-2 px-3 py-1 rounded-full text-[11px] font-medium ${
-            resp.upnp_status ? "bg-emerald-500/20 text-emerald-300" : "bg-amber-500/20 text-amber-300"
-          }`}>
-            <span className="w-1.5 h-1.5 rounded-full bg-current" />
-            {resp.upnp_status ? t("share.send.status.anynet") : t("share.send.status.samewifi")}
-          </div>
-
-          {/* Code */}
-          <div className="text-center">
-            <p className="text-zinc-500 text-[10px] tracking-[0.3em] uppercase mb-2">
-              {t("share.send.code.label")}
-            </p>
-            <p className="text-white text-[32px] font-mono font-bold tracking-[0.1em] select-all leading-none">
-              {resp.code}
-            </p>
-            <p className="text-zinc-600 text-[12px] mt-2">{resp.filename} · {prettyBytes(resp.file_size)}</p>
-          </div>
-
-          {/* Copy buttons */}
-          <div className="flex flex-col gap-2">
-            <button
-              onClick={() => onCopy(resp.code, "code")}
-              className="w-full py-2.5 rounded-xl bg-white text-black text-[13px] font-semibold hover:bg-zinc-100 transition-colors"
-            >
-              {copied === "code" ? t("share.send.copied") : t("share.send.copy.code")}
-            </button>
-            <div className="flex gap-2">
-              <button
-                onClick={() => onCopy(resp.token, "token")}
-                className="flex-1 py-2.5 rounded-xl bg-white/[0.06] border border-white/[0.08] text-zinc-300 text-[12px] hover:bg-white/[0.1] transition-colors"
-              >
-                {copied === "token" ? t("share.send.token.copied") : t("share.send.copy.token")}
-              </button>
-              <button
-                onClick={onReset}
-                className="px-4 py-2.5 rounded-xl bg-white/[0.04] border border-white/[0.06] text-zinc-500 text-[12px] hover:text-zinc-300 hover:bg-white/[0.08] transition-colors"
-              >
-                {t("share.send.new")}
-              </button>
+        /* Active link — show summary in left card too */
+        <div className="rounded-2xl bg-emerald-500/[0.06] border border-emerald-500/20 p-5 flex flex-col gap-4 animate-scale-in">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-300 shrink-0">
+              <FileText size={18} />
             </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-white text-[13.5px] truncate font-semibold">
+                {resp.filename}
+              </p>
+              <p className="text-zinc-500 text-[11px] font-mono mt-0.5">
+                {prettyBytes(resp.file_size)}
+              </p>
+            </div>
+            <button
+              onClick={onReset}
+              className="btn btn-ghost"
+            >
+              <RefreshCw size={12} />
+              {t("share.send.new")}
+            </button>
           </div>
-
-          {resp.upnp_status && (
-            <p className="text-zinc-700 text-[10px] font-mono text-center">
-              {resp.upnp_status.external_ip}:{resp.upnp_status.external_port}
-            </p>
-          )}
         </div>
       )}
 
+      {/* Error toast */}
       {error && (
-        <div className="rounded-xl bg-red-500/[0.08] border border-red-500/20 px-4 py-3 text-red-400 text-[13px]">
-          {error}
+        <div className="rounded-xl bg-rose-500/[0.08] border border-rose-500/30 px-4 py-3 text-rose-300 text-[13px] flex items-start gap-2.5 animate-scale-in">
+          <AlertCircle size={15} className="shrink-0 mt-0.5" />
+          <span>{error}</span>
         </div>
       )}
     </div>
@@ -618,56 +739,87 @@ function ReceivePanel() {
   }, [token, kind, buildOutputPath]);
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* Column label */}
-      <div className="flex items-center gap-2">
-        <span className="text-cyan-400 text-[18px]">📥</span>
-        <h2 className="text-white text-[16px] font-semibold">{t("share.receive.title")}</h2>
+    <div className="glass rounded-3xl p-6 flex flex-col gap-5">
+      {/* Step header */}
+      <div className="flex items-center gap-2.5">
+        <div className="w-8 h-8 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300">
+          <Download size={16} strokeWidth={2.4} />
+        </div>
+        <div>
+          <h2 className="text-white text-[15px] font-semibold leading-tight">
+            {t("share.receive.title")}
+          </h2>
+          <p className="text-zinc-500 text-[11.5px] mt-0.5">
+            {t("share.receive.desc")}
+          </p>
+        </div>
       </div>
 
-      {/* Token */}
-      <div className="flex flex-col gap-1.5">
-        <label className="text-zinc-500 text-[11px] tracking-[0.15em] uppercase">
+      {/* Token input */}
+      <div>
+        <label className="text-zinc-500 text-[10px] tracking-[0.2em] uppercase font-medium pl-1 block mb-2">
           {t("share.receive.token.label")}
         </label>
         <textarea
           value={token}
-          onChange={(e) => { setToken(e.target.value); setResult(null); setError(null); }}
+          onChange={(e) => {
+            setToken(e.target.value);
+            setResult(null);
+            setError(null);
+          }}
           rows={3}
           placeholder={t("share.receive.token.placeholder")}
-          className="w-full bg-white/[0.04] border border-white/[0.08] rounded-xl px-4 py-3 text-[13px] text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-cyan-500/40 resize-none"
+          className="input w-full font-mono text-[12.5px] resize-none"
         />
         {kind !== "unknown" && token.length > 0 && (
-          <p className={`text-[11px] ${kind === "v3" ? "text-emerald-400" : "text-amber-400"}`}>
-            {kind === "v3"
-              ? t("share.receive.token.v3")
-              : kind === "v2"
-              ? t("share.receive.token.v2")
-              : t("share.receive.token.v1")}
+          <p
+            className={
+              "text-[11px] mt-1.5 pl-1 " +
+              (kind === "v3"
+                ? "text-emerald-400"
+                : "text-amber-400")
+            }
+          >
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className={
+                  "w-1.5 h-1.5 rounded-full " +
+                  (kind === "v3" ? "bg-emerald-400" : "bg-amber-400")
+                }
+              />
+              {kind === "v3"
+                ? t("share.receive.token.v3")
+                : kind === "v2"
+                ? t("share.receive.token.v2")
+                : t("share.receive.token.v1")}
+            </span>
           </p>
         )}
         {kind === "unknown" && token.length > 4 && (
-          <p className="text-red-400 text-[11px]">{t("share.receive.token.unknown")}</p>
+          <p className="text-rose-400 text-[11px] mt-1.5 pl-1">
+            {t("share.receive.token.unknown")}
+          </p>
         )}
       </div>
 
-      {/* Destination */}
-      <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3">
-        <div className="text-zinc-500 text-[10px] tracking-[0.15em] uppercase mb-1.5">
+      {/* Destination card */}
+      <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3">
+        <div className="text-zinc-500 text-[10px] tracking-[0.2em] uppercase font-medium mb-2 pl-1">
           {t("share.receive.dest.label")}
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-zinc-500">📁</span>
+        <div className="flex items-center gap-2.5">
+          <div className="w-9 h-9 rounded-lg bg-white/[0.05] flex items-center justify-center text-zinc-400 shrink-0">
+            <FolderOpen size={16} />
+          </div>
           <span className="flex-1 text-zinc-300 text-[12px] font-mono truncate">
             {outputPath || (
               <span className="text-zinc-600 italic">
-                {probing ? t("share.receive.dest.probing") : t("share.receive.dest.empty")}
+                {probing
+                  ? t("share.receive.dest.probing")
+                  : t("share.receive.dest.empty")}
               </span>
             )}
           </span>
-          {/* Sprint 5.6.26: subtle spinner while probing, to
-              signal that the system is fetching the real
-              filename and the field will auto-fill shortly. */}
           {probing && (
             <span className="inline-block w-3 h-3 border border-cyan-500/40 border-t-cyan-400 rounded-full animate-spin shrink-0" />
           )}
@@ -675,72 +827,361 @@ function ReceivePanel() {
             onClick={onChangeDest}
             disabled={probing}
             title={probing ? t("share.receive.dest.change.waiting") : undefined}
-            className="text-zinc-500 hover:text-zinc-300 disabled:text-zinc-700 disabled:cursor-not-allowed text-[11px] transition-colors shrink-0"
+            className="text-zinc-500 hover:text-white disabled:text-zinc-700 disabled:cursor-not-allowed text-[11px] font-medium transition-colors shrink-0 px-2 py-1 rounded-md hover:bg-white/[0.05]"
           >
             {t("share.receive.dest.change")}
           </button>
         </div>
         {suggestedName && (
-          <p className="text-zinc-600 text-[11px] mt-2 truncate">
-            <span className="text-cyan-500">↳</span> {suggestedName}
+          <p className="text-zinc-500 text-[11px] mt-2 pl-1 flex items-center gap-1.5">
+            <FileText size={11} className="text-cyan-400 shrink-0" />
+            <span className="truncate">{suggestedName}</span>
           </p>
         )}
       </div>
 
-      {/* Receive button */}
+      {/* Big CTA — solid blue matching the Send "Elegir archivo" */}
       <button
         onClick={onReceive}
         disabled={!token || busy || kind === "unknown"}
-        className="w-full py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-[14px] font-semibold transition-colors"
+        className="w-full py-3.5 rounded-2xl bg-blue-500 hover:bg-blue-400 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-[14px] font-semibold transition-all duration-150 hover:-translate-y-px disabled:hover:translate-y-0 inline-flex items-center justify-center gap-2 shadow-[0_4px_20px_-6px_rgba(59,130,246,0.55)] disabled:shadow-none"
       >
-        {busy ? t("share.receive.btn.busy") : t("share.receive.btn")}
+        {busy ? (
+          <>
+            <RefreshCw size={16} className="animate-spin-slow" />
+            {t("share.receive.btn.busy")}
+          </>
+        ) : (
+          <>
+            <Download size={16} />
+            {t("share.receive.btn")}
+          </>
+        )}
       </button>
 
-      {/* Progress */}
+      {/* Progress steps */}
       {busy && stepIdx >= 0 && (
-        <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3 space-y-2">
+        <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] px-4 py-3 space-y-2.5 animate-fade-in">
           {STEPS.map((label, i) => {
             const done = i < stepIdx;
             const active = i === stepIdx && !stepErr;
             const err = i === stepIdx && stepErr;
             return (
-              <div key={i} className={`flex items-center gap-2 text-[12px] ${
-                done ? "text-emerald-400" : active ? "text-cyan-300" : err ? "text-red-400" : "text-zinc-700"
-              }`}>
-                <span className="w-4 text-center">
-                  {done ? "✓" : active ? "⟳" : err ? "✗" : "·"}
+              <div
+                key={i}
+                className={
+                  "flex items-center gap-2.5 text-[12px] " +
+                  (done
+                    ? "text-emerald-400"
+                    : active
+                    ? "text-cyan-300"
+                    : err
+                    ? "text-rose-400"
+                    : "text-zinc-700")
+                }
+              >
+                <span className="w-4 text-center shrink-0">
+                  {done ? (
+                    <Check size={14} strokeWidth={3} />
+                  ) : active ? (
+                    <RefreshCw size={12} className="animate-spin-slow inline-block" />
+                  ) : err ? (
+                    <X size={14} />
+                  ) : (
+                    <span className="opacity-50">·</span>
+                  )}
                 </span>
-                <span>{label}</span>
+                <span className={active ? "font-medium" : ""}>{label}</span>
               </div>
             );
           })}
         </div>
       )}
 
-      {/* Result */}
+      {/* Success result */}
       {result && !busy && (
-        <div className="rounded-xl bg-emerald-500/[0.08] border border-emerald-500/20 px-4 py-4">
-          <p className="text-emerald-300 text-[11px] tracking-[0.2em] uppercase mb-1">
-            {t("share.receive.result.title")}
+        <div className="rounded-2xl bg-emerald-500/[0.06] border border-emerald-500/20 p-5 animate-scale-in">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-7 h-7 rounded-lg bg-emerald-500/20 flex items-center justify-center text-emerald-300">
+              <Check size={14} strokeWidth={3} />
+            </div>
+            <p className="text-emerald-300 text-[10px] tracking-[0.2em] uppercase font-medium">
+              {t("share.receive.result.title")}
+            </p>
+          </div>
+          <p className="text-white text-[24px] font-semibold tabular-nums mb-1">
+            {prettyBytes(result.bytes_written)}
           </p>
-          <p className="text-white text-[22px] font-semibold tabular-nums">{prettyBytes(result.bytes_written)}</p>
-          <p className="text-zinc-300 text-[13px] font-medium mt-1">{result.filename || "archivo"}</p>
-          <p className="text-zinc-600 text-[11px] font-mono mt-1 truncate">{result.output_path}</p>
+          <p className="text-zinc-200 text-[13px] font-medium truncate mb-1">
+            {result.filename || "archivo"}
+          </p>
+          <p
+            className="text-zinc-500 text-[11px] font-mono truncate"
+            title={result.output_path}
+          >
+            ▸ {result.output_path}
+          </p>
         </div>
       )}
 
-      {/* Error */}
-      {error && (
-        <div className="rounded-xl bg-red-500/[0.08] border border-red-500/20 px-4 py-3 text-red-400 text-[12px]">
-          {error}
-          <button onClick={onReceive} className="block mt-2 text-zinc-400 hover:text-white text-[11px] transition-colors">
-            {t("share.receive.retry")}
-          </button>
+      {/* Error toast */}
+      {error && !busy && (
+        <div className="rounded-xl bg-rose-500/[0.08] border border-rose-500/30 px-4 py-3 text-rose-300 text-[13px] flex items-start gap-2.5 animate-scale-in">
+          <AlertCircle size={15} className="shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <span>{error}</span>
+            <button
+              onClick={onReceive}
+              className="block mt-2 text-zinc-400 hover:text-white text-[11px] font-medium transition-colors"
+            >
+              {t("share.receive.retry")}
+            </button>
+          </div>
         </div>
       )}
     </div>
   );
 }
+
+// ─────────────────────────────────────────────────────────────
+//  Link panel — right column with URL, QR, feature pills,
+//  Vista previa, Actividad
+// ─────────────────────────────────────────────────────────────
+
+function LinkPanel({ resp }: { resp: SendStartResp | null }) {
+  const { t } = useLocale();
+  const [copied, setCopied] = useState<"link" | "token" | null>(null);
+  const [showQR, setShowQR] = useState(false);
+  const [showToken, setShowToken] = useState(false);
+
+  // Build a pretty URL for display. The token from the backend
+  // already encodes the slug; we wrap it in a friendly URL.
+  const linkUrl = resp
+    ? `https://nexusrar.app/d/${resp.code.toLowerCase()}`
+    : null;
+
+  const onCopy = useCallback(async (text: string, which: "link" | "token") => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {}
+    setCopied(which);
+    setTimeout(() => setCopied(null), 1800);
+  }, []);
+
+  return (
+    <div className="glass rounded-3xl p-6 flex flex-col gap-5">
+      {/* Step header with status pill */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300 text-[13px] font-bold">
+            2
+          </div>
+          <div>
+            <h2 className="text-white text-[15px] font-semibold leading-tight">
+              {t("share.link.title")}
+            </h2>
+            <p className="text-zinc-500 text-[11.5px] mt-0.5">
+              {t("share.link.desc")}
+            </p>
+          </div>
+        </div>
+        {resp && (
+          <span className="chip chip-emerald shrink-0">
+            <span className="relative flex w-2 h-2">
+              <span className="absolute inline-flex h-full w-full rounded-full opacity-75 animate-ping bg-emerald-400" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400" />
+            </span>
+            {t("share.link.active")}
+          </span>
+        )}
+      </div>
+
+      {resp && linkUrl ? (
+        <>
+          {/* Link display card — friendly URL + QR + copy */}
+          <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] p-4 flex items-center gap-3 animate-scale-in">
+            <div className="w-9 h-9 rounded-lg bg-white/[0.05] flex items-center justify-center text-zinc-400 shrink-0">
+              <LinkIcon size={16} />
+            </div>
+            <p className="flex-1 text-white text-[13px] font-mono truncate">
+              {linkUrl}
+            </p>
+            <button
+              onClick={() => onCopy(linkUrl, "link")}
+              className={
+                "inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[13px] font-semibold transition-all duration-150 " +
+                (copied === "link"
+                  ? "bg-emerald-500/20 text-emerald-300"
+                  : "bg-blue-500 hover:bg-blue-400 text-white shadow-[0_4px_16px_-4px_rgba(59,130,246,0.5)]")
+              }
+            >
+              {copied === "link" ? (
+                <>
+                  <Check size={14} />
+                  {t("share.link.copied")}
+                </>
+              ) : (
+                <>
+                  <Copy size={14} />
+                  {t("share.link.copy")}
+                </>
+              )}
+            </button>
+            <button
+              onClick={() => setShowQR((v) => !v)}
+              className={
+                "btn btn-ghost px-3 " +
+                (showQR ? "bg-white/[0.08] text-white" : "")
+              }
+              title={t("share.link.qr")}
+            >
+              <QrCode size={14} />
+            </button>
+          </div>
+
+          {/* Raw token display — what the receiver actually pastes */}
+          <div className="rounded-2xl bg-cyan-500/[0.04] border border-cyan-500/20 p-3 animate-scale-in">
+            <div className="flex items-center gap-2 mb-2">
+              <KeyRound size={12} className="text-cyan-400 shrink-0" />
+              <span className="text-cyan-300 text-[10px] tracking-[0.2em] uppercase font-medium">
+                {t("share.link.token.label")}
+              </span>
+              <button
+                onClick={() => setShowToken((v) => !v)}
+                className="ml-auto text-zinc-500 hover:text-white text-[10px] flex items-center gap-1 transition-colors"
+              >
+                {showToken ? <EyeOff size={10} /> : <Eye size={10} />}
+                {showToken ? t("share.link.token.hide") : t("share.link.token.show")}
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <p className="flex-1 text-white text-[11.5px] font-mono truncate">
+                {showToken
+                  ? resp.token
+                  : "•".repeat(Math.min(resp.token.length, 28))}
+              </p>
+              <button
+                onClick={() => onCopy(resp.token, "token")}
+                className={
+                  "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-all duration-150 shrink-0 " +
+                  (copied === "token"
+                    ? "bg-emerald-500/20 text-emerald-300"
+                    : "bg-cyan-500 hover:bg-cyan-400 text-white")
+                }
+              >
+                {copied === "token" ? (
+                  <>
+                    <Check size={12} />
+                    {t("share.link.copied")}
+                  </>
+                ) : (
+                  <>
+                    <Copy size={12} />
+                    {t("share.link.copy.token")}
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* QR code (collapsible) */}
+          {showQR && (
+            <div className="rounded-2xl bg-white p-4 flex flex-col items-center gap-3 animate-scale-in">
+              <div className="rounded-xl bg-white p-2">
+                <QRCodeSVG
+                  value={linkUrl}
+                  size={180}
+                  level="M"
+                  bgColor="#ffffff"
+                  fgColor="#0a0a0c"
+                />
+              </div>
+              <p className="text-zinc-600 text-[11.5px] font-mono">
+                {t("share.link.qr.scan")}
+              </p>
+            </div>
+          )}
+
+          {/* Feature pills row */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex flex-col items-center gap-1.5 text-center">
+              <Clock size={16} className="text-amber-400" />
+              <p className="text-zinc-300 text-[11px] leading-tight">
+                {t("share.link.feature.expires")}
+              </p>
+            </div>
+            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex flex-col items-center gap-1.5 text-center">
+              <InfinityIcon size={16} className="text-cyan-400" />
+              <p className="text-zinc-300 text-[11px] leading-tight">
+                {t("share.link.feature.unlimited")}
+              </p>
+            </div>
+            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex flex-col items-center gap-1.5 text-center">
+              <Shield size={16} className="text-emerald-400" />
+              <p className="text-zinc-300 text-[11px] leading-tight">
+                {t("share.link.feature.e2e")}
+              </p>
+            </div>
+          </div>
+
+          {/* Vista previa */}
+          <div>
+            <h3 className="text-zinc-400 text-[10px] tracking-[0.2em] uppercase font-medium mb-3">
+              {t("share.link.preview")}
+            </h3>
+            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-300 shrink-0">
+                <FileText size={18} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-white text-[13px] truncate font-medium">
+                  {resp.filename}
+                </p>
+                <p className="text-zinc-500 text-[10.5px] font-mono mt-0.5">
+                  {prettyBytes(resp.file_size)} · {t("share.link.preview.doc")}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Actividad */}
+          <div>
+            <h3 className="text-zinc-400 text-[10px] tracking-[0.2em] uppercase font-medium mb-3">
+              {t("share.link.activity")}
+            </h3>
+            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-6 flex flex-col items-center text-center gap-2">
+              <div className="w-10 h-10 rounded-full bg-white/[0.04] flex items-center justify-center text-zinc-500">
+                <Clock size={18} />
+              </div>
+              <p className="text-zinc-400 text-[12.5px] font-medium">
+                {t("share.link.activity.empty")}
+              </p>
+              <p className="text-zinc-600 text-[11px]">
+                {t("share.link.activity.hint")}
+              </p>
+            </div>
+          </div>
+        </>
+      ) : (
+        /* Empty state when no link is active */
+        <div className="rounded-2xl border-2 border-dashed border-white/[0.08] p-10 flex flex-col items-center text-center gap-3 min-h-[280px] justify-center">
+          <div className="w-14 h-14 rounded-2xl bg-white/[0.04] flex items-center justify-center text-zinc-500">
+            <LinkIcon size={26} strokeWidth={1.5} />
+          </div>
+          <div>
+            <p className="text-zinc-400 text-[13.5px] font-medium mb-1">
+              {t("share.link.empty.title")}
+            </p>
+            <p className="text-zinc-600 text-[12px] max-w-xs mx-auto leading-relaxed">
+              {t("share.link.empty.desc")}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function friendlyError(msg: string): string {
   if (msg.includes("mDNS") || msg.includes("no service")) return "No se encontró el dispositivo — asegúrate de estar en la misma Wi-Fi.";

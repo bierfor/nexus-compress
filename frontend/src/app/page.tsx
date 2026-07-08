@@ -71,8 +71,14 @@ export default function Home() {
 
       <NeoTopBar view={view} onNavigate={onNavigate} />
 
-      <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden">
-        {view === "landing" && <LandingPage onNavigate={onNavigate} />}
+      {/* Sprint 5.6.29: keyed wrapper re-mounts on view change so the
+          `animate-fade-in` keyframe plays on every navigation,
+          giving a smooth slide-up + fade transition. */}
+      <div
+        key={view}
+        className="relative flex-1 flex flex-col min-h-0 overflow-hidden animate-fade-in"
+      >
+        {view === "landing" && <LandingPage onNavigate={onNavigate} ops={recentOps} />}
         {view === "compress" && (
           <CompressView
             onComplete={onOpComplete}
@@ -103,42 +109,57 @@ export default function Home() {
 }
 
 // ============================================================
-//  Settings
+//  Settings — Sprint 5.6.29 hotfix #15 (rev)
+//
+//  Uses the real <ConfigPanel /> for actual configuration
+//  (compression mode, transport, etc.) wrapped in a localized
+//  page header + language switcher. Replaces the inline stub
+//  that was hardcoded Spanish.
 // ============================================================
 
+import { useLocale } from "@/components/LocaleProvider";
+import type { Locale } from "@/lib/i18n";
+import { ConfigPanel } from "@/components/ConfigPanel";
+import { PageHeader } from "@/components/PageHeader";
+import { Languages } from "lucide-react";
+
 function SettingsView() {
+  const { t, locale, setLocale } = useLocale();
+
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="max-w-3xl mx-auto px-8 pt-12 pb-20">
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[12px] tracking-wide mb-2">
-            ← Volver
+        <PageHeader title={t("settings.title")} />
+
+        {/* Language switcher — lives at the top of settings */}
+        <div className="mb-10 rounded-2xl bg-white/[0.03] border border-white/[0.08] overflow-hidden">
+          <div className="px-5 py-3 border-b border-white/[0.04] flex items-center gap-2 text-zinc-500 text-[11px] tracking-[0.2em] uppercase">
+            <Languages size={12} />
+            {t("settings.section.language")}
           </div>
-          <h1 className="text-white text-[36px] font-semibold tracking-tight mb-3">
-            Ajustes
-          </h1>
+          <div className="px-5 py-4 flex items-center justify-between">
+            <span className="text-zinc-400 text-[13.5px]">{t("settings.interface.language")}</span>
+            <div className="flex items-center gap-1.5">
+              {(["es", "en", "it"] as Locale[]).map((l) => (
+                <button
+                  key={l}
+                  onClick={() => setLocale(l)}
+                  className={
+                    "px-3 py-1.5 text-[12px] rounded-lg font-mono uppercase tracking-wider transition-colors " +
+                    (locale === l
+                      ? "bg-cyan-500/20 border border-cyan-500/40 text-cyan-300"
+                      : "bg-white/[0.04] border border-white/[0.08] text-zinc-400 hover:text-white hover:border-white/[0.16]")
+                  }
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
-        <Section title="Transporte P2P">
-          <Row label="Modo" value="Directo (LAN + UPnP)" />
-          <Row label="Apertura UPnP" value="automática" />
-          <Row label="Fallback" value="mDNS local" />
-        </Section>
-
-        <Section title="Compresión">
-          <Row label="Por defecto" value="Balanceado (v5)" />
-          <Row label="Diccionario" value="5348 entradas" />
-        </Section>
-
-        <Section title="Interfaz">
-          <Row label="Tema" value="Oscuro (Neo)" />
-          <Row label="Idioma" value="Español" />
-        </Section>
-
-        <Section title="Acerca de">
-          <Row label="Versión" value="NexusRAR 0.1.0" />
-          <Row label="Motor" value="NexusCompress v6 Solid-AST" />
-        </Section>
+        {/* Real config panel */}
+        <ConfigPanel />
       </div>
     </div>
   );

@@ -3,116 +3,330 @@
 @tailwind utilities;
 
 /* ----------------------------------------------------------------------------
- * Global base — the dark cyberpunk feel starts here.
- * Pure black background, monospace fallback for data, no rounded corners
- * (industrial look — every radius is intentional, not aesthetic).
+ * Sprint 5.6.29 design system — neon terminal UX.
+ *
+ * Layers:
+ *   1. Reset + base (background, fonts, scrollbar)
+ *   2. Tauri frameless plumbing (drag region, no-select)
+ *   3. Design tokens (custom properties — colors, radii, easings, shadows)
+ *   4. Component classes (.panel, .btn, .input, .chip, .glass, .focus-ring)
+ *   5. Keyframe animations + utility helpers
+ *
+ * Every visual primitive in the app should map to one of these
+ * classes so the look stays consistent and the theme is editable
+ * from a single file.
  * --------------------------------------------------------------------------*/
 
-html, body {
-  background: #0a0a0c;
-  color: #e0e0e5;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  -webkit-font-smoothing: antialiased;
-  /* Disable the default rubber-band scroll on macOS — the cyberpunk UI
-   * wants fixed boundaries, not bouncy content. */
-  overscroll-behavior: none;
+@layer base {
+  :root {
+    /* Surfaces */
+    --surface-base: #0a0a0c;
+    --surface-1: #111114;
+    --surface-2: #16161a;
+    --surface-3: #1c1c22;
+    --surface-glass: rgba(22, 22, 26, 0.65);
+
+    /* Borders */
+    --border-1: rgba(255, 255, 255, 0.06);
+    --border-2: rgba(255, 255, 255, 0.10);
+    --border-3: rgba(255, 255, 255, 0.16);
+
+    /* Accents */
+    --neon-cyan: #22d3ee;
+    --neon-cyan-soft: rgba(34, 211, 238, 0.18);
+    --neon-amber: #fbbf24;
+    --neon-amber-soft: rgba(251, 191, 36, 0.18);
+    --neon-emerald: #34d399;
+    --neon-emerald-soft: rgba(52, 211, 153, 0.18);
+    --neon-rose: #fb7185;
+    --neon-rose-soft: rgba(251, 113, 133, 0.18);
+
+    /* Text */
+    --text-1: #f4f4f5;
+    --text-2: #a1a1aa;
+    --text-3: #71717a;
+    --text-4: #52525b;
+
+    /* Radii */
+    --radius-1: 8px;
+    --radius-2: 12px;
+    --radius-3: 16px;
+    --radius-4: 24px;
+
+    /* Easings */
+    --ease-snap: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+    /* Shadows / glows */
+    --glow-cyan: 0 0 0 1px rgba(34, 211, 238, 0.3), 0 0 24px -2px rgba(34, 211, 238, 0.35);
+    --glow-amber: 0 0 0 1px rgba(251, 191, 36, 0.3), 0 0 24px -2px rgba(251, 191, 36, 0.35);
+    --glow-emerald: 0 0 0 1px rgba(52, 211, 153, 0.3), 0 0 24px -2px rgba(52, 211, 153, 0.35);
+  }
+
+  /* Sprint 5.6.29: light theme — toggled via ThemeProvider setting
+   * <html class="light">. Dark is the default. */
+  html.light {
+    --surface-base: #f5f7fa;
+    --surface-1: #ffffff;
+    --surface-2: #ffffff;
+    --surface-3: #f1f3f6;
+    --surface-glass: rgba(255, 255, 255, 0.7);
+
+    --border-1: rgba(15, 23, 42, 0.06);
+    --border-2: rgba(15, 23, 42, 0.10);
+    --border-3: rgba(15, 23, 42, 0.16);
+
+    --text-1: #0f172a;
+    --text-2: #475569;
+    --text-3: #64748b;
+    --text-4: #94a3b8;
+
+    --neon-cyan-soft: rgba(34, 211, 238, 0.15);
+    --neon-amber-soft: rgba(251, 191, 36, 0.15);
+    --neon-emerald-soft: rgba(52, 211, 153, 0.15);
+    --neon-rose-soft: rgba(251, 113, 133, 0.15);
+  }
+
+  html, body {
+    background: var(--surface-base);
+    color: var(--text-1);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+    transition: background 0.3s var(--ease-out), color 0.3s var(--ease-out);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--neon-cyan);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background: var(--neon-cyan-soft);
+    color: var(--text-1);
+  }
 }
 
-/* Disable user-select on the chrome (title bar, status bar) so the
- * window decoration can be implemented as a draggable region. */
+/* ---- Tauri frameless plumbing ----------------------------------- */
 .no-select {
   user-select: none;
   -webkit-user-select: none;
 }
+[data-tauri-drag-region] { cursor: grab; }
+[data-tauri-drag-region]:active { cursor: grabbing; }
 
-/* The "drag region" used by Tauri frameless windows. Anything with
- * `data-tauri-drag-region` is draggable; the OS moves the window when
- * the user clicks and drags. This is how we replace the missing title
- * bar in a frameless setup. */
-[data-tauri-drag-region] {
-  cursor: grab;
-}
-[data-tauri-drag-region]:active {
-  cursor: grabbing;
-}
-
-/* Card / panel — semi-transparent surface over the base, with a
- * thin border. The 1px border is the entire visual frame; no shadow. */
+/* ---- Surfaces --------------------------------------------------- */
 .panel {
-  background: #121215;
-  border: 1px solid #2a2a30;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-3);
 }
 
-/* The dropzone — the visual centerpiece. Dashed cyan border,
- * gentle pulse to signal "drop here". */
-.dropzone {
-  border: 2px dashed #00f0ff;
-  background: #121215;
-  transition: all 0.2s ease;
-}
-.dropzone.dragover {
-  border-style: solid;
-  background: #1a1a1f;
-  box-shadow: inset 0 0 32px rgba(0, 240, 255, 0.15);
+.glass {
+  background: var(--surface-glass);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  border: 1px solid var(--border-2);
 }
 
-/* Stat / metric — used by the Entropy Monitor. Big monospace numbers,
- * small uppercase label, optional glow for the live value. */
-.metric-label {
-  @apply text-[10px] tracking-[0.2em] uppercase text-zinc-500;
-}
-.metric-value {
-  @apply text-2xl font-mono text-cyan-400;
-}
-.metric-value-glow {
-  text-shadow: 0 0 6px #00f0ff, 0 0 12px rgba(0, 240, 255, 0.5);
+.glass-strong {
+  background: rgba(22, 22, 26, 0.85);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid var(--border-2);
 }
 
-/* Buttons — flat, no rounded corners, with a thin border that turns
- * cyan on hover. The cyberpunk "press me" feel. */
+/* ---- Buttons (with gradient + glow on primary) ----------------- */
 .btn {
-  @apply px-4 py-2 border border-zinc-700 text-zinc-200 font-mono text-sm
-         uppercase tracking-wider transition-all duration-150
-         hover:border-cyan-500 hover:text-cyan-400 hover:bg-zinc-900
-         active:translate-y-px;
+  @apply inline-flex items-center justify-center gap-2 font-medium
+         rounded-xl px-4 py-2.5 text-[13px]
+         transition-all duration-150 select-none;
+  border: 1px solid var(--border-2);
+  color: var(--text-1);
+  background: var(--surface-2);
 }
+.btn:hover { border-color: var(--border-3); background: var(--surface-3); transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
 .btn-primary {
-  @apply border-cyan-500 text-cyan-400 hover:bg-cyan-500/10;
+  background: linear-gradient(180deg, #22d3ee 0%, #0891b2 100%);
+  color: #042f2e;
+  border-color: transparent;
+  box-shadow: 0 6px 20px -8px rgba(34, 211, 238, 0.55), inset 0 1px 0 rgba(255,255,255,0.25);
 }
-.btn-magenta {
-  @apply border-magenta-500 text-magenta-400 hover:bg-magenta-500/10;
+.btn-primary:hover {
+  background: linear-gradient(180deg, #67e8f9 0%, #06b6d4 100%);
+  box-shadow: 0 10px 28px -8px rgba(34, 211, 238, 0.65), inset 0 1px 0 rgba(255,255,255,0.3);
 }
 
-/* Range slider — used by the Fast/Premium Config Panel. */
+.btn-amber {
+  background: linear-gradient(180deg, #fbbf24 0%, #d97706 100%);
+  color: #422006;
+  border-color: transparent;
+  box-shadow: 0 6px 20px -8px rgba(251, 191, 36, 0.55), inset 0 1px 0 rgba(255,255,255,0.25);
+}
+.btn-amber:hover {
+  background: linear-gradient(180deg, #fcd34d 0%, #f59e0b 100%);
+  box-shadow: 0 10px 28px -8px rgba(251, 191, 36, 0.65), inset 0 1px 0 rgba(255,255,255,0.3);
+}
+
+.btn-emerald {
+  background: linear-gradient(180deg, #34d399 0%, #059669 100%);
+  color: #022c22;
+  border-color: transparent;
+  box-shadow: 0 6px 20px -8px rgba(52, 211, 153, 0.55), inset 0 1px 0 rgba(255,255,255,0.25);
+}
+.btn-emerald:hover {
+  background: linear-gradient(180deg, #6ee7b7 0%, #10b981 100%);
+  box-shadow: 0 10px 28px -8px rgba(52, 211, 153, 0.65), inset 0 1px 0 rgba(255,255,255,0.3);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border-1);
+  color: var(--text-2);
+}
+.btn-ghost:hover { color: var(--text-1); border-color: var(--border-3); background: var(--surface-1); }
+
+/* ---- Inputs (focus ring + smooth) ------------------------------- */
+.input {
+  @apply w-full rounded-xl px-4 py-2.5 text-[13px] font-mono
+         transition-all duration-150;
+  background: var(--surface-1);
+  border: 1px solid var(--border-2);
+  color: var(--text-1);
+  outline: none;
+}
+.input::placeholder { color: var(--text-4); }
+.input:hover { border-color: var(--border-3); }
+.input:focus { border-color: var(--neon-cyan); box-shadow: 0 0 0 3px var(--neon-cyan-soft); }
+.input:disabled { opacity: 0.4; cursor: not-allowed; }
+.input-error { border-color: var(--neon-rose); box-shadow: 0 0 0 3px var(--neon-rose-soft); }
+
+/* ---- Chips / tags ----------------------------------------------- */
+.chip {
+  @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full
+         text-[10.5px] font-mono uppercase tracking-wider;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  color: var(--text-2);
+}
+.chip-cyan    { background: var(--neon-cyan-soft);    border-color: var(--neon-cyan);    color: var(--neon-cyan); }
+.chip-amber   { background: var(--neon-amber-soft);   border-color: var(--neon-amber);   color: var(--neon-amber); }
+.chip-emerald { background: var(--neon-emerald-soft); border-color: var(--neon-emerald); color: var(--neon-emerald); }
+.chip-rose    { background: var(--neon-rose-soft);    border-color: var(--neon-rose);    color: var(--neon-rose); }
+
+/* ---- Dropzone -------------------------------------------------- */
+.dropzone {
+  @apply rounded-3xl border-2 border-dashed transition-all duration-200;
+  border-color: var(--border-2);
+  background: var(--surface-1);
+}
+.dropzone.is-dragover {
+  border-style: solid;
+  border-color: var(--neon-cyan);
+  background: var(--neon-cyan-soft);
+  box-shadow: var(--glow-cyan);
+  transform: scale(1.01);
+}
+
+/* ---- Metrics ---------------------------------------------------- */
+.metric-label { @apply text-[10px] tracking-[0.2em] uppercase text-zinc-500; }
+.metric-value { @apply text-2xl font-mono text-cyan-400; }
+.metric-value-glow { text-shadow: 0 0 6px #22d3ee, 0 0 12px rgba(34, 211, 238, 0.5); }
+
+/* ---- Range slider ---------------------------------------------- */
 .slider {
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
   height: 2px;
-  background: #2a2a30;
+  background: var(--border-2);
   outline: none;
+  border-radius: 1px;
 }
 .slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 14px;
-  height: 14px;
-  background: #00f0ff;
+  width: 14px; height: 14px;
+  background: var(--neon-cyan);
   cursor: pointer;
-  box-shadow: 0 0 8px #00f0ff;
+  border-radius: 50%;
+  box-shadow: 0 0 8px var(--neon-cyan);
+  transition: transform 0.15s var(--ease-snap);
 }
+.slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  background: #00f0ff;
+  width: 14px; height: 14px;
+  background: var(--neon-cyan);
   cursor: pointer;
   border: none;
-  box-shadow: 0 0 8px #00f0ff;
+  border-radius: 50%;
+  box-shadow: 0 0 8px var(--neon-cyan);
 }
 
-/* Scrollbar — thin, dark, with cyan accent on hover. Default macOS
- * scrollbars are too rounded and bright for this aesthetic. */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: #0a0a0c; }
-::-webkit-scrollbar-thumb { background: #2a2a30; }
-::-webkit-scrollbar-thumb:hover { background: #00f0ff; }
+/* ---- Scrollbar ------------------------------------------------- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-2);
+  border-radius: 5px;
+  border: 2px solid var(--surface-base);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--border-3); }
+
+/* ---- Keyframe animations -------------------------------------- */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 var(--neon-cyan-soft); }
+  50%      { box-shadow: 0 0 0 6px transparent; }
+}
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes slide-down {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes spin-slow {
+  to { transform: rotate(360deg); }
+}
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes progress-stripes {
+  0% { background-position: 0 0; }
+  100% { background-position: 40px 0; }
+}
+
+.animate-fade-in     { animation: fade-in 0.25s var(--ease-out) both; }
+.animate-scale-in    { animation: scale-in 0.25s var(--ease-snap) both; }
+.animate-slide-down  { animation: slide-down 0.3s var(--ease-snap) both; }
+.animate-pulse-glow  { animation: pulse-glow 2s ease-in-out infinite; }
+.animate-spin-slow   { animation: spin-slow 1.4s linear infinite; }
+.animate-shimmer     {
+  background: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-3) 50%, var(--surface-2) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* ---- Stagger helper for lists --------------------------------- */
+.stagger > * { animation: fade-in 0.3s var(--ease-out) both; }
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 50ms; }
+.stagger > *:nth-child(3) { animation-delay: 100ms; }
+.stagger > *:nth-child(4) { animation-delay: 150ms; }
+.stagger > *:nth-child(5) { animation-delay: 200ms; }
+.stagger > *:nth-child(6) { animation-delay: 250ms; }
+.stagger > *:nth-child(7) { animation-delay: 300ms; }
+.stagger > *:nth-child(8) { animation-delay: 350ms; }
+.stagger > *:nth-child(9) { animation-delay: 400ms; }
+.stagger > *:nth-child(10) { animation-delay: 450ms; }

@@ -1,6 +1,10 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   content: ["./src/**/*.{ts,tsx}"],
+  // Sprint 5.6.29: class-based dark mode so we can toggle.
+  // Default = dark (matches the existing design). Light theme is
+  // toggled via <html class="light"> set by ThemeProvider.
+  darkMode: "class",
   theme: {
     extend: {
       colors: {

@@ -55,7 +55,7 @@ export function ProgressBar({ progress }: { progress: Progress | null }) {
   };
 
   return (
-    <div className="panel p-3 flex flex-col gap-2">
+    <div className="panel p-4 flex flex-col gap-2.5 animate-scale-in">
       <div className="flex items-center justify-between">
         <span className={`metric-label ${labelColor}`}>
           {phaseLabel[progress.phase]}
@@ -68,22 +68,47 @@ export function ProgressBar({ progress }: { progress: Progress | null }) {
                 : progress.current_file}`
             : ""}
         </span>
-        <span className={`font-mono text-sm ${labelColor}`}>{pct}%</span>
+        <span className={`font-mono text-sm tabular-nums font-semibold ${labelColor}`}>{pct}%</span>
       </div>
-      <div className={["relative h-2 border", barColor].join(" ")}>
+      <div className="relative h-2 rounded-full bg-white/[0.04] border border-white/[0.06] overflow-hidden">
         <div
           className={[
-            "absolute inset-y-0 left-0 transition-all duration-150",
+            "absolute inset-y-0 left-0 transition-all duration-200 ease-out",
             progress.phase === "done"
-              ? "bg-matrix-500"
+              ? "bg-emerald-500"
               : progress.phase === "reading"
               ? "bg-amber-500"
               : "bg-cyan-500",
           ].join(" ")}
-          style={{ width: `${pct}%` }}
+          style={{
+            width: `${pct}%`,
+            // Sprint 5.6.29: subtle moving-stripe overlay while
+            // compression is active. Static fill when done.
+            backgroundImage:
+              progress.phase === "done" || pct === 100
+                ? "none"
+                : "linear-gradient(45deg, rgba(255,255,255,0.18) 25%, transparent 25%, transparent 50%, rgba(255,255,255,0.18) 50%, rgba(255,255,255,0.18) 75%, transparent 75%)",
+            backgroundSize: "20px 20px",
+            animation:
+              progress.phase === "done" || pct === 100
+                ? "none"
+                : "progress-stripes 0.8s linear infinite",
+          }}
         />
+        {/* Glow at the leading edge for cyberpunk feel */}
+        {pct > 0 && pct < 100 && (
+          <div
+            className="absolute inset-y-0 w-4 pointer-events-none"
+            style={{
+              left: `calc(${pct}% - 16px)`,
+              background: `linear-gradient(90deg, transparent, ${
+                progress.phase === "reading" ? "rgba(251,191,36,0.5)" : "rgba(34,211,238,0.5)"
+              }, transparent)`,
+            }}
+          />
+        )}
       </div>
-      <div className="flex items-center justify-between text-[10px] font-mono text-zinc-500 tracking-wider">
+      <div className="flex items-center justify-between text-[10px] font-mono text-zinc-500 tracking-wider tabular-nums">
         <span>
           {fmtBytes(progress.bytes_done)} / {fmtBytes(progress.bytes_total)}
         </span>
