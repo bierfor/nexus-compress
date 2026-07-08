@@ -25,6 +25,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Sprint 5.6.28 hotfix #9 lesson: invalid YAML (e.g. a
+      # single off-by-one indent) takes down GH Actions
+      # pipelines before any job runs. Validate every
+      # workflow here so PRs with bad YAML fail at the
+      # fastest, cheapest step.
+      - name: Validate workflow YAMLs
+        run: bash scripts/validate-ci.sh
+
       - name: Cache cargo registry + target
         uses: actions/cache@v4
         with:
