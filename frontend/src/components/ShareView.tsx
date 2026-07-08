@@ -34,6 +34,8 @@ import {
   EyeOff,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import { useAppStats, useRecentEvents } from "@/lib/useAppData";
+import { formatBytes, formatTimestampMs } from "@/lib/format";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -84,12 +86,19 @@ export function ShareView({
   }) => void;
   onNavigate: (v: View) => void;
 }) {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
 
   // Sprint 5.6.29: lift the share state to ShareView so both the
   // SendPanel (left) and LinkPanel (right) can render from the same
   // state without prop-drilling or context.
   const [shareResp, setShareResp] = useState<SendStartResp | null>(null);
+
+  // Sprint 5.7: real share stats + recent share events so the
+  // LinkPanel Actividad section shows actual past transfers,
+  // not hardcoded placeholder text.
+  const { stats } = useAppStats();
+  const { ops: recentShares } = useRecentEvents(50, []);
+  const recentShareEvents = recentShares.filter((o) => o.kind === "share").slice(0, 3);
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="max-w-7xl mx-auto px-8 pt-8 pb-16">
@@ -116,15 +125,30 @@ export function ShareView({
           </div>
         </div>
 
-        {/* 2-column layout: Send flow | Link preview */}
-        <div className="grid grid-cols-2 gap-5 mb-8">
-          <SendPanel onComplete={onComplete} onRespChange={setShareResp} />
-          <LinkPanel resp={shareResp} />
+        {/* 2-column layout: Send flow | Link preview.
+            Sprint 5.7: fixed 3-col card-balanced layout (was 2-col).
+            SendPanel gets 5/12 cols, LinkPanel gets 7/12 cols. */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 mb-8">
+          <div className="lg:col-span-5">
+            <SendPanel onComplete={onComplete} onRespChange={setShareResp} />
+          </div>
+          <div className="lg:col-span-7">
+            <LinkPanel
+              resp={shareResp}
+              stats={stats}
+              recentShareEvents={recentShareEvents}
+              locale={locale}
+              t={t as (k: string, vars?: Record<string, string | number>) => string}
+              onNavigate={onNavigate}
+            />
+          </div>
         </div>
 
-        {/* Receive panel below */}
-        <div className="mt-8">
-          <ReceivePanel />
+        {/* Receive panel below (full width on lg, single col on mobile) */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          <div className="lg:col-span-12">
+            <ReceivePanel />
+          </div>
         </div>
       </div>
     </div>
@@ -948,8 +972,21 @@ function ReceivePanel() {
 //  Vista previa, Actividad
 // ─────────────────────────────────────────────────────────────
 
-function LinkPanel({ resp }: { resp: SendStartResp | null }) {
-  const { t } = useLocale();
+function LinkPanel({
+  resp,
+  stats,
+  recentShareEvents,
+  locale,
+  t,
+  onNavigate,
+}: {
+  resp: SendStartResp | null;
+  stats: import("@/lib/useAppData").AppStats | null;
+  recentShareEvents: import("@/lib/useAppData").RecentOp[];
+  locale: string;
+  t: (k: string, vars?: Record<string, string | number>) => string;
+  onNavigate?: (v: View) => void;
+}) {
   const [copied, setCopied] = useState<"link" | "token" | null>(null);
   const [showQR, setShowQR] = useState(false);
   const [showToken, setShowToken] = useState(false);
@@ -1144,22 +1181,59 @@ function LinkPanel({ resp }: { resp: SendStartResp | null }) {
             </div>
           </div>
 
-          {/* Actividad */}
+          {/* Actividad — Sprint 5.7: real past transfers from db.rs */}
           <div>
-            <h3 className="text-zinc-400 text-[10px] tracking-[0.2em] uppercase font-medium mb-3">
-              {t("share.link.activity")}
-            </h3>
-            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-6 flex flex-col items-center text-center gap-2">
-              <div className="w-10 h-10 rounded-full bg-white/[0.04] flex items-center justify-center text-zinc-500">
-                <Clock size={18} />
-              </div>
-              <p className="text-zinc-400 text-[12.5px] font-medium">
-                {t("share.link.activity.empty")}
-              </p>
-              <p className="text-zinc-600 text-[11px]">
-                {t("share.link.activity.hint")}
-              </p>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-zinc-400 text-[10px] tracking-[0.2em] uppercase font-medium">
+                {t("share.link.activity")}
+              </h3>
+              <button
+                onClick={() => onNavigate && onNavigate("recent")}
+                className="text-zinc-500 hover:text-cyan-400 text-[10.5px] transition-colors flex items-center gap-1"
+              >
+                {t("share.link.activity.seeall")}
+                <ArrowRight size={10} />
+              </button>
             </div>
+            {recentShareEvents.length === 0 ? (
+              <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-5 flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-white/[0.04] flex items-center justify-center text-zinc-500 shrink-0">
+                  <Clock size={16} />
+                </div>
+                <div>
+                  <p className="text-zinc-300 text-[12.5px] font-medium">
+                    {t("share.link.activity.empty")}
+                  </p>
+                  <p className="text-zinc-600 text-[11px] mt-0.5">
+                    {t("share.link.activity.hint")}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {recentShareEvents.map((ev) => (
+                  <div
+                    key={ev.id}
+                    className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex items-center gap-3 hover:bg-white/[0.04] transition-colors"
+                  >
+                    <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                      <Send size={14} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-zinc-200 text-[12.5px] truncate font-medium">
+                        {ev.filename}
+                      </p>
+                      <p className="text-zinc-500 text-[10.5px] mt-0.5 font-mono">
+                        {formatBytes(ev.originalBytes, locale)}
+                      </p>
+                    </div>
+                    <span className="text-zinc-500 text-[10.5px] shrink-0">
+                      {formatTimestampMs(ev.timestamp, t)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </>
       ) : (

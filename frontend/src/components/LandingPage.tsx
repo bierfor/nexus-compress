@@ -19,6 +19,12 @@ import { useLocale } from "@/components/LocaleProvider";
 import { useTheme } from "@/components/ThemeProvider";
 import { type View } from "./NeoTopBar";
 import { type RecentOp } from "@/components/RecentView";
+import { useAppStats, useRecentEvents } from "@/lib/useAppData";
+import {
+  formatCount,
+  formatBytes,
+  formatTimestampMs,
+} from "@/lib/format";
 import {
   Archive,
   FolderOpen,
@@ -168,9 +174,11 @@ export function LandingPage({
   onNavigate: (v: View) => void;
   ops: RecentOp[];
 }) {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const { theme } = useTheme();
-  const recent5 = ops.slice(0, 5);
+  const { stats } = useAppStats();
+  const { ops: remoteOps } = useRecentEvents(10, ops);
+  const recent5 = (remoteOps.length > 0 ? remoteOps : ops).slice(0, 5);
   const [tipIndex, setTipIndex] = useState(0);
 
   // Rotate the daily tip every 12s.
@@ -316,35 +324,54 @@ export function LandingPage({
               <div className="grid grid-cols-5 gap-3">
                 <StatCard
                   icon={FileText}
-                  value="1,548"
+                  value={
+                    stats ? formatCount(stats.total_files_processed, locale) : "—"
+                  }
                   label={t("home.stats.processed.label")}
                   sublabel={t("home.stats.processed.sub")}
                   color="cyan"
                 />
                 <StatCard
                   icon={Database}
-                  value="87 GB"
+                  value={
+                    stats ? formatBytes(stats.total_bytes_saved, locale) : "—"
+                  }
                   label={t("home.stats.saved.label")}
                   sublabel={t("home.stats.saved.sub")}
                   color="emerald"
                 />
                 <StatCard
                   icon={TrendingUp}
-                  value="61%"
+                  value={
+                    stats && stats.average_compression_ratio > 0
+                      ? `${Math.round(
+                          (1 - stats.average_compression_ratio) * 100,
+                        )}%`
+                      : "—"
+                  }
                   label={t("home.stats.ratio.label")}
                   sublabel={t("home.stats.ratio.sub")}
                   color="amber"
                 />
                 <StatCard
                   icon={Share2}
-                  value="923"
+                  value={
+                    stats ? formatCount(stats.total_files_shared, locale) : "—"
+                  }
                   label={t("home.stats.shared.label")}
                   sublabel={t("home.stats.shared.sub")}
                   color="violet"
                 />
                 <StatCard
                   icon={Clock}
-                  value={t("home.stats.last.value")}
+                  value={
+                    stats && stats.last_activity_timestamp > 0
+                      ? formatTimestampMs(
+                          stats.last_activity_timestamp * 1000,
+                          t as (k: string, vars?: Record<string, string | number>) => string,
+                        )
+                      : "—"
+                  }
                   label={t("home.stats.last.label")}
                   sublabel={t("home.stats.last.sub")}
                   color="blue"
@@ -361,12 +388,12 @@ export function LandingPage({
                 </h3>
               </div>
               <div className="space-y-2">
-                {ops.length === 0 ? (
+                {recent5.length === 0 ? (
                   <p className="text-zinc-500 text-[12.5px] text-center py-8 italic">
                     {t("home.activity.empty")}
                   </p>
                 ) : (
-                  ops.slice(0, 3).map((op) => (
+                  recent5.slice(0, 3).map((op) => (
                     <ActivityRow
                       key={op.id}
                       op={op}
