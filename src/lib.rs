@@ -16,6 +16,12 @@ pub mod ast_minify;
 pub mod cdc;
 pub mod classifier;
 pub mod codec;
+/// Sprint 5.7.2 — Reed-Solomon recovery codec. The `galois`
+/// submodule holds the GF(2^8) finite-field arithmetic
+/// (EXP/LOG tables + the four primitive operations);
+/// `galois::codes` will hold the matrix-based encode/decode
+/// pipeline that consumes the field primitives.
+pub mod galois;
 pub mod cost;
 pub mod dedup;
 pub mod dict_codec;
