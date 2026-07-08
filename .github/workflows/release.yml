@@ -144,73 +144,43 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
 
-      # Sprint 5.6.29 hotfix #17: tauri-bundler's
-      # `var_os("APPLE_CERTIFICATE")` returns Some("") for empty
-      # strings (NOT None), so passing the cert as an empty env var
-      # still enters the import path. The only way to skip the import
-      # entirely is to UNSET the env var when the password is missing.
-      # Same for WINDOWS_CERTIFICATE.
-      - name: Sanitize Apple/Windows cert env vars
-        # runner.os is always lowercase: "macos" (NOT "macOS"),
-        # "windows", "linux". Using capital-S "macOS" silently
-        # skips this step on every macOS runner — which is why
-        # the codesign cert with empty password was being passed
-        # to `security import` in v0.1.1 release #28946151096.
-        if: runner.os == 'macos' || runner.os == 'windows'
-        shell: bash
-        run: |
-          # If APPLE_CERTIFICATE_PASSWORD is unset/empty but the cert
-          # is set, drop the cert env vars entirely so tauri-bundler
-          # skips the sign step (gatekeeper warns but binary runs).
-          if [ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ] && [ -n "${APPLE_CERTIFICATE:-}" ]; then
-            echo "::warning::APPLE_CERTIFICATE_PASSWORD is empty; unsetting cert env vars to skip macOS codesign"
-            unset APPLE_CERTIFICATE
-            unset APPLE_CERTIFICATE_PASSWORD
-            unset APPLE_SIGNING_IDENTITY
-          fi
-          if [ -z "${WINDOWS_CERTIFICATE_PASSWORD:-}" ] && [ -n "${WINDOWS_CERTIFICATE:-}" ]; then
-            echo "::warning::WINDOWS_CERTIFICATE_PASSWORD is empty; unsetting cert env vars to skip Windows codesign"
-            unset WINDOWS_CERTIFICATE
-            unset WINDOWS_CERTIFICATE_PASSWORD
-          fi
-          # Persist the unsets into the next step's env via GITHUB_ENV.
-          # (The unset above only affects this subshell; we need to
-          # actually rewrite the env for tauri-action.)
-          {
-            echo "APPLE_CERTIFICATE=${APPLE_CERTIFICATE:-}"
-            echo "APPLE_CERTIFICATE_PASSWORD=${APPLE_CERTIFICATE_PASSWORD:-}"
-            echo "APPLE_SIGNING_IDENTITY=${APPLE_SIGNING_IDENTITY:-}"
-            echo "WINDOWS_CERTIFICATE=${WINDOWS_CERTIFICATE:-}"
-            echo "WINDOWS_CERTIFICATE_PASSWORD=${WINDOWS_CERTIFICATE_PASSWORD:-}"
-          } >> "$GITHUB_ENV"
+      # Sprint 5.7.1 hotfix #19: previously the workflow
+      # injected `APPLE_CERTIFICATE` / `WINDOWS_CERTIFICATE` as
+      # env vars directly via `${{ secrets.X }}` — and when
+      # those secrets are NOT configured (which is the current
+      # state of the repo, `gh secret list` reports total_count
+      # 0), the empty string still flows through to tauri-action.
+      # tauri-bundler then interprets `var_os("APPLE_CERTIFICATE")
+      # == Some("")` as "the user wants to sign, give them an
+      # empty cert" and runs `security import cert.p12 -P ''`
+      # which fails with `SecKeychainItemImport: One or more
+      # parameters were not valid`.
+      #
+      # The fix: simply DON'T list the cert secrets in the
+      # tauri-action env block. If the secrets are not set
+      # (current state), they're not in the env at all, and
+      # tauri-action's `var_os` returns None → sign path
+      # skipped → unsigned build is produced. To re-enable
+      # signing later, add the env block back when secrets
+      # are actually configured.
 
       - name: Tauri · bundle via tauri-action
-        # Sprint 5.6.29 hotfix #17: see the "Sanitize Apple/Windows
-        # cert env vars" pre-step above — it unsets the cert env vars
-        # entirely when the password is empty, so tauri-bundler's
-        # `var_os("APPLE_CERTIFICATE")` returns None and the import
-        # path is skipped.
         uses: tauri-apps/tauri-action@v0
         env:
           # tauri-action needs GITHUB_TOKEN to create the draft release
           # and upload bundled assets. Auto-provided by GitHub Actions
           # when the job has `permissions: contents: write`.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signing secrets (configured in repo Settings → Secrets).
-          # If unset, the action produces an unsigned build (still OK
-          # for CI sanity checks, but won't ship to end users).
+          # Tauri updater signing key (independent of Apple/Windows
+          # codesign). If unset, tauri-action still bundles — it
+          # just skips the updater JSON sidecar. This is the only
+          # signing-related env var the current repo state needs.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS codesign + notarise (see hotfix #17 comment above).
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Windows codesign (only inject when password is present).
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          # NOTE: APPLE_*, WINDOWS_* cert secrets are intentionally
+          # NOT in this env block (hotfix #19). See the comment
+          # above. Add them back here when real certs are
+          # configured in repo Settings → Secrets.
         with:
           # Sprint 5.6.28 hotfix #4: explicitly point at the
           # actual Tauri project dir. Without this tauri-cli
