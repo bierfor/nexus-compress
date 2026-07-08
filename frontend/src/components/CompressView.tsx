@@ -55,6 +55,33 @@ interface ProgressEvent {
   files_total: number;
   bytes_done: number;
   bytes_total: number;
+  // Sprint 5.7.2 hotfix #23: real-time estimates from the Rust
+  // `ProgressEvent::with_estimates(start)` builder. Frontend now
+  // can render ETA / throughput / elapsed alongside the
+  // percentage bar.
+  elapsed_ms: number;
+  bytes_per_sec: number;
+  eta_ms: number;
+}
+
+/// Format milliseconds as `m:ss` (or `h:mm:ss` if ≥ 1 hour).
+/// Frontend equivalent of the Rust `format_duration` helper.
+function formatMs(ms: number): string {
+  if (ms < 0 || !Number.isFinite(ms)) return "—";
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/// Format bytes/sec as a human-friendly rate (MB/s, KB/s, B/s).
+function formatRate(bps: number): string {
+  if (!Number.isFinite(bps) || bps <= 0) return "—";
+  if (bps >= 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} MB/s`;
+  if (bps >= 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+  return `${Math.round(bps)} B/s`;
 }
 
 type Mode = "rapido" | "balanceado" | "ultra";
@@ -153,6 +180,9 @@ export function CompressView({
             files_total: Number(p.files_total ?? 1),
             bytes_done: Number(p.bytes_done ?? 0),
             bytes_total: Number(p.bytes_total ?? 0),
+            elapsed_ms: Number(p.elapsed_ms ?? 0),
+            bytes_per_sec: Number(p.bytes_per_sec ?? 0),
+            eta_ms: Number(p.eta_ms ?? 0),
           });
         });
       } catch (e) {
@@ -582,6 +612,22 @@ export function CompressView({
               </span>
               <span>
                 {prettyBytes(progress.bytes_done)} / {prettyBytes(progress.bytes_total)}
+              </span>
+            </div>
+            {/* Sprint 5.7.2 hotfix #23: real-time ETA / throughput /
+                elapsed (the new ProgressEvent fields). The backend
+                sends these on every emit, and the warm-up window
+                (<100 ms) sends zeros — guarded by Number.isFinite
+                so we don't display "0:00 / 0 MB/s / —" before the
+                first codec chunk lands. */}
+            <div className="flex items-center justify-between text-[10.5px] text-zinc-500 tabular-nums mt-1">
+              <span>
+                {progress.elapsed_ms > 0 ? formatMs(progress.elapsed_ms) : "—"}
+                <span className="text-zinc-700 mx-1.5">·</span>
+                {progress.bytes_per_sec > 0 ? formatRate(progress.bytes_per_sec) : "—"}
+              </span>
+              <span>
+                {progress.eta_ms > 0 ? `ETA ${formatMs(progress.eta_ms)}` : "ETA —"}
               </span>
             </div>
           </div>
