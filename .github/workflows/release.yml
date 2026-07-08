@@ -180,16 +180,12 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Tauri · bundle via tauri-action
-        # Sprint 5.6.29 hotfix #17: use a small pre-step to only
-        # inject the Apple cert when its password is also present.
-        # Tauri's bundler uses `std::env::var_os("APPLE_CERTIFICATE")`
-        # which returns `Some("")` for empty strings — NOT `None` —
-        # so the JS `&&` workaround only evaluates to an empty
-        # string in YAML, but the env var is still SET on the
-        # process, and the bundler enters the `import` path and
-        # crashes at `security import` with empty password.
-        # The fix is to fully omit the env var (not just empty it)
-        # when the password is missing, so `var_os` returns `None`.
+        # Sprint 5.6.29 hotfix #17: see the "Sanitize Apple/Windows
+        # cert env vars" pre-step above — it unsets the cert env vars
+        # entirely when the password is empty, so tauri-bundler's
+        # `var_os("APPLE_CERTIFICATE")` returns None and the import
+        # path is skipped.
+        uses: tauri-apps/tauri-action@v0
         env:
           # tauri-action needs GITHUB_TOKEN to create the draft release
           # and upload bundled assets. Auto-provided by GitHub Actions
