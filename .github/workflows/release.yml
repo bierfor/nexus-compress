@@ -197,11 +197,19 @@ jobs:
 
       - name: cargo build --release
         run: |
-          # Sprint 5.6.28 hotfix: nexus lives in the engine
-          # crate (repo root), p2p_smoke lives in the Tauri
-          # crate (src-tauri). Run them separately so each
-          # picks the right Cargo.toml.
-          cargo build --release --target ${{ matrix.target }} --bin nexus
+          # Sprint 5.6.28 hotfix #5: under a Cargo workspace
+          # (which we added in #3 to fix tauri-cli's
+          # "default-run" lookup), plain `cargo build --bin nexus`
+          # is supposed to compile only the engine binary but
+          # cargo also pulls in the src-tauri crate's
+          # dependency tree, including gtk-sys / gdk-sys which
+          # requires libgdk-3.0-dev on Linux runners.
+          #
+          # Fix: use --package nexus-compress to restrict
+          # compilation strictly to the engine crate. This
+          # stops src-tauri's GTK dependency from being built
+          # here (it's built in the build-gui job instead).
+          cargo build --release --package nexus-compress --target ${{ matrix.target }} --bin nexus
           (cd src-tauri && cargo build --release --target ${{ matrix.target }} --bin p2p_smoke)
 
       - name: Test (where Linux is fastest)
