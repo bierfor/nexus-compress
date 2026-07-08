@@ -910,6 +910,18 @@ pub fn decompress_parallel(input: &[u8]) -> Result<Vec<u8>, String> {
     let total_size = u64::from_le_bytes(input[8..16].try_into().unwrap());
     let _super_block_size = u32::from_le_bytes(input[16..20].try_into().unwrap());
 
+    // Sprint 5.7.1 stress-fix: a malicious or corrupt header could
+    // claim e.g. 4 billion blocks in a 50-byte file. Each block
+    // needs ≥ 4 bytes (the length prefix), so the file must hold
+    // at least `block_count * 4 + 20` bytes. Reject otherwise.
+    if block_count > (input.len() - 20) / 4 {
+        return Err(format!(
+            "parallel header claims {} blocks but the file has only {} bytes of payload",
+            block_count,
+            input.len().saturating_sub(20)
+        ));
+    }
+
     let mut out = Vec::with_capacity(total_size as usize);
     let mut cursor = 20usize;
     for i in 0..block_count {
@@ -928,6 +940,11 @@ pub fn decompress_parallel(input: &[u8]) -> Result<Vec<u8>, String> {
             ));
         }
         let block = &input[cursor..cursor + block_len];
+        // If this block is corrupt, `decompress` returns Err and
+        // we propagate immediately. Because decode is SEQUENTIAL
+        // (not parallel), there are no hanging rayon workers to
+        // clean up. The `?` short-circuits and `out` is dropped
+        // by the caller — no memory leak.
         let decoded = decompress(block).map_err(|e| {
             format!("parallel block {} of {}: {}", i, block_count, e)
         })?;
