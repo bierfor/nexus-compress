@@ -479,6 +479,14 @@ fn read_u32(buf: &[u8], off: &mut usize) -> u32 {
 }
 
 pub fn decompress(input: &[u8]) -> Result<Vec<u8>, String> {
+    // Sprint 5.7.1: detect the parallel-compressed format ("NXP\0"
+    // magic) and route to the parallel decoder. Sequential
+    // compressed files still start with the "NXS\0" magic and go
+    // through the original code path below.
+    if input.len() >= 4 && &input[..4] == crate::format::PARALLEL_MAGIC {
+        return decompress_parallel(input);
+    }
+
     let mut cursor = Cursor::new(input);
     let header =
         NexusHeader::read(&mut cursor).map_err(|e| format!("invalid .nexus header: {:?}", e))?;
@@ -862,4 +870,69 @@ mod tests {
         assert_eq!(d.len(), data.len(), "decoded length mismatch");
         assert_eq!(d, data, "6000-block dedup roundtrip mismatch");
     }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Parallel decoder (Sprint 5.7.1)
+// ─────────────────────────────────────────────────────────────
+//
+// Reads a parallel-compressed stream produced by
+// `codec::parallel::compress_parallel`. The format is:
+//
+//   [0..4]    PARALLEL_MAGIC = "NXP\0"
+//   [4..8]    block_count   (u32 LE)
+//   [8..16]   total_size    (u64 LE)
+//   [16..20]  super_block_size (u32 LE)
+//   for each block:
+//     [0..4]  block_len (u32 LE)
+//     [4..N]  block bytes (full sequential::compress output)
+//
+// We delegate to `decompress` for each block. The sequential
+// decoder reads its own NexusHeader at the start of each block,
+// so the only thing the parallel decoder needs to do is split
+// the stream and concatenate the per-block outputs.
+
+pub fn decompress_parallel(input: &[u8]) -> Result<Vec<u8>, String> {
+    if input.len() < 20 {
+        return Err(format!(
+            "parallel header truncated: got {} bytes, need ≥ 20",
+            input.len()
+        ));
+    }
+    if &input[..4] != crate::format::PARALLEL_MAGIC {
+        return Err(format!(
+            "not a parallel stream (magic = {:?}, expected {:?})",
+            &input[..4],
+            crate::format::PARALLEL_MAGIC
+        ));
+    }
+    let block_count = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
+    let total_size = u64::from_le_bytes(input[8..16].try_into().unwrap());
+    let _super_block_size = u32::from_le_bytes(input[16..20].try_into().unwrap());
+
+    let mut out = Vec::with_capacity(total_size as usize);
+    let mut cursor = 20usize;
+    for i in 0..block_count {
+        if cursor + 4 > input.len() {
+            return Err(format!(
+                "parallel block {} of {} truncated: cannot read length prefix at offset {}",
+                i, block_count, cursor
+            ));
+        }
+        let block_len = u32::from_le_bytes(input[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        if cursor + block_len > input.len() {
+            return Err(format!(
+                "parallel block {} of {} truncated: block_len={} at offset {}, file has {} bytes left",
+                i, block_count, block_len, cursor, input.len() - cursor
+            ));
+        }
+        let block = &input[cursor..cursor + block_len];
+        let decoded = decompress(block).map_err(|e| {
+            format!("parallel block {} of {}: {}", i, block_count, e)
+        })?;
+        out.extend_from_slice(&decoded);
+        cursor += block_len;
+    }
+    Ok(out)
 }

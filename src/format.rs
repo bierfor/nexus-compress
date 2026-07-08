@@ -79,6 +79,13 @@ impl BlockType {
 
 pub const MAGIC: &[u8; 4] = b"NXS\x00";
 
+/// Sprint 5.7.1: magic prefix for a parallel-compressed stream.
+/// A parallel file is a ParallelHeader (with this magic) followed
+/// by N concatenated sequential-compressed blocks. The decoder
+/// detects the magic, reads the block count, then iterates and
+/// decodes each block with the existing sequential decoder.
+pub const PARALLEL_MAGIC: &[u8; 4] = b"NXP\x00";
+
 /// Legacy version (v0) — used by files written before Format v2 cleanup.
 pub const VERSION_V0: u8 = 0;
 

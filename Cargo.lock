@@ -3034,6 +3034,7 @@ dependencies = [
  "fs2",
  "libc",
  "rans",
+ "rayon",
  "serde",
  "serde_json",
  "swc_core",

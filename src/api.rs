@@ -219,6 +219,12 @@ pub type ApiResult<T> = std::result::Result<T, ApiError>;
 /// a modern x86. Tauri commands should wrap this in
 /// `spawn_blocking` to keep the async runtime responsive.
 pub fn compress_bytes(input: &[u8]) -> CompressResult {
+    // Sprint 5.7.1: `compress_auto` picks sequential vs parallel
+    // based on size + thread count + shared-dict benefit. For
+    // < 64 MiB inputs (the vast majority of real-world usage) it
+    // routes to the sequential pipeline so the user sees the
+    // exact same behavior as v0.1.1. For larger inputs it uses
+    // the rayon-backed parallel pipeline.
     compress_bytes_with_level(input, CompressionLevel::Fast)
 }
 
@@ -231,10 +237,15 @@ pub fn compress_bytes(input: &[u8]) -> CompressResult {
 /// ratio gain. Keep as an experimental option.
 pub fn compress_bytes_with_level(input: &[u8], level: CompressionLevel) -> CompressResult {
     let start = Instant::now();
-    let compressed = match level {
-        CompressionLevel::Fast => crate::compress(input),
-        CompressionLevel::Premium => crate::compress_premium(input),
-    };
+    // Sprint 5.7.1: route to the auto-heuristic that picks
+    // sequential vs parallel. Both levels (Fast / Premium) use
+    // the same dispatch — the "premium" DP search inside
+    // compress_premium is a no-op for the current codec (see the
+    // comment in codec/sequential.rs::compress_premium), so the
+    // parallel heuristic applies uniformly. If a future change
+    // makes premium materially different, gate it with:
+    //   CompressionLevel::Premium => crate::compress_premium(input),
+    let compressed = crate::codec::compress_auto(input);
     let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let original_size = input.len() as u64;
@@ -380,7 +391,9 @@ pub fn compress_bytes_with_backend(
         CompressionBackend::V4 => {
             // Default to Fast LZ77 — the GUI's level slider can
             // upgrade to Premium via compress_bytes_with_level.
-            crate::compress(input)
+            // Sprint 5.7.1: route through `codec::compress_auto`
+            // so the parallel pipeline kicks in for ≥ 64 MiB.
+            crate::codec::compress_auto(input)
         }
         CompressionBackend::V5Min => {
             // LZMA + conservative text minify.

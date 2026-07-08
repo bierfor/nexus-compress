@@ -53,6 +53,12 @@ fs2 = { version = "0.4", optional = true }
 # Already a transitive dep via sysinfo; pinning 0.2 explicitly so
 # the FFI signatures match the unix crate family.
 libc = "0.2"
+# Sprint 5.7.1: PR #2 — parallel codec via rayon. The `rayon-core`
+# thread pool is used to compress multiple super-blocks in
+# parallel. We don't need `rayon` itself for the high-level API
+# (par_iter is enough), but pulling the full crate is the path
+# of least resistance and adds ~50 KB to the binary.
+rayon = "1.10"
 # v5 LZMA backend. xz2 wraps liblzma (compiled from C source via
 # xz-sys), battle-tested by every Linux distro and used by `xz`.
 # Pure-Rust alternative would be `xz = "0.4"`.
