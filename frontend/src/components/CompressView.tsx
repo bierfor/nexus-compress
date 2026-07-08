@@ -16,7 +16,15 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { type View } from "@/components/NeoTopBar";
 import { useLocale } from "@/components/LocaleProvider";
-import { FolderOpen, Plus, Archive, CheckCircle2, AlertCircle } from "lucide-react";
+import {
+  FolderOpen,
+  Plus,
+  Archive,
+  CheckCircle2,
+  AlertCircle,
+  File as FileIcon,
+  FilePlus,
+} from "lucide-react";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -210,19 +218,45 @@ export function CompressView({
     };
   }, [acceptPaths]);
 
-  const onBrowse = useCallback(async () => {
+  // Sprint 5.6.29 hotfix #19: the previous call passed
+  //   `filters: [{ name: "All files", extensions: ["*"] }]`
+  // which on macOS restricts the NSOpenPanel to ONLY files
+  // matching no extension (and sometimes appends literal ".*"
+  // to the chosen filename). For a generic compressor we want
+  // to accept **any** file (zip, jpg, png, txt, …) and **any**
+  // folder. We expose both via two buttons:
+  //   - "Archivos" → multi-select file open dialog with NO filter
+  //   - "Carpetas" → directory picker
+  const onBrowseFiles = useCallback(async () => {
     if (!isTauri) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const result = await open({
         multiple: true,
         directory: false,
-        filters: [{ name: "All files", extensions: ["*"] }],
+        // No `filters` → the native panel shows ALL files and
+        // accepts any extension. This is what users expect for
+        // a generic compressor.
       });
       if (Array.isArray(result)) acceptPaths(result);
       else if (typeof result === "string") acceptPaths([result]);
     } catch (e) {
       console.error("file picker:", e);
+    }
+  }, [acceptPaths]);
+
+  const onBrowseFolders = useCallback(async () => {
+    if (!isTauri) return;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const result = await open({
+        multiple: true,
+        directory: true,
+      });
+      if (Array.isArray(result)) acceptPaths(result);
+      else if (typeof result === "string") acceptPaths([result]);
+    } catch (e) {
+      console.error("folder picker:", e);
     }
   }, [acceptPaths]);
 
@@ -376,21 +410,37 @@ export function CompressView({
               <p className="text-zinc-500 text-[13px] mb-6">
                 {t("compress.drop.hint")}
               </p>
-              <div className="flex items-center gap-2 max-w-xl mx-auto">
+              <div className="flex items-center gap-2 max-w-2xl mx-auto flex-wrap">
                 <input
                   type="text"
                   value={pathInput}
                   onChange={(e) => setPathInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && onAddPath()}
                   placeholder={t("compress.placeholder")}
-                  className="input flex-1"
+                  className="input flex-1 min-w-[200px]"
                 />
+                {/* Archivos — multi-select file picker with no
+                    extension filter (the previous `["*"]` filter
+                    was restricting on macOS). */}
                 <button
-                  onClick={onBrowse}
+                  onClick={onBrowseFiles}
                   className="btn btn-ghost"
+                  title={t("compress.browse.files")}
+                >
+                  <FilePlus size={14} />
+                  {t("compress.browse.files")}
+                </button>
+                {/* Carpetas — multi-select directory picker.
+                    The pipeline (`compress_target_cmd`) walks
+                    folders recursively, so any directory just
+                    works. */}
+                <button
+                  onClick={onBrowseFolders}
+                  className="btn btn-ghost"
+                  title={t("compress.browse.folders")}
                 >
                   <FolderOpen size={14} />
-                  {t("compress.browse")}
+                  {t("compress.browse.folders")}
                 </button>
                 <button
                   onClick={onAddPath}

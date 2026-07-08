@@ -241,14 +241,16 @@ export function DecompressView({
     if (!isTauri) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
+      // Sprint 5.6.29 hotfix #19: the previous filter list was
+      // restricting to .tar / .nxs* / .lz / etc. AND had the broken
+      // `extensions: ["*"]` last entry. For a generic archiver
+      // browser we drop the filter entirely so users can pick
+      // ANY file. The backend (`peek_archive_target_cmd`) detects
+      // the format from the magic bytes, not the extension, so
+      // opening "archive.zip" or "backup" (no extension) both work.
       const result = await open({
         multiple: false,
         directory: false,
-        filters: [
-          { name: "Archive (WinRAR-style browse)", extensions: ["tar", "nxs", "nxs6"] },
-          { name: "Nexus legacy", extensions: ["lz", "nxar", "nxr"] },
-          { name: "All files", extensions: ["*"] },
-        ],
       });
       if (typeof result === "string") acceptPath(result);
     } catch (e) {
