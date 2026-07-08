@@ -253,7 +253,13 @@ impl CompressionEngine for LzmaEngine {
         out.push(self.format_byte()); // tag
                                       // xz2's stream::write takes a compression level. The API
                                       // also takes an `xz::Write` writer — we use Vec<u8>.
-        let mut writer = xz2::write::XzEncoder::new(&mut out, self.level);
+                                      // Sprint 5.7 hotfix #21: build a stream via
+                                      // `ram::lzma_stream_for_requested_preset` so the LZMA
+                                      // dict size is auto-clamped to whatever the machine can
+                                      // actually afford (no swap on weak laptops).
+        let stream = crate::ram::lzma_stream_for_requested_preset(self.level)
+            .expect("lzma_stream_for_requested_preset: invalid preset");
+        let mut writer = xz2::write::XzEncoder::new_stream(&mut out, stream);
         use std::io::Write;
         if writer.write_all(input).is_err() {
             // Should be impossible (Vec write never fails), but

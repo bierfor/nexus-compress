@@ -25,6 +25,7 @@ pub mod format;
 pub mod lz77;
 pub mod minify;
 pub mod nxar;
+pub mod ram;
 pub mod rans_v4;
 pub mod rle;
 pub mod solid_archive;

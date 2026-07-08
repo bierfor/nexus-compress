@@ -172,7 +172,11 @@ where
     // Step 2: LZMA-compress the solid stream.
     let mut lzma_compressed: Vec<u8> = Vec::new();
     {
-        let mut enc = XzEncoder::new(&mut lzma_compressed, lzma_level);
+        // Sprint 5.7 hotfix #21: auto-tune the LZMA dict size to
+        // whatever the machine can actually afford (no swap).
+        let stream = crate::ram::lzma_stream_for_requested_preset(lzma_level)
+            .map_err(|e| format!("solid LZMA stream: {}", e))?;
+        let mut enc = XzEncoder::new_stream(&mut lzma_compressed, stream);
         enc.write_all(&solid_uncompressed)
             .map_err(|e| format!("solid LZMA write failed: {}", e))?;
         enc.finish()
