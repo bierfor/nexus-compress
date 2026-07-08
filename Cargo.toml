@@ -39,6 +39,20 @@ serde = { version = "1", features = ["derive"] }
 # start — sysinfo's System::available_memory() does exactly that on
 # macOS / Windows / Linux without shelling out to `sysctl`/`wmic`.
 sysinfo = "0.32"
+# Sprint 5.7.1: cross-platform FS trait in src/fs.rs.
+# - filetime: portable mtime setter (no std equivalent)
+# - xattr: Unix extended-attribute read/write (optional feature
+#   gate; skipping on macOS where the API differs slightly is
+#   acceptable in v0.1.2)
+# - fs2: Windows disk-free-space query (optional feature gate;
+#   defaults to "unknown" if not enabled)
+filetime = "0.2"
+xattr = { version = "1", optional = true }
+fs2 = { version = "0.4", optional = true }
+# Sprint 5.7.1: libc for the statvfs + chown FFI in UnixFs.
+# Already a transitive dep via sysinfo; pinning 0.2 explicitly so
+# the FFI signatures match the unix crate family.
+libc = "0.2"
 # v5 LZMA backend. xz2 wraps liblzma (compiled from C source via
 # xz-sys), battle-tested by every Linux distro and used by `xz`.
 # Pure-Rust alternative would be `xz = "0.4"`.
@@ -54,7 +68,24 @@ swc_core = { version = "72", features = ["ecma_parser", "ecma_codegen", "ecma_tr
 
 [dev-dependencies]
 serde_json = "1"
+# Sprint 5.7.1: re-add tempfile. The dep was lost at some point
+# (probably during a previous merge conflict) but tests in
+# src/nxar.rs still use `tempfile::TempDir`. Without this the
+# test target fails to compile even though the lib target builds
+# clean. Adding it back is a no-op for the runtime (dev-dep only).
 tempfile = "3"
+
+# Sprint 5.7.1: optional cross-platform FS support. Defaults
+# match the production runtime (xattr on Unix, fs2 on Windows).
+# CI can disable these individually via `--no-default-features`
+# to test the `StdFs` fallback path.
+[features]
+default = ["fs-xattr", "fs-disk-free"]
+# Linux + macOS extended attributes (preserves quarantine / SELinux
+# labels on archive round-trip).
+fs-xattr = ["dep:xattr"]
+# Windows disk-free-space query (faster than statvfs equivalent).
+fs-disk-free = ["dep:fs2"]
 
 [[bin]]
 name = "nexus"
