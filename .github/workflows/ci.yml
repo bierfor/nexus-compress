@@ -41,7 +41,7 @@ jobs:
             ~/.cargo/git
             src-tauri/target
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/src-tauri/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/src-tauri/Cargo.toml', '**/src-tauri/tauri.conf.json', '**/src-tauri/icons/**') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -136,7 +136,7 @@ jobs:
           path: |
             ~/Library/Caches/cargo
             src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/src-tauri/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/src-tauri/Cargo.toml', '**/src-tauri/tauri.conf.json', '**/src-tauri/icons/**') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -182,7 +182,7 @@ jobs:
           path: |
             C:\Users\runneradmin\.cargo\registry
             src-tauri\target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/src-tauri/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/src-tauri/Cargo.toml', '**/src-tauri/tauri.conf.json', '**/src-tauri/icons/**') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -230,7 +230,7 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock', '**/src-tauri/tauri.conf.json', '**/src-tauri/icons/**') }}
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check

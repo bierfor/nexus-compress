@@ -77,7 +77,16 @@ jobs:
             src-tauri/target
             C:\Users\runneradmin\.cargo\registry
             src-tauri\target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock', '**/src-tauri/Cargo.toml') }}
+          # Sprint 5.6.28 hotfix #11: include src-tauri/tauri.conf.json
+          # + src-tauri/icons/ in the cache key. tauri-build
+          # watches tauri.conf.json for changes but cargo's
+          # cache key doesn't track that file by default —
+          # only Cargo.lock + Cargo.toml. Without this, when
+          # you add icons (e.g. icon.ico for Windows), the
+          # cache hits the OLD build-script output that says
+          # "icons/icon.ico not found" and the build fails
+          # even though the file exists in HEAD.
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock', '**/src-tauri/Cargo.toml', '**/src-tauri/tauri.conf.json', '**/src-tauri/icons/**') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
