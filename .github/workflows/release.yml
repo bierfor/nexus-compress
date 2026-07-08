@@ -151,7 +151,12 @@ jobs:
       # entirely is to UNSET the env var when the password is missing.
       # Same for WINDOWS_CERTIFICATE.
       - name: Sanitize Apple/Windows cert env vars
-        if: runner.os == 'macOS' || runner.os == 'Windows'
+        # runner.os is always lowercase: "macos" (NOT "macOS"),
+        # "windows", "linux". Using capital-S "macOS" silently
+        # skips this step on every macOS runner — which is why
+        # the codesign cert with empty password was being passed
+        # to `security import` in v0.1.1 release #28946151096.
+        if: runner.os == 'macos' || runner.os == 'windows'
         shell: bash
         run: |
           # If APPLE_CERTIFICATE_PASSWORD is unset/empty but the cert
