@@ -68,6 +68,8 @@ libc = "0.2"
 aes-gcm = "0.10"
 aead = "0.5"
 argon2 = "0.5"
+getrandom = "0.2"
+thiserror = "1"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 # v5 LZMA backend. xz2 wraps liblzma (compiled from C source via
 # xz-sys), battle-tested by every Linux distro and used by `xz`.
