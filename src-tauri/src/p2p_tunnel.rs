@@ -60,6 +60,16 @@ mod auth;
 //      `p2p_tunnel::p2p_config` (the re-exported public mod).
 #[path = "p2p_config.rs"]
 pub mod p2p_config;
+
+// Sprint 5.6.28: this module is `#[path]`-included by multiple bin
+// targets (nexus-rar CLI, p2p_smoke test binary, e2e_v3). Each
+// target sees only the code paths it imports, so cross-bin
+// helpers show up as "unused" from any single bin's perspective.
+// We accept the noisy clippy output for now (see CI for the
+// reasoning — clippy does NOT use `-D warnings` because of this).
+// Per-function `#[allow(dead_code)]` annotations can be added as
+// we touch each function.
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1270,7 +1280,10 @@ pub async fn start_direct_sender(
         let parent = file_path
             .parent()
             .ok_or_else(|| "directory has no parent path".to_string())?;
-        let tar_status = std::process::Command::new("/usr/bin/tar")
+        // Sprint 5.6.28: bare `tar` resolves via $PATH on all
+        // platforms (Linux: /usr/bin/tar or /bin/tar; macOS:
+        // BSD tar; Windows: System32\tar.exe since Win10 1803).
+        let tar_status = std::process::Command::new("tar")
             .arg("-cf")
             .arg(&temp_path)
             .arg("-C")
@@ -1854,7 +1867,7 @@ pub async fn start_sender(
         let parent = file_path
             .parent()
             .ok_or_else(|| "directory has no parent path".to_string())?;
-        let tar_status = std::process::Command::new("/usr/bin/tar")
+        let tar_status = std::process::Command::new("tar")
             .arg("-cpf")
             .arg(&temp_path)
             .arg("-C")

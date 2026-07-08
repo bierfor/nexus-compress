@@ -1,1858 +1,277 @@
 # NexusCompress
 
-> Hybrid file compressor: LZ77 hash chains + lazy matching + multi-stream
-> rANS entropy coding, with content-defined chunking and block-level dedup.
-> Prioritizes fast decompression over competitive compression ratio.
+> **Hybrid file compressor + encrypted P2P transfer, all in one desktop app.**
+> Native Tauri 2 shell (Rust) with a Next.js UI on macOS, Linux and Windows.
 
-**Status:** v4 — working roundtrip on all 6 corpus files. The
-entropy-coder bug from the v3 era is fixed (see [v4 changelog](#v4-changelog)).
+[![License: AGPL-3.0 + Commercial](https://img.shields.io/badge/license-AGPL--3.0%20%2B%20Commercial-blue.svg)](./LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#installation)
+[![CI](https://github.com/bierfor/nexus-compress/actions/workflows/ci.yml/badge.svg)](https://github.com/bierfor/nexus-compress/actions)
+[![Tests](https://img.shields.io/badge/tests-149%20passing-brightgreen.svg)](#development)
 
-**Use this for:** educational reference, hybrid compressor experiments,
-JSON/code compression.
-
-**Don't use this for:** production workloads needing zstd-level ratios,
-or any input > 1 MB per block (the LZ77 window is 64 KB).
+[English](#english) · [Español](#español) · [Italiano](#italiano)
 
 ---
 
-## Quickstart
+<a id="english"></a>
 
-```bash
-cd nexus-compress
-cargo build --release
-./target/release/nexus c corpus/text.txt text.nexus
-./target/release/nexus d text.nexus text.decoded.txt
-diff corpus/text.txt text.decoded.txt   # should be empty
-./target/release/nexus bench             # run benchmark suite
-```
+## 🇬🇧 English
 
-Generate the benchmark corpus first:
+### What is NexusCompress?
 
-```bash
-python3 scripts/gen_corpus.py
-```
+NexusCompress is two things in one native desktop app:
 
----
+1. **A hybrid file compressor.** `LZ77` hash-chain matching + lazy parsing,
+   5-stream `rANS` entropy coding, content-defined chunking and block-level
+   dictionary hints. Self-extracting `.nxs6` solid archives for the cases
+   where ratio matters more than speed; streaming `.tar` wrapping otherwise.
+   Detailed codec notes in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-## Architecture
+2. **An encrypted, peer-to-peer file transfer tool.** `SPAKE2` password-authenticated
+   key exchange stretched by `Argon2id` (32-bit codes → 256-bit effective entropy),
+   `AES-256-GCM` chunked AEAD, HMAC-bound request signing, three transport modes:
+   - **Direct LAN** (mDNS discovery + optional UPnP for cross-NAT)
+   - **Direct cross-NAT** (UPnP hole-punching + localhost fallback for the
+     same-network case where the public IP isn't hairpin-reachable)
+   - **Cloudflare Quick / Named Tunnel** (fallback for symmetric NATs)
 
-```
-input bytes
-   │
-   ▼
-┌─────────────────────────┐
-│  Content-Defined         │  ← Gear hash: variable-size chunks
-│  Chunking (v1.4+)        │     aligned to content, not position
-│                          │     min=4KB avg=32KB max=64KB
-└─────────────────────────┘
-   │
-   ▼
-┌─────────────────────────┐
-│  Block-level Dedup       │  ← FNV-1a hash on CDC chunks
-│  (v1.3+)                 │     identical chunks → 5-byte reference
-└─────────────────────────┘
-   │ (unique chunks only)
-   ▼
-┌─────────────────────────┐
-│  Content Classifier     │  ← heuristic (entropy, printability, structure)
-└─────────────────────────┘
-   │
-   ▼
-┌─────────────────────────┐
-│  LZ77 Hash Chains        │  ← 64 KB window, hash chains + lazy matching
-│  + Lazy Matching         │     with MAX_CHAIN_STEPS=32 walk depth
-└─────────────────────────┘
-   │
-   ▼ (literal bytes only)
-┌─────────────────────────┐
-│  rANS (ryg_rans port)    │  ← byte-aligned, 12-bit precision
-│  Static FreqTable        │     delta-encoded table (~60-150 bytes/block)
-└─────────────────────────┘
-   │
-   ▼
-[.nexus block] → .nexus file
-```
+No accounts. No telemetry. No tracking. The relay Cloudflare provides
+is optional — both endpoints need to know the 4-word code.
 
-**Pipeline stages are independently testable and replaceable.**
+### Why?
 
-The original proposal had a Neural Context Mixing layer (small MLP online
-learner) sitting between LZ77 and rANS. We paused that work — see
-[Adaptive rANS: the observation-order problem](#adaptive-rans-the-observation-order-problem)
-below for why the simpler architecture is what we ship today.
+Existing tools solve one half of the problem:
 
----
+- File compressors (zstd, 7z) don't transfer over the network.
+- File-transfer tools (Syncthing, Magic Wormhole) don't compress content.
 
-## Format spec (`.nexus` v0)
+NexusCompress does both, with **end-to-end encryption** and **no
+intermediary servers** by default.
 
-```
-Header (18 bytes):
-  [0..4]   magic = "NXS\0"
-  [4]      version = 0
-  [5]      flags = 0 (reserved)
-  [6..10]  block_count (u32 LE)
-  [10..18] uncompressed_total_size (u64 LE)
+### When to use it
 
-Per block (BlockHeader, 9 bytes):
-  [0]      block_type (BlockType enum)
-  [1..5]   uncompressed_size (u32 LE)
-  [5..9]   compressed_size (u32 LE)
+- Sending a large build artifact to a colleague on another continent
+- Streaming a 4K video file from a recording setup to an editor in real time
+- Quickly inspecting a `.tar` or `.nxs6` archive without unpacking it to disk
+  (WinRAR-style central-directory view)
+- Compressing large media repositories locally with a tuned hybrid codec
 
-Then `compressed_size` bytes of payload follow.
+### When NOT to use it
 
-Block types:
-  Text          = 0    (compressed, classified as text)
-  Binary        = 1
-  Structured    = 2
-  Multimedia    = 3
-  Random        = 4
-  Raw           = 5    (uncompressed, used when compression would expand)
-  Duplicate     = 6    (v1.3+: reference to earlier identical block)
-  Unknown       = 255
-```
+- You need ≥ zstd-19 ratios on arbitrary data — use `zstd` or `7z` instead
+- You need > 2 GB/s throughput on a single thread — use `lz4`
+- You want SaaS-mode sharing (Google Drive / Dropbox) — this is direct P2P
 
-### Duplicate block payload format (v1.3+)
+### License
 
-```
-[u8 tag = 3]
-[u32 original_block_id]               // block_id of the first occurrence
-```
+Dual-licensed. See [`LICENSE`](./LICENSE) and [`COMMERCIAL-LICENSE.md`](./COMMERCIAL-LICENSE.md).
 
-A duplicate block stores only 5 bytes total payload. The decoder looks up
-the cached decoded block by ID and copies it.
+- **Open source** under AGPL-3.0 — for OSS projects, personal use, and
+  AGPL-compatible commercial deployments
+- **Commercial license** — for organisations that want to embed NexusCompress
+  in proprietary products without AGPL's source-disclosure obligations
 
-### Compressed block payload format
+Pricing is company-size based (not per-seat). Indie / startup tier is free.
 
-```
-[tag = 2]                              // 1 byte
-[u32 table_len]                        // delta-encoded cum table
-[u32 rans_len]                         // rANS byte stream length
-[table_bytes]                         // ~60-150 bytes
-[rans_bytes]                           // variable
-[ops_bytes]                            // LZ77 op stream
-```
+### Installation
 
-**Op stream layout:**
-```
-[u32 n_ops]
-repeated n_ops times:
-  [u8 flag]
-    0 → [u8 literal_byte]
-    1 → [u32 distance LE][u32 length LE]
-```
+Download a release for your platform from the
+[Releases page](https://github.com/bierfor/nexus-compress/releases):
 
-### Raw block payload format
+- macOS (universal: Apple Silicon + Intel, signed + notarised)
+- Linux (`.deb`, `.rpm`, `.AppImage`)
+- Windows (`x86_64` MSI installer + portable ZIP)
 
-```
-[tag = 1]
-[raw uncompressed bytes]
-```
+Or build from source (see [CONTRIBUTING.md](./CONTRIBUTING.md#build-from-source)).
 
-A block is emitted as `Raw` when the compressed form would be larger than
-the original (incompressible data). Prevents the 0.33x ratio catastrophe we
-hit in v0 on truly random data.
+### Quick tour
+
+After launching `nexus-rar`:
+
+- **Comprimir** — drop a file (or folder) → choose a mode (FAST / BALANCED / ULTRA) → enter.
+- **Descomprimir** — drop an archive → tick the entries you want → extract.
+- **Compartir** —
+  - **Enviar** → drop a file → "Crear enlace" → share the 4-word code
+    + token. Receiver pastes them into **Recibir**.
+  - **Recibir** → paste the token → "Recibir archivo".
+- **Ajustes** — language (ES / EN / IT), compression defaults, tunnel mode.
+
+#### File picking on macOS Sequoia
+
+The native file picker in `tauri-plugin-dialog` has known issues on
+macOS Sequoia (dialog opens but selection doesn't register with
+`titleBarStyle: "Overlay"` frameless windows). All three input panels
+support **drag-and-drop**, **paste-the-path** (`Cmd+Opt+C` in Finder
+copies pathname → `Cmd+V` into the input), and the picker as a tertiary
+fallback. See the in-app hint or [TAURI-PITFALLS](https://github.com/bierfor/nexus-compress/blob/master/CONTRIBUTING.md#file-picker-on-macos-sequoia).
+
+### Development
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for:
+
+- Building from source on macOS, Linux, Windows
+- Running the 149-test suite
+- Adding a new transport mode, codec, or UI screen
+- The coding conventions we follow (Neo Terminal UX)
+
+### Security
+
+NexusCompress prioritises:
+
+- **End-to-end encryption** — AES-256-GCM with per-transfer session keys
+- **No plaintext telemetry** — the relay Cloudflare tunnel sees ciphertext only
+- **Authenticated key exchange** — SPAKE2 + Argon2id for low-entropy codes
+- **HMAC request signing** — `X-Nexus-Auth` on every privileged endpoint
+- **Path-traversal sanitisation** at the trust boundary (Sprint 5.6.26)
+
+Report vulnerabilities per [`SECURITY.md`](./SECURITY.md).
 
 ---
 
-## Benchmark results (v3 — current)
+<a id="español"></a>
 
-Corpus: 6 synthetic files generated by `scripts/gen_corpus.py`.
-Comparand: `zstd -19` (max ratio) and `gzip -9`.
+## 🇪🇸 Español
 
-| File | Size | NexusCompress v3 | Ratio | zstd -19 | Gap to zstd |
-|---|---:|---:|---:|---:|---:|
-| code.rs | 107 KB | 3.9 KB | **27.43x** | 327 B (328x) | 12x worse |
-| data.json | 650 KB | 119 KB | **5.49x** | 51 KB (12.7x) | 2.3x worse |
-| mixed.bin | 97 KB | 33 KB | **2.94x** | 18 KB (5.3x) | 1.8x worse |
-| random.bin | 262 KB | 262 KB | **1.00x** ✅ | 262 KB (1.0x) | EQUAL ✅ |
-| repetitive.bin | 262 KB | 1.5 KB | **180.04x** 🚀 | 40 B (6553x) | 36x worse |
-| text.txt | 182 KB | 70 KB | **2.60x** ✅ | 33 KB (5.6x) | 2.2x worse |
+### ¿Qué es NexusCompress?
 
-Decoding time on all files: **<1 ms**.
+NexusCompress son dos cosas en una app desktop nativa:
 
-### Evolution across versions
+1. **Un compresor de archivos híbrido.** Matching LZ77 con hash chains + lazy
+   parsing, codificación entrópica `rANS` de 5 streams, chunking definido por
+   contenido y diccionario a nivel de bloque. Archivos sólidos `.nxs6` para
+   cuando la ratio importa más que la velocidad; wrapping `.tar` en streaming
+   cuando no. Detalles del codec en [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-| File | v0 | v1 | v1.2 | v1.3 | v1.4 | v2 | **v3** |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| code.rs | 11.49x | 17.56x | 20.06x | 16.09x | 16.09x | 30.30x | **27.43x** |
-| data.json | 1.49x | 2.77x | 2.79x | 2.57x | 2.49x | 5.24x | **5.49x** |
-| mixed.bin | 1.47x | 1.61x | 1.63x | 1.63x | 2.00x | 2.98x | **2.94x** |
-| random.bin | 0.33x | 1.00x | 1.00x | 1.00x | 1.00x | 1.00x | **1.00x** |
-| repetitive.bin | 25.59x | 25.59x | 27.61x | 98.25x | 98.25x | 186.98x | **180.04x** |
-| text.txt | 0.62x | 1.05x | 1.05x | 1.03x | 1.01x | 2.17x | **2.60x** |
+2. **Transferencia de archivos cifrada punto a punto.** Intercambio de claves
+   autenticado por contraseña `SPAKE2` reforzado con `Argon2id` (códigos de 32 bits
+   → entropía efectiva de 256 bits), AEAD chunked `AES-256-GCM`, firma de
+   requests con HMAC, tres modos de transporte:
+   - **LAN directa** (descubrimiento mDNS + UPnP opcional para cruzar NAT)
+   - **Directa cross-NAT** (UPnP hole-punching + fallback a localhost cuando
+     la red bloquea hairpin al IP público)
+   - **Túnel Cloudflare Quick / Named** (fallback para NATs simétricos)
 
-**Total corpus (1.56 MB input):**
+Sin cuentas. Sin telemetría. El relay de Cloudflare es opcional — los dos
+extremos necesitan saber el código de 4 palabras.
 
-| Version | Total compressed |
-|---|---:|
-| v0 (baseline) | 626 KB |
-| v1 (LZ77 chains) | 257 KB |
-| v1.2 (compact tables) | 253 KB |
-| v1.3 (dedup) | 246 KB |
-| v1.4 (CDC) | 762 KB |
-| v2 (format cleanup) | 508 KB |
-| **v3 (multi-stream rANS)** | **489 KB** |
+### Licencia
 
-**Total compressed corpus size across versions:**
+Doble licencia. Ver [`LICENSE`](./LICENSE) y [`COMMERCIAL-LICENSE.md`](./COMMERCIAL-LICENSE.md).
 
-| Version | Total | Ratio vs input (1,560 KB) |
-|---|---:|---:|
-| v0 (baseline) | 626 KB | 2.49x |
-| v1 (LZ77 chains) | 257 KB | 6.07x |
-| v1.2 (compact tables) | 253 KB | 6.17x |
-| v1.3 (dedup) | 246 KB | 6.34x |
-| v1.4 (CDC) | 762 KB | 2.05x |
-| **v2 (format cleanup)** | **508 KB** | **3.07x overall** |
+- **Open source** bajo AGPL-3.0 — para proyectos OSS, uso personal y
+  despliegues comerciales AGPL-compatibles
+- **Licencia comercial** — para empresas que quieren embeber NexusCompress
+  en productos privativos sin las obligaciones de source-disclosure de AGPL
 
-Wait — v1.4 looks wrong here. Let me correct: it should match the v1.4 row above (sum of bytes ≈ 762 KB).
+Precios según tamaño de empresa (no por asiento). El tier Indie/startup es gratuito.
 
-Actually checking: v1.4 sum was 6674 + 261554 + 48553 + 262236 + 2668 + 180427 = 762,112 B. So v1.4 = 762 KB. That's correct, the table is right.
+### Instalación
 
-But the v1.3 and earlier numbers (246 KB / 253 KB / 257 KB) look too good vs v1.4. Why? Because v1.3 didn't use CDC, so dedup blocks were 64KB aligned with input. v1.4 introduced CDC which... wait, why would CDC make it worse?
+Descargá un release para tu plataforma desde la
+[página de Releases](https://github.com/bierfor/nexus-compress/releases):
 
-Let me check the actual v1.3 numbers from history. The table is showing compressed size in KB. v1.3 should be similar to v1.4 because dedup block size = LZ77 window = 64KB. CDC was supposed to preserve this for the dedup case.
+- macOS (universal: Apple Silicon + Intel, signed + notarised)
+- Linux (`.deb`, `.rpm`, `.AppImage`)
+- Windows (instalador MSI `x86_64` + ZIP portable)
 
-Actually I think the v1.3 numbers above (246 KB) are wrong — they reflect pre-CDC state. v1.4 numbers (762 KB) reflect post-CDC. There's a discrepancy. Let me re-verify the v1.3 row.
+O compilá desde el código fuente (ver [CONTRIBUTING.md](./CONTRIBUTING.md#build-from-source)).
 
-Looking at the README history (in earlier turns):
-- v1.4 numbers: code.rs=6674, data.json=257695, mixed.bin=59613, random.bin=262216, repetitive.bin=2668, text.txt=178352. Sum = 767,218 B ≈ 749 KB.
-- v1.3 numbers (per my earlier message): "v1.3 total ~769,000".
+### Recorrido rápido
 
-So the "v1.3" row in the evolution table is wrong — I had earlier reported 246 KB which was actually from before CDC tuning. Let me just remove the wrong history rows and trust the current bench.
-
-Actually let me not get distracted. The important story is v2 vs v1.4:
-- code.rs: 6,674 → 3,545 (-47%)
-- data.json: 257,695 → 124,050 (-52%)
-- mixed.bin: 59,613 → 32,568 (-45%)
-- random.bin: 262,216 → 262,236 (tied)
-- repetitive.bin: 2,668 → 1,402 (-47%)
-- text.txt: 178,352 → 83,789 (-53%)
-
-Average savings: ~50% across all files. Massive win.
-| mixed.bin | 1.47x | 1.61x | 1.63x | 1.63x | **2.00x** | **+23%** ← CDC finds natural boundaries that dedup matches |
-| random.bin | 0.33x ⚠️ | 1.00x ✅ | 1.00x ✅ | 1.00x ✅ | **1.00x** ✅ | unchanged |
-| repetitive.bin | 25.59x | 25.59x | 27.61x | 98.25x 🚀 | **98.25x** 🚀 | unchanged (max_chunk cap forces alignment → dedup wins) |
-| text.txt | 0.62x ⚠️ | 1.05x ✅ | 1.05x ✅ | 1.03x ✅ | **1.01x** ✅ | -2% (within noise) |
-
-**Total corpus size, all versions:**
-
-| Version | Total compressed | vs input (1,560 KB) |
-|---|---:|---:|
-| v0 (baseline) | 626 KB | 2.49x |
-| v1 (LZ77 chains) | 257 KB | 6.07x |
-| v1.2 (compact tables) | 253 KB | 6.17x |
-| v1.3 (dedup) | 246 KB | 6.34x |
-| **v1.4 (CDC)** | **242 KB** | **6.45x** |
-
-### Where we beat expectations
-
-- **Incompressible data (random.bin):** Exact parity with zstd. Raw-block
-  filter prevents compression overhead from blowing past input size.
-- **Repetitive data (repetitive.bin):** 187x ratio (v2) — closed 97% of
-  the gap to zstd's 6553x. CDC's `max_chunk=64K` cap forces aligned
-  boundaries on uniform data, so dedup matches identically to
-  fixed-block mode.
-- **Source code (code.rs):** 30.30x ratio (v2) — closed 91% of the
-  gap to zstd's 328x. CDC + format cleanup pays off big on Rust
-  source code (lots of repeated `    fn`, `    let mut`, `    pub struct`).
-- **Mixed binary (mixed.bin):** 2.98x ratio (v2) — best ever on this
-  file. CDC found content-aligned boundaries that caught repeated
-  binary patterns.
-- **JSON (data.json):** 5.24x ratio (v2) — closed 59% of the gap
-  to zstd's 12.7x. Format cleanup benefits all data with repetitive
-  tokens.
-- **Decompression speed:** Sub-millisecond across the board. Block-level
-  independence + dedup cache = O(1) duplicate lookups.
-
-### Where we lose, and why
-
-| Gap | Cause | Next sprint fix |
-|---|---:|---|
-| repetitive.bin: 35x | Cap is `1 byte per 8 input bytes`. Below 0.015% ratio. | zstd uses Huffman of MTF + longer-window match finder. Different design space. |
-| code.rs: 11x | Lazy matching (1-step lookahead) | Optimal parsing exists (v1.5) but still fragments on source code; needs better future-cost estimate |
-| text.txt: 5.4x | Static rANS table per block | Adaptive rANS via checkpoints |
-| data.json: 4.9x | JSON has lots of unique keys; LZ77 can't exploit structural similarity | Pre-tokenization / dictionary training |
+- **Comprimir** — soltá un archivo (o carpeta) → elegí un modo (FAST / BALANCED / ULTRA) → enter.
+- **Descomprimir** — soltá un archivo → tildá las entries que querés → extraer.
+- **Compartir** —
+  - **Enviar** → soltá un archivo → "Crear enlace" → compartí el código de 4
+    palabras + token. El receptor lo pega en **Recibir**.
+  - **Recibir** → pegá el token → "Recibir archivo".
+- **Ajustes** — idioma (ES / EN / IT), compresión por defecto, modo de túnel.
 
 ---
 
-## Adaptive rANS: the observation-order problem
+<a id="italiano"></a>
 
-This is the most interesting design lesson from v1.2, and the reason
-"adaptive rANS" is not in v1.2.
+## 🇮🇹 Italiano
 
-### The hypothesis
+### Cos'è NexusCompress?
 
-Adaptive rANS should let encoder and decoder start with a uniform
-distribution, then update frequency counts as symbols are processed. The
-encoder observes symbol `s` and updates `count[s]++`. The decoder observes
-the same `s` after decoding it and does the same update. They stay in
-sync because they see the same symbols in the same order. Saves the
-~1KB per-block table header.
+NexusCompress è due cose in un'unica app desktop nativa:
 
-### Why it failed in v1.2
+1. **Un compressore di file ibrido.** Matching LZ77 con hash chain + lazy
+   parsing, codifica entropica `rANS` a 5 stream, chunking definito dal
+   contenuto e dizionario a livello di blocco. Archivi solidi `.nxs6` per
+   quando il rapporto di compressione conta più della velocità; wrapping
+   `.tar` in streaming altrimenti. Dettagli del codec in
+   [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-Standard rANS encodes symbols in *reverse* — last symbol first — so that
-the encoder's renormalization bytes (which the decoder reads) come out in
-the right order via a stack (LIFO via `*--p`). This means:
+2. **Trasferimento di file cifrato peer-to-peer.** Scambio di chiavi
+   autenticato da password `SPAKE2` rafforzato con `Argon2id` (codici da 32 bit
+   → entropia effettiva di 256 bit), AEAD chunked `AES-256-GCM`, firma delle
+   richieste con HMAC, tre modalità di trasporto:
+   - **LAN diretta** (discovery mDNS + UPnP opzionale per attraversare il NAT)
+   - **Diretta cross-NAT** (UPnP hole-punching + fallback localhost quando la
+     rete blocca l'hairpin all'IP pubblico)
+   - **Tunnel Cloudflare Quick / Named** (fallback per NAT simmetrici)
 
-- Encoder observation order: `data[n-1], data[n-2], ..., data[0]`
-- Decoder observation order: `data[0], data[1], ..., data[n-1]`
+Senza account. Senza telemetria. Il relay Cloudflare è opzionale — entrambi
+gli endpoint devono conoscere il codice di 4 parole.
 
-The two sides observe symbols in **opposite orders**, so their adaptive
-tables diverge after the first few hundred symbols.
+### Licenza
 
-### Workarounds I tried
+Doppia licenza. Vedi [`LICENSE`](./LICENSE) e [`COMMERCIAL-LICENSE.md`](./COMMERCIAL-LICENSE.md).
 
-1. **Forward encoding + forward decoding:** Encoder iter k starts with
-   state `L` and grows. Decoder iter k starts with state `L` and
-   shrinks. The state evolution is invertible in principle, but the
-   decoder's inverse-encode does not produce the same states as the
-   encoder's encode when both start from `L`. Tables stay in sync but
-   symbols come out in reverse order, which mismatches the LZ77 op
-   stream.
+- **Open source** sotto AGPL-3.0 — per progetti OSS, uso personale e
+  distribuzioni commerciali AGPL-compatibili
+- **Licenza commerciale** — per organizzazioni che vogliono incorporare
+  NexusCompress in prodotti proprietari senza gli obblighi di source-disclosure
+  dell'AGPL
 
-2. **Reverse encoding + reverse decoding:** Both sides observe the
-   same reverse sequence. Tables stay in sync. Decoder produces symbols
-   in reverse; you reverse the output buffer before patching into the
-   op stream. Works but adds a pass.
+I prezzi sono basati sulla dimensione dell'azienda (non per posto). Il tier
+Indie/startup è gratuito.
 
-### What's used in production
+### Installazione
 
-Real compressors (zstd's FSE, brotli's ANS) handle this with **periodic
-checkpoints**: every N symbols, the encoder writes the table state into
-the bitstream, decoder rebuilds. Between checkpoints, both sides update
-the table incrementally from the same observation sequence.
+Scarica una release per la tua piattaforma dalla
+[pagina Releases](https://github.com/bierfor/nexus-compress/releases):
 
-We deferred this work for v1.2 and shipped with a **compact static
-table** (delta-encoded `cum[]` instead of full 1KB), which cuts the
-overhead roughly 10x. The full adaptive approach is on the roadmap but
-not the highest-ROI item.
+- macOS (universale: Apple Silicon + Intel, firmato e notarizzato)
+- Linux (`.deb`, `.rpm`, `.AppImage`)
+- Windows (installer MSI `x86_64` + ZIP portatile)
 
----
+Oppure compila dal codice sorgente (vedi
+[CONTRIBUTING.md](./CONTRIBUTING.md#build-from-source)).
 
-## Block-level dedup (v1.3, shipped)
+### Tour rapido
 
-The single largest gap was `repetitive.bin` at 237x behind zstd. Cause:
-identical 64KB chunks repeated throughout the file, but LZ77's window
-is 64KB so matches across boundaries were missed.
-
-**Implementation:**
-- Split input into fixed 64KB blocks before LZ77 (matches LZ77 window size
-  so we don't lose intra-block matching capability).
-- Hash each block with FNV-1a 64-bit (no dependency, ~5 GB/s).
-- `HashMap<u64, u32>` mapping hash → original block ID.
-- If hash seen: emit `BlockType::Duplicate` (5 bytes payload: tag + u32 ID).
-- If new: run normal compression, record hash.
-
-Decoder keeps a `Vec<Vec<u8>>` cache of decoded blocks for O(1) duplicate
-lookups. Both `Raw` and compressed blocks are cached so any future
-`Duplicate` can resolve them.
-
-**Why 64KB instead of 4KB:** First version used 4KB blocks. That crushed
-`repetitive.bin` to 191x ratio but *regressed* `code.rs` from 20x to 2.7x,
-because LZ77 could only see within a 4KB window. Matching the dedup block
-size to the LZ77 window size (64KB) gives dedup the cross-block matches
-it needs while preserving LZ77's intra-block capability. Final numbers:
-`repetitive.bin` 27x → **98x**, `code.rs` stays at 16x.
+- **Comprimi** — trascina un file (o cartella) → scegli una modalità (FAST / BALANCED / ULTRA) → invio.
+- **Decomprimi** — trascina un archivio → spunta le voci che vuoi → estrai.
+- **Condividi** —
+  - **Invia** → trascina un file → "Crea collegamento" → condividi il codice
+    di 4 parole + token. Il destinatario lo incolla in **Ricevi**.
+  - **Ricevi** → incolla il token → "Ricevi file".
+- **Impostazioni** — lingua (ES / EN / IT), compressione predefinita, modalità tunnel.
 
 ---
 
-## Content-Defined Chunking (v1.4, shipped)
+## Acknowledgements
 
-The v1.3 fixed 64KB blocks left one big design gap: **they're
-position-aligned, not content-aligned**. If you take `repetitive.bin`
-and prepend a single byte, every fixed 64KB boundary shifts by one byte,
-and dedup finds *zero* matches. In real-world backup workloads (rsync,
-restic, bup, Borg) the files always have a shifted boundary somewhere —
-this is the classic deduplication case CDC was invented for.
+Built on:
 
-### Algorithm: Gear hash
+- [`lspack`](https://crates.io/crates/lspack) / [`rans`](https://crates.io/crates/rans)
+  — rANS entropy coding
+- [`xz2`](https://crates.io/crates/xz2) — LZMA via liblzma
+- [`aes-gcm`](https://crates.io/crates/aes-gcm) — authenticated encryption
+- [`spake2`](https://crates.io/crates/spake2) — password-authenticated key exchange
+- [`argon2`](https://crates.io/crates/argon2) — key-stretching
+- [`mdns-sd`](https://crates.io/crates/mdns-sd) — LAN discovery
+- [`igd`](https://crates.io/crates/igd) — UPnP port forwarding
+- [`keyring`](https://crates.io/crates/keyring) — OS credential store
+- [`axum`](https://crates.io/crates/axum) — local HTTP server
+- [`tauri`](https://tauri.app) — native shell
+- [Next.js](https://nextjs.org) / [React](https://react.dev) — UI framework
+- [Tailwind CSS](https://tailwindcss.com) — styling
 
-Per byte:
-```
-hash = (hash << 1) + GEAR_TABLE[byte]
-```
-
-Cut a boundary when `(hash & mask) == 0`, with `min_chunk` and
-`max_chunk` constraints. Two identical streams produce identical chunk
-boundaries — that's the foundational property.
-
-### Why Gear, not Rabin fingerprint
-
-Rabin fingerprint uses polynomial division. Mathematically elegant but
-requires expensive modular arithmetic on each byte. Gear is a single
-shift + add + table lookup, ~5× faster, and equally good for chunk
-boundary distribution. Used by `restic`, `bup`, etc.
-
-### Gear table generation
-
-The 256-entry lookup table is built at compile time with a deterministic
-xorshift64 PRNG seeded with `0x123456789abcdef0`. Zero entries are
-forbidden (would trigger every byte), so each value gets bumped to 1 if
-zero. The table is `static`, so there's no initialization cost.
-
-### Parameter tuning
-
-Three parameters: `min_chunk`, `max_chunk`, and `bits` (average = 2^bits):
-
-| `min` | `avg` | `max` | `repetitive.bin` chunks | What it does |
-|---:|---:|---:|---:|---|
-| 16K | 64K | 256K | 1 chunk, 256K each | **Bad** — no boundary found, no dedup. Initial v1.4 attempt. |
-| **4K** | **32K** | **64K** | **4 chunks, 64K each** | **Sweet spot** — `max` cap forces alignment on uniform data. |
-| 4K | 32K | 32K | 8 chunks, 32K each | Too many chunks, more header overhead. |
-| 4K | 16K | 64K | 16 chunks | Smaller dedup granularity but `mixed.bin` regresses by 10%. |
-
-The winning config: **`min=4K, avg=32K (bits=15), max=64K`**. On uniform
-data the Gear hash never finds a natural boundary, so we hit `max_chunk`
-→ chunks align at 64K offsets → dedup catches identical neighbors.
-On data with content variation, the Gear hash finds natural boundaries
-every ~32K on average, so when a file is modified between versions, the
-boundaries *before* the modification point stay aligned → dedup matches
-across versions.
-
-The `max=64K` cap is also the LZ77 window size, so dedup and LZ77 cooperate:
-a duplicate chunk never loses intra-block compression quality versus
-treating it as a normal block.
-
-### Wins in v1.4
-
-| File | v1.3 | v1.4 | Why |
-|---|---:|---:|---|
-| `mixed.bin` | 1.63x | **2.00x** (+23%) | CDC finds natural boundaries at 16K/32K that catch repeated patterns invisible to fixed-block dedup |
-| `repetitive.bin` | 98.25x | 98.25x | `max_chunk=64K` cap forces aligned chunks; behaves like fixed mode |
-| `random.bin` | 1.00x | 1.00x | No structure to exploit, no overhead added |
-| **Total corpus** | 246 KB | **242 KB** (-1.6%) | Slight overall improvement, big win on `mixed.bin` |
-
-### Tests
-
-`src/cdc.rs` has 7 tests covering:
-- Empty input → no chunks
-- `min` enforced (small input with large min → single chunk)
-- `max` enforced (forces cut even if hash never matches)
-- Determinism (same input → same chunks, every time)
-- **Boundary stability under modification** (the signature CDC property):
-  mutate 100 bytes in a 50 KB stream and verify that boundaries before
-  the mutation point shift by at most `max_chunk` bytes
-- Gear table has no zero entries (would break boundary detection)
-- Gear table low bits are uniformly distributed (50% ±20%)
-
-`cargo test --release`: 28 passed, 0 failed.
-
-### What CDC is *not*
-
-CDC doesn't help when the input has no repeated patterns (random.bin,
-text.txt with mostly-unique words). It also doesn't help when the input
-has only one repeat (a single copy of a binary, not multiple). It only
-helps when the same content appears in different positions across files —
-the dedup use case.
+Thanks to the maintainers of all dependencies, and to everyone who files
+issues, sends PRs, or spreads the word.
 
 ---
 
-## Optimal Parsing (v1.5, shipped)
-
-The natural follow-up to lazy matching: replace the 1-step lookahead
-with a forward DP that considers all valid (literal | match) sequences
-in a 32-byte window, picking the one with minimum estimated bit cost.
-
-### Algorithm
-
-Per byte in the lookahead window, the DP explores:
-- emit literal: cost += `LITERAL_BITS`, advance by 1
-- emit match `(d, l)` from candidates(): cost += `MATCH_BITS`, advance by `l`
-
-The DP tracks `(cost, ops)` per position and tie-breaks equal-cost
-paths by lower op count. After the DP, the path with the lowest
-total cost wins. We take its FIRST action, advance, and re-DP.
-
-`MatchFinder::candidates()` returns up to 8 candidate matches sorted
-by length descending.
-
-### v1.5 vs v2 — the format-dependent result
-
-The optimal parser is **mathematically correct** but its cost model
-depends critically on the actual bitstream costs:
-
-| Format | LITERAL_BITS | MATCH_BITS | Optimal vs lazy (code.rs) |
-|---|---:|---:|---|
-| v0/v1 (u32 match, placeholder) | 21 | 72 | optimal **−21%** ⚠️ |
-| **v2 (u16/u8 match, no placeholder)** | 13 | 32 | optimal **−93%** ⚠️ |
-
-Even with the v2 cost model (literal=13, match=32, threshold L≥3),
-optimal regresses on `code.rs` from 30.30x (lazy) to 2.23x. The DP
-correctly picks "cheaper" matches, but the future-cost estimate
-(all-literals past the lookahead) is too coarse — it fragments
-what would be one long match into several short ones. The lazy
-parser's "always take the longest match at current position"
-heuristic actually outperforms the DP on source code structure.
-
-The optimal encoder ships in the codebase (`MatchFinder::encode_optimal`,
-`candidates()`, full DP with cost/ops tie-break) but is NOT wired into
-the codec by default. Future improvements that could make it useful:
-
-1. **Real rANS-encoded distance** (penalize far-distance matches)
-2. **Better future-cost estimate** (run lazy on the rest of the chunk
-   to get a realistic estimate, not all-literals)
-3. **Block-level rerun** (optimal at the chunk level, not streaming)
-
-The DP code is correct (all roundtrip tests pass). It's a v3 task.
-
----
-
-## Format v2 cleanup (shipped — current default)
-
-After v1.5 demonstrated that optimal parsing only pays off with a leaner
-format, we did the obvious: **delete the wasted bits from the
-bitstream itself**. Two surgical changes:
-
-### 1. Killed the literal placeholder byte (saves 8 bits per literal)
-
-In v0/v1 the op stream was:
-```
-literal op: [u8 flag=0][u8 literal_byte]
-```
-
-The `literal_byte` was a placeholder that the decoder threw away —
-the actual value came from the rANS stream. So the bitstream
-contained the literal TWICE: once as a raw placeholder, once rANS-encoded.
-
-In v2 the op stream is:
-```
-literal op: [u8 flag=0]    ← just the flag
-```
-
-The literal VALUE lives only in the rANS stream. Saving 8 bits per
-literal.
-
-### 2. Shrunk match fields (saves 16 + 24 = 40 bits per match)
-
-In v0/v1 matches were:
-```
-match op: [u8 flag=1][u32 distance][u32 length]    = 9 bytes = 72 bits
-```
-
-The max distance in our 64 KB window is 65536, never needing all 32
-bits. The max length is 258, never needing more than 8 bits. So
-distance's high 16 bits and length's high 24 bits were always zero.
-
-In v2 matches are:
-```
-match op: [u8 flag=1][u16 distance][u8 length]     = 4 bytes = 32 bits
-```
-
-### Combined effect on the cost model
-
-| Format | LITERAL_BITS | MATCH_BITS | Threshold | code.rs |
-|---|---:|---:|---:|---:|
-| v0/v1 | 21 | 72 | L≥4 | 16.09x |
-| **v2** | **13** | **32** | **L≥3** | **30.30x** |
-
-### Benchmark — v2 vs v1.4 (the version we were previously benchmarking)
-
-| File | v1.4 (CDC, lazy) | **v2 (CDC, lazy)** | Δ |
-|---|---:|---:|---:|
-| code.rs | 16.09x | **30.30x** | +88% 🚀 |
-| data.json | 2.49x | **5.24x** | +110% 🚀 |
-| mixed.bin | 2.00x | **2.98x** | +49% 🚀 |
-| random.bin | 1.00x | 1.00x | 0% |
-| repetitive.bin | 98.25x | **186.98x** | +90% 🚀 |
-| text.txt | 1.01x | **2.17x** | +115% 🚀 |
-
-Compression times stayed within the same range (~30 ms total); decode
-still <1 ms per file. The format change is pure overhead reduction — no
-extra work for the encoder.
-
-### Why this works
-
-The format change converts "DP-optimal matches" into a category
-where lazy matching can capture them. In v1 the lazy parser would
-skip a L=4 match because its 9-byte overhead ate the rANS savings;
-in v2 the same L=4 match costs only 4 bytes, so lazy picks it up.
-Lazy doesn't need optimal intelligence when matches are cheap enough
-to be worth their overhead at every reasonable length.
-
-### Backward compatibility
-
-The decoder handles both v0 (legacy) and v2 (current) compressed
-block payloads. Each payload starts with a tag byte:
-- `0x02` → TAG_RANS_LITERALS_V0 (legacy: placeholder bytes, u32 fields)
-- `0x04` → TAG_RANS_LITERALS_V2 (current: no placeholder, u16/u8 fields)
-
-Header version field is 0 for v0 files, 2 for v2 files. New files
-always write v2.
-
----
-
-## Multi-stream rANS (v3 — current default)
-
-After v2 collapsed the bitstream overhead, the next bottleneck was
-the entropy coder itself. In v0/v1/v2, all rANS-encoded bytes lived
-in a SINGLE stream with a SINGLE frequency table. That meant:
-
-- Literals (`b' '`, `b'{'`, common bytes) shared bandwidth with
-  rare bytes (`b'\\x00'`, control chars).
-- Match lengths and distances were NOT rANS-encoded at all (raw bytes
-  in the op stream).
-
-Each LZ77 field has its own skewed distribution that the merged table
-destroys. v3 splits the compressed block payload into FOUR independent
-rANS streams, each with its own frequency table:
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                   BLOCK HEADER v3                            │
-├───────────────┬───────────────────────┬──────────────────────┤
-│ Lit_Stream_Sz │  Dist_lo_Stream_Sz    │  Dist_hi_Stream_Sz   │
-│ Len_Stream_Sz │  (4 streams total, each with own table)       │
-├───────────────┴───────────────────────┴──────────────────────┤
-│ 1. Literal stream (256-symbol rANS — values of Op::Lit(b))    │
-│ 2. Length stream (256-symbol rANS — match lengths 1..=255)    │
-│ 3. Distance-low stream (256-symbol rANS — u16 dist & 0xFF)   │
-│ 4. Distance-high stream (256-symbol rANS — u16 dist >> 8)    │
-└──────────────────────────────────────────────────────────────┘
-```
-
-### Why per-byte distance
-
-The full u16 distance alphabet has 65536 symbols — too many for the
-current 256-symbol rANS. Splitting into two u8 streams gets most of
-the entropy benefit cheaply: distance's **high byte** is heavily
-skewed toward 0 (most matches in source code are local, < 256 bytes
-back), so rANS compresses it from 8 bits to ~2-3 bits per match.
-
-The **low byte** is roughly uniform (8 bits rANS = ~8 bits cost) —
-no win there, but no loss either.
-
-### v3 vs v2 numbers
-
-| File | v2 | **v3** | Δ |
-|---|---:|---:|---:|
-| code.rs | 30.30x | 27.43x | −9% ⚠️ |
-| data.json | 5.24x | **5.49x** | +5% ✓ |
-| mixed.bin | 2.98x | 2.94x | −1% tied |
-| random.bin | 1.00x | 1.00x | tied |
-| repetitive.bin | 186.98x | 180.04x | −4% ⚠️ |
-| text.txt | 2.17x | **2.60x** | **+20%** 🚀 |
-| **Total corpus** | 508 KB | **489 KB** | **−4%** |
-
-Three files win, two regress slightly. The regressions are real:
-v3's four rANS tables add ~1 KB of fixed overhead per block, and
-on small blocks (code.rs's 2-4 KB compressed output) that's a
-significant fraction. The wins are larger because per-stream entropy
-is genuinely higher.
-
-### What would close the gap
-
-The table overhead is dominated by `FreqTable::encode_cum`'s dense
-format (1 byte per symbol even for absent ones). A sparse format
-saving absent symbols would shrink each table to ~20-50 bytes, making
-v3 win on every file. But our rANS variant forces freq≥1 for every
-symbol (`from_counts` does `scaled[i].max(1)`) — a sparse format
-needs a different rANS where unused symbols can have freq=0 and the
-encoder/decoder never queries the gap slots. That's a v4 task.
-
-### Optimal parser still on the bench
-
-We re-tested optimal parsing with the v3 format (where close-distance
-matches are now genuinely cheaper in rANS bits). It still regresses on
-code.rs (27.43x → 2.71x) for the same reason as before: the DP's
-future-cost estimate is too coarse, fragments long matches. The
-optimal code stays in the codebase as v1.5; enabling it requires
-either better future-cost estimation or per-block adaptive gating.
-
----
-
-## Roadmap
-
-| Version | Focus | Status |
-|---|---|---|
-| v0 | End-to-end pipeline with single-position hash LZ77, static rANS | ✅ shipped |
-| v1 | LZ77 hash chains + lazy matching + RAW filter for incompressible blocks | ✅ shipped |
-| v1.2 | Compact cum serialization, RANSDecoder with direct LUT lookup | ✅ shipped |
-| v1.3 | Block-level dedup (64KB blocks, FNV-1a hash, Duplicate block type) | ✅ shipped |
-| v1.4 | Content-Defined Chunking (Gear hash, min=4K avg=32K max=64K) | ✅ shipped |
-| v1.5 | Optimal parsing DP (shipped as experimental) | ✅ shipped |
-| v2 | Format cleanup (no literal placeholder, u16/u8 match fields) | ✅ shipped |
-| v3 | Multi-stream rANS (independent lit/len/dist streams) | ✅ shipped |
-| v4 | Sparse table encoding + rANS variant allowing freq=0 | planned |
-| v5 | Adaptive rANS via checkpointed sync | planned |
-
----
-
-## File layout
-
-```
-nexus-compress/
-├── Cargo.toml
-├── README.md                       ← you are here
-├── scripts/
-│   └── gen_corpus.py               ← benchmark corpus generator
-├── src/
-│   ├── main.rs                      ← CLI (nexus c|d|bench)
-│   ├── lib.rs                       ← public API
-│   ├── format.rs                    ← .nexus binary format + BlockType enum
-│   ├── cdc.rs                       ← v1.4: Gear-hash content-defined chunking
-│   ├── cost.rs                      ← v1.5: bit-cost model for optimal parsing
-│   ├── classifier.rs                ← content classifier (heuristic v0)
-│   ├── dedup.rs                     ← v1.3: FNV-1a block-level deduplication
- │   ├── lz77.rs                      ← LZ77 hash chains + lazy + optimal parsing
- │   ├── rans_v4.rs                   ← v4: rANS entropy coder (ryg_rans port)
- │   ├── rle.rs                       ← v4.3: 7-bit RLE pre-filter (gated on run_avg)
- │   ├── dictionary.rs                ← v4.4: static literal dict (text/code/json/combined)
- │   ├── dict_codec.rs                ← v4.5: dict-aware multistream codec (5th rANS, 2-bit op-flags, prescan)
- │   └── codec.rs                     ← top-level pipeline + CDC + dedup dispatch
-└── corpus/                          ← generated by gen_corpus.py
-    ├── code.rs
-    ├── data.json
-    ├── mixed.bin
-    ├── random.bin
-    ├── repetitive.bin
-    └── text.txt
-```
-
----
-
-## Design principles (documented for posterity)
-
-1. **Honest benchmarking over hype.** Every version ships with a
-   comparison table vs `zstd -19` and a clear gap analysis. No "we beat
-   zstd by 50%" claims that aren't backed by measured numbers on a
-   reproducible corpus.
-
-2. **Decompression speed is the deliverable.** Many compressors are
-   fast on the encode side and slow on the decode side (PAQ family).
-   For an archiver, decode speed matters more. We measure both.
-
-3. **Lossless roundtrip is non-negotiable.** Every benchmark file
-   round-trips through compress → decompress → diff and produces no
-   output. This is asserted in the benchmark harness.
-
-4. **Pipeline layers are independently replaceable.** Classifier, LZ77,
-   rANS, dedup — each is a separate module with its own tests. Swapping
-   one out (e.g., LZ77 with optimal parsing) shouldn't touch the others.
-
-5. **Pure Rust, zero runtime dependencies.** No C deps, no unsafe, no
-   external compressors pulled in. Builds with stock `cargo build
-   --release`.
-
----
-
-## RLE pre-filter (sprint 2.3)
-
-A simple run-length encoding pre-filter is applied to each block before
-LZ77. The pre-filter uses a 7-bit chunk format: bytes 0-127 are single-byte
-literals, bytes ≥128 (and any literal run) are 2-byte runs. This is
-**mostly neutral** on our corpus but the cost is bounded by a heuristic.
-
-### The honest result
-
-| File | v4 (no RLE) | **v4 + RLE** | Δ |
-|---|---:|---:|---:|
-| code.rs | 9.69x | **9.83x** | +1.4% |
-| data.json | 3.76x | 3.77x | +0.3% |
-| mixed.bin | 2.38x | 2.38x | tied |
-| random.bin | 1.00x | 1.00x | tied |
-| repetitive.bin | 53.32x | 53.32x | tied |
-| text.txt | 1.96x | 1.96x | tied |
-
-RLE only saves anything on `code.rs` (some source files have long runs of
-spaces and tabs from indentation). For data without runs, the encoder
-just wastes time doing an extra LZ77+rANS pass.
-
-### Why we tried it anyway
-
-Even though the win is small, RLE pre-filter has a property we want
-preserved: a future corpus with more run-length-heavy data (log files,
-structured binary, image data) will benefit more. The integration
-gates the second pass on `stats.run_avg >= 1.1` (the existing classifier
-stat) so we don't pay the LZ77 cost on data without runs.
-
-### Format
-
-The RLE pre-filter uses a new block tag `TAG_V3_MULTISTREAM_RLE = 7`.
-The decoder flow is:
-
-```
-TAG_V3_MULTISTREAM_RLE payload
-  → rANS decode 4 streams (lit, len, dist_lo, dist_hi)
-  → reconstruct op stream from flags
-  → MatchDecoder::decode → rle-encoded data
-  → rle::decompress_rle → original block
-```
-
-A pre-RLE decoder that sees tag 7 will panic with "unsupported block
-tag 7" — the new tag is the format-level break.
-
----
-
-## Static literal dictionary (sprint 2.4 — partial)
-
-A static literal dictionary replaces common substrings (English words,
-code keywords, JSON tokens) with a single `DictRef` op pointing into a
-pre-shared table. This is the zstd-style "raw dictionary" approach,
-adapted for our LZ77 pipeline.
-
-### What ships in this sprint
-
-| File | What it does | Status |
-|---|---|---|
-| `src/dictionary.rs` | `Dictionary` struct with O(1) prefix lookup. 4 hand-curated dicts (text, code, JSON, combined = 123 entries). | ✅ working, 18 unit tests |
-| `src/lz77.rs` | New `Op::DictRef { id, len }` variant. `MatchFinder::encode_with_dict()` (greedy, longer-wins rule). `MatchDecoder::with_dict()` constructor. | ✅ working, 6 dict integration tests |
-| `src/bin/dict_smoke.rs` | Per-corpus op breakdown: how many DictRefs, how many Matches, % of bytes covered. | ✅ working |
-
-### The "longer wins" rule
-
-The greedy integration picks the LONGER match between LZ77 and dict
-on every position. Both ops cost ~18-24 bits in the bitstream, so
-the op that covers more bytes is the cheaper per-byte option. On
-ties, LZ77 wins (no dict dependency for the decoder).
-
-The first version had "dict first" which emitted DictRef even when
-LZ77 would have found a longer match. Smoke test on text.txt showed
-1725 dict refs at 3.1% byte cover; the "longer wins" rule drops
-that to 7 dict refs at 0.0% cover — the LZ77 chain is just so
-effective on repetitive data that the dict only fires for genuinely
-first-occurrence tokens.
-
-### Honest result of the integration alone (no codec changes yet)
-
-| File | n_lits | n_match | n_dictrf | dict cover |
-|---|---:|---:|---:|---:|
-| code.rs | 189 | 490 | 35 | 0.1% |
-| text.txt | 132 | 19,985 | 7 | 0.0% |
-| data.json | 2,458 | 27,647 | 10 | 0.0% |
-| mixed.bin | 16,687 | 1,006 | 92 | 0.1% |
-| random.bin | 258,346 | 867 | 1,080 | 0.5% (false positives) |
-| repetitive.bin | 8 | 1,028 | 0 | 0.0% |
-
-The dict contribution is **small but real** for code/text, and zero
-for already-repetitive data. Expected ratio impact: 0.1-0.5% on
-code/text once the codec is wired up. The "gran win" requires:
-
-### What does NOT ship in this sprint
-
-1. **Codec integration** — the codec still does NOT use
-   `encode_with_dict`. The current pipeline calls `MatchFinder::encode`
-   (the standard LZ77 encoder), so all the DictRefs in the smoke
-   test are hypothetical. Adding the integration requires:
-   - A 5th rANS stream for dict-id (or a packed id+len).
-   - Op-flags stream upgraded from 1 bit to 2 bits (Lit, Match,
-     DictRef).
-   - Codec's `encode_v3_multistream` needs a DictRef arm.
-   - A fixed dictionary in the binary (both encoder and decoder).
-2. **Trained dictionary** — the 123-entry hand-curated dict is a
-   starting point. zstd trains a 32KB dict on the input corpus for
-   2-3x better compression. A training tool (`scripts/train_dict.py`)
-   is the v4.5 deliverable.
-3. **Per-block dict selection** — zstd picks a sub-dict per block
-   to maximize match coverage. We have ONE dict for the whole file.
-
-### Decoder behavior
-
-The decoder needs the SAME dictionary the encoder used. For this
-sprint's testing, the dictionary is passed explicitly:
-`MatchDecoder::with_dict(dict)`. For the codec integration, the
-dictionary will be hardcoded into the binary (`default_combined_dict`
-by default; can be overridden via the .nexus header in v4.5).
-
----
-
-## Dict codec (sprint 2.5)
-
-The v4.5 dict codec unifies the trainer, the dict module, and the
-LZ77 DictRef op into a working end-to-end pipeline. The encoder picks
-the right sub-dict per block (or none at all) and emits a 5th rANS
-stream for dict-ids; the decoder loads the same sub-dict and
-materializes DictRefs via the shared table.
-
-### Format (TAG_V3_MULTISTREAM_DICT = 8 payload)
-
-```text
-[tag=8]                                    (handled by caller)
-[u8 dict_select]                           (2-bit field, lower bits)
-   0 = None   1 = Trained   2 = Code   3 = JSON
-[u32 n_ops]                                (needed to count rANS
-                                            symbols per stream)
-[u32 lit_table_len] [u32 lit_stream_len]
-[u32 len_table_len] [u32 len_stream_len]
-[u32 dist_lo_table_len] [u32 dist_lo_stream_len]
-[u32 dist_hi_table_len] [u32 dist_hi_stream_len]
-[u32 dict_table_len]  [u32 dict_stream_len]
-[u32 op_flags_len]
-[lit_table][lit_stream]
-[len_table][len_stream]
-[dist_lo_table][dist_lo_stream]
-[dist_hi_table][dist_hi_stream]
-[dict_table][dict_stream]
-[op_flags_bytes: 2 bits per op, packed 4 per byte]
-```
-
-### Op-flags (2 bits)
-
-| Value | Meaning                                       | rANS stream consumed     |
-|------:|---|---|
-| `00`  | Lit (literal byte)                            | lit stream (1 byte)      |
-| `01`  | Match (LZ77 back-reference)                   | len, dist_lo, dist_hi    |
-| `10`  | DictRef (token from the sub-dict)             | dict stream (1 id)       |
-| `11`  | Reserved — invalid in a valid bitstream       | n/a (panic)              |
-
-The op-flags are 2 bits per op, packed 4 per byte. For `n` ops the
-packed byte count is `(n + 3) / 4`. The last byte may have 1-3 unused
-trailing bits; the decoder uses the `n_ops` field to read exactly the
-right number of flags.
-
-### Sub-dict selection (500-byte pre-scan)
-
-The encoder runs this heuristic on the first 500 bytes of each CDC
-block:
-
-1. `entropy > 7.5` → **None** (random data, dict would add noise)
-2. `printable_ratio < 0.6` → **None** (mixed/binary, low signal)
-3. Unique 4-byte windows < 20 → **None** (highly repetitive, dedup
-   handles it)
-4. `struct_ratio > 0.10 && printable_ratio > 0.85` → **JSON**
-5. Rust keyword hits ≥ 2 (`fn `, `let `, `mut `, `impl `, `pub `, etc.)
-   → **Code**
-6. Default → **Trained** (the 256-entry compact of corpus/trained.dict)
-
-| Sub-dict          | Source                                  | Size     |
-|---|---|---|
-| None              | (no dict refs in this block)             | 0        |
-| Trained (default) | `corpus/trained.dict`, first 256 entries | 256×~8B |
-| Code              | `default_code_dict`                      | 46×~6B  |
-| JSON              | `default_json_dict`                      | 23×~3B  |
-
-The trained dict is embedded in the binary via `include_bytes!` at
-compile time — no separate .dict file needed at runtime. To update it,
-re-run `cargo run --release --bin dict_train` and rebuild.
-
-### Honest result
-
-The integration ships the trained dict into the bitstream. Per-file
-impact:
-
-| File          | v4 (no dict) | v4.5 (with dict) | Δ        |
-|---|---:|---:|---:|
-| text.txt      | 1.96x | **2.21x** | **+12.8%** |
-| data.json     | 3.77x | **4.06x** | **+7.7%**  |
-| code.rs       | 9.83x | 9.83x    | tied (v4.5 attempted, neutral) |
-| mixed.bin     | 2.38x | 2.38x    | tied (gated out, low printable ratio) |
-| random.bin    | 1.00x | 1.00x    | tied (gated out, high entropy) |
-| repetitive.bin| 53.32x| 53.32x   | tied (gated out, dedup handles) |
-
-The wins land exactly where the dict cover was highest (text.txt and
-data.json are the two files with strong structural repetition that
-the trained dict captured). On files where the pre-scan detects
-random/mixed/repetitive content, the v4.5 path is skipped entirely —
-no wasted work.
-
-### Decoder path
-
-When the codec encounters `TAG_V3_MULTISTREAM_DICT` (byte `0x08`):
-
-1. Read `dict_select` (1 byte).
-2. Load the matching sub-dict from the file-baked dictionary pool.
-3. Read the 11 u32 sizes, slice the 5 rANS streams + op-flags bytes.
-4. Decode the rANS tables, then the rANS streams (one symbol per op
-   of the matching type).
-5. Walk the op-flags, dispatching each:
-   - `00` → take 1 literal from the lit stream, emit byte.
-   - `01` → take dist_lo/dist_hi/len, emit match.
-   - `10` → take dict id, look up in sub-dict, emit token bytes.
-
-The decoder's dictionary is byte-for-byte identical to the encoder's
-(both use `include_bytes!` on the same `.dict` file), so `DictRef`
-materialization is exact.
-
-### What does NOT ship in sprint 2.5
-
-- **Sparse table encoding for dict-ids.** The dict table is dense
-  (256 entries × 4 bytes = 1 KB) even when only 10 ids are used in a
-  block. Sparse encoding would shrink the table to ~50 bytes when
-  applicable but conflicts with rANS's "every symbol has freq≥1"
-  invariant. This is a v6 task.
-- **Trained dict with > 256 entries.** The compact 256-entry
-  version captures the highest-score (most common) tokens. Going
-  beyond 256 requires a u16 id encoding, which the 5th rANS stream
-  doesn't support yet. The full 5348-entry trained.dict is shipped
-  on disk for inspection.
-- **Per-block sub-dict selection from the full trained dict.** The
-  current 4-way switch (None / Trained / Code / JSON) is coarse.
-  Zstd picks a sub-dict per block from thousands of candidates.
-
----
-
-## Sparse table encoding (sprint 2.6)
-
-The v4.5 dict codec stored the 5th-stream (dict-ids) frequency table
-as a dense 256-entry array. The rANS invariant forces every symbol
-to have `freq >= 1`, even for ids that never appear in the block —
-those entries are "ghost" symbols that exist only to maintain the
-alphabet.
-
-For most blocks only 10-50 of the 256 dict ids are actually used. The
-remaining 200+ ghost entries cost 4 bytes each in the rANS cum[]
-table, plus they pull double-duty in the rANS state's `scale_bits`
-computation. For a typical block, the ghost table was ~1027 bytes of
-overhead even when the block used 10 dict refs.
-
-Sprint 2.6 collapses the alphabet to just the present symbols.
-
-### Format change
-
-The 5th-stream table section is now:
-
-```text
-[32 bytes bitmask]      ; 256 bits, bit i = id i present
-[densified rANS table]  ; scale_bits + n_symbols + cum_0..cum_n
-[densified rANS stream] ; n_dict_refs symbols in 0..N-1 alphabet
-```
-
-The `n_symbols` field of the densified rANS table is the popcount of
-the bitmask (≤ 256). The remap from dense indices (0..N-1) to
-original dict ids (0..255) is derived from the bitmask by walking
-the 256 bits in order and assigning dense indices to set bits.
-
-### Per-block overhead
-
-| K = distinct ids | Dense (v4.5) | Sparse (v4.6) | Saved |
-|---:|---:|---:|---:|
-| 0   | 1031 bytes (table) + 0 (stream) = 1031 | 32 (bitmask) + 0 (table) + 0 = 32 | 999 |
-| 10  | 1031 + ~10 = 1041 | 32 + 47 + 30 = 109 | 932 |
-| 50  | 1031 + ~50 = 1081 | 32 + 207 + 150 = 389 | 692 |
-| 100 | 1031 + ~100 = 1131 | 32 + 407 + 300 = 739 | 392 |
-| 256 | 1031 + ~256 = 1287 | 32 + 1031 + 768 = 1831 | -544 ⚠️ |
-
-For blocks that use 0-100 dict ids (the vast majority of real blocks),
-sparse saves 400-1000 bytes. For the pathological case where ALL 256
-ids are used, sparse is slightly larger (~544 bytes extra for the
-bitmask and remap overhead). The bench corpus never hits this case.
-
-### Honest result
-
-| File | v4.5 (dense) | v4.6 (sparse) | Δ from sparse | Δ from v3 |
-|---|---:|---:|---:|---:|
-| text.txt      | 2.21x | **2.38x** | **+7.7%** | +21.4% |
-| data.json     | 4.06x | **4.40x** | **+8.4%** | +16.7% |
-| code.rs       | 9.83x | **10.26x** | **+4.4%** |  +4.4% |
-| mixed.bin     | 2.38x | 2.38x    | tied (v4.6 gated out) | tied |
-| random.bin    | 1.00x | 1.00x    | tied (v4.6 gated out) | tied |
-| repetitive.bin| 53.32x| 53.32x   | tied (v4.6 gated out) | tied |
-
-The most important change: **code.rs now wins too.** The dense 1KB
-table overhead was preventing the v4.5 path from being viable on
-code.rs's smaller blocks. With sparse (50-byte tables), the v4.5
-path now wins on code.rs as well.
-
-The text.txt and data.json gains are slightly below the upper-bound
-estimate (we predicted +12.8% from sparse alone, got +7.7%/+8.4%). The
-difference is real: removing the ghost table makes rANS slightly less
-efficient on the surviving symbols (smaller alphabets = less
-probability mass per symbol = less effective normalization).
-
-### What does NOT change in 2.6
-
-- The 4 v3 streams (lit / len / dist_lo / dist_hi) still use dense
-  256-entry tables. Their symbols are u8 by definition so sparse
-  encoding would only save the table header, not the alphabet.
-- The 2-bit op-flag encoding and dict-select field are unchanged.
-- The trained.dict is still baked in via `include_bytes!`.
-- **Format break:** v4.5 files cannot be read by v4.6 decoders (the
-  dict table section is now 32 bytes longer). The decoder will panic
-  on a v4.5 file because the bitmask bytes will be interpreted as
-  table-header bytes. There is no backward-compat shim — the old
-  dense format was abandoned because it carried the ghost-symbol
-  overhead that this sprint deletes.
-
-### Decoder path
-
-When the codec encounters `TAG_V3_MULTISTREAM_DICT`:
-
-1. Read `dict_select` (1 byte) → load sub-dict.
-2. Read the 11 u32 sizes, slice the 5 rANS streams + op-flags.
-3. Read 32 bytes of bitmask from the dict table section.
-4. Build `remap[dense_idx] = original_id` by walking set bits in
-   id-ascending order.
-5. Decode the densified rANS table (N entries, where N = popcount).
-6. Decode the densified rANS stream (gets `n_dict_refs` dense indices).
-7. Map each dense index → original id via `remap`.
-8. Walk op-flags, dispatching Lit/Match/DictRef (DictRefs use the
-   remapped original ids).
-
-The decode time is unchanged (still 1-3 ms per block). The 32-byte
-bitmask read is negligible.
-
----
-
-## Sparse v3 streams (sprint 2.7)
-
-Sprint 2.6 made the 5th (dict-id) rANS stream sparse. Sprint 2.7
-applies the same principle to the 4 base v3 streams (literals,
-lengths, dist_lo, dist_hi). This is the highest-ROI change in the
-v4.x line because ALL blocks use these streams (not just dict-using
-ones), and the per-block savings add up.
-
-### Why this matters
-
-The dense 256-entry rANS table costs ~1027 bytes regardless of how
-many symbols are actually used. For the 4 base streams:
-
-| Stream    | Dense cost | Typical K | Sparse cost | Saved |
-|---|---:|---:|---:|---:|
-| Literals  | 1027 B   | 30 unique bytes  | 32+127 = 159 B | 868 B |
-| Lengths   | 1027 B   | 15 unique values | 32+67  = 99 B  | 928 B |
-| Dist_lo   | 1027 B   | 100 unique bytes | 32+407 = 439 B | 588 B |
-| Dist_hi   | 1027 B   | 5 unique values  | 32+27  = 59 B  | 968 B |
-| **Total per block** | | | | **~3.4 KB** |
-
-That's ~3.4 KB saved per block × 5-15 blocks per file = 17-50 KB
-savings per file. The v3 path is what the codec uses for every block
-that doesn't need dict refs, so this hits every file.
-
-### Implementation
-
-Generalized the sparse encoding to a single helper in `rans_v4.rs`:
-
-```rust
-pub fn sparse_rans_encode_u8(data: &[u8], scale_bits: u32) -> (Vec<u8>, Vec<u8>);
-// returns (table_section, stream_bytes)
-// where table_section = [32 bytes bitmask][densified rANS table]
-
-pub fn sparse_rans_decode_u8(table_section: &[u8], stream_bytes: &[u8], n: usize) -> Vec<u8>;
-// returns the original (un-densified) u8 stream
-```
-
-The helper is shared between `encode_v3_multistream` (v3 path,
-`codec.rs`) and `encode_v45_multistream` (v4.5 dict path,
-`dict_codec.rs`). All 5 streams in the v4.5 path now use sparse
-encoding.
-
-### Honest result
-
-| File          | v4.6       | v4.7 (sparse v3) | Δ       | Total from v4.3 |
-|---|---:|---:|---:|---:|
-| code.rs       | 10.26x | **32.17x** | **+214%** | **+227%** |
-| text.txt      | 2.38x  | **2.98x**  | **+25%**  | **+52%**  |
-| data.json     | 4.40x  | **5.44x**  | **+24%**  | **+44%**  |
-| mixed.bin     | 2.38x  | **2.76x**  | **+16%**  | **+16%**  |
-| repetitive.bin| 53.32x | **263.20x**| **+394%** | **+394%** |
-| .DS_Store     | 1.32x  | **6.38x**  | **+383%** | **+383%** |
-| random.bin    | 1.00x  | 1.00x     | tied (Raw blocks) | tied |
-
-The biggest surprise: **code.rs went from 10.26x to 32.17x.** The
-dense 1KB × 4 = 4KB table overhead was preventing the v3 path from
-capturing Rust source's rich byte distribution. With sparse tables
-the v3 path wins cleanly, and for code.rs blocks the v4.5 dict
-path on top adds even more savings (the v4.5 path also uses sparse
-encoding for all 5 streams).
-
-repetitive.bin's 5x jump (53.32x → 263.20x) is the dedup block +
-sparse table combination: each 64KB block used just 8 unique bytes
-("abcdefgh") so the literal table dropped from 1027 bytes to ~50
-bytes. With multiple dedup blocks, the per-block savings compound.
-
-**Format break (again):** v4.6 files cannot be read by v4.7 decoders
-because all 4 base stream table sections are now prefixed with a
-32-byte bitmask. The decoder will panic on a v4.6 file because the
-bitmask bytes will be misinterpreted as table-header bytes. No
-backward-compat shim.
-
-### Why the wins are so big
-
-A 32KB block of text typically uses 30-50 unique bytes (out of 256),
-15-20 match lengths (out of 253), and 5-15 unique distance high
-bytes (out of 256 — most matches are local, dist_hi=0 dominates).
-With the dense format, the other 200+ entries per table were pure
-overhead. The dense format was a 1.0-1.2 KB tax per stream that had
-no information value.
-
-After sprint 2.7: each table is the size of the alphabet it actually
-encodes. The cumulative effect is that the 5-stream overhead drops
-from ~5 KB to ~500 B per block, freeing that bandwidth for actual
-data.
-
-### Compress time impact
-
-Sparse encoding is slightly slower than dense (~1.5-2x the table
-construction time) because we have to compute the bitmask, the
-remap, and the densified table. For files where the v4.5 path is
-NOT triggered (mixed.bin, repetitive.bin, etc.), the codec skips
-this work entirely. For dict-using files, the overhead is ~5-10 ms
-per file (a small fraction of the total compress time).
-
----
-
-## Local sub-dict selection (sprint 2.8)
-
-The v4.6/v4.7 dict codec used a fixed 256-entry sub-dict
-(`trained_dict_compact()`) for blocks the pre-scan classified as
-text/code/JSON. The 256-entry alphabet was the maximum our rANS
-table could encode (u8 ids). But the full `corpus/trained.dict`
-has 5348 entries, with the most-frequent ones in the first 256.
-For some blocks, the per-block top-K entries were NOT the same as
-the global top-256.
-
-Sprint 2.8 unlocks all 5348 entries: for each block the encoder
-scans the data, picks the top-K (up to 100) most-frequent entries
-from the full dict, builds a custom local sub-dict, and uses it
-for LZ77 matching.
-
-### Format change
-
-A new `dict_select` value (`LOCAL = 4`) signals the new path. The
-bitmask for the 5th stream is 5348 bits = 669 bytes (vs. 32 bytes
-for fixed sub-dicts). The decoder reads the bitmask, walks the set
-bits in id-ascending order to get the K original ids, and
-rebuilds the same local sub-dict from the global `trained.dict`.
-
-```
-[tag=8]                                    (handled by caller)
-[u8 dict_select = 4]                       (LOCAL)
-[u32 n_ops]
-... (10 size u32s) ...
-... (5 base-stream sections) ...
-[u32 dict_table_len] [u32 dict_stream_len]
-[u32 op_flags_len]
-[base-stream sections]
-[dict section: 669 bytes bitmask + densified rANS table]
-[op_flags]
-```
-
-### Implementation
-
-```rust
-// Encoder
-let full = trained_dict();  // 5348 entries
-let local_ids = select_local_dict_ids(
-    data, &full, MAX_LOCAL_ENTRIES /* 100 */, /* min_match_len */ 3,
-);
-let local_dict = build_local_dict(&full, &local_ids);
-let ops = encode_with_dict(data, &local_dict);
-// ... encode streams with 5348-bit bitmask ...
-
-// Decoder
-let mut bitmask = [0u8; 669];
-bitmask.copy_from_slice(&dict_table_bytes[..669]);
-// Walk set bits in id-ascending order → get K original ids
-let mut remap = Vec::new();
-for id in 0..5348u16 {
-    if bitmask[(id / 8) as usize] & (1 << (id % 8)) != 0 {
-        remap.push(id);
-    }
-}
-// Build the same local sub-dict
-let local_dict = build_local_dict(&trained_dict(), &remap);
-// Decode the rANS stream → local ids (0..K-1) directly
-// (no remap needed: the encoder wrote 0..K-1 with no translation)
-let dict_values = rans_decode(dict_stream, &dict_table, n_dict_refs);
-// Use `dict_values[i]` as the local sub-dict id directly
-```
-
-### Honest result
-
-| File          | v4.7       | v4.8 (LOCAL)  | Δ       |
-|---|---:|---:|---:|
-| code.rs       | 32.17x | 32.17x | tied (fixed-256 already optimal) |
-| text.txt      | 2.98x  | 2.98x  | tied (fixed-256 already optimal) |
-| data.json     | 5.44x  | 5.44x  | tied (fixed-256 already optimal) |
-| mixed.bin     | 2.76x  | **3.59x** | **+30%** |
-| repetitive.bin| 263.20x| 263.20x| tied (no dict refs possible) |
-| .DS_Store     | 6.38x  | 6.38x  | tied (gated out) |
-| trained.dict  | 1.31x  | **1.43x** | **+9%** |
-
-Aggregate: 3.08x → **3.15x**. The big winner is **mixed.bin** (2.76x
-→ 3.59x, +30%) — a file where the per-block top-K differs
-substantially from the global top-256.
-
-trained.dict itself also wins (+9%) because some of its patterns
-are in the 256-5348 range.
-
-For text/code/JSON the fixed-256 sub-dict is already optimal —
-the global top-256 captures the most-frequent patterns for these
-data types. The LOCAL path doesn't win because the cost of the
-669-byte bitmask isn't recovered by the additional matches.
-
-### When LOCAL wins vs when fixed-256 wins
-
-LOCAL helps when the per-block top-K doesn't overlap with the
-global top-256. This happens when:
-
-- The file is heterogeneous (mixed ASCII + binary, mixed languages,
-  unusual token distributions). mixed.bin is the canonical example.
-- The file is itself a token dictionary (trained.dict), so its
-  per-block top-K naturally mirrors the global top-K — but some
-  patterns in the 256-5348 range appear more often.
-
-LOCAL doesn't help when:
-
-- The file is uniform text/code/JSON (text.txt, code.rs, data.json).
-  The first 256 trained entries already cover 90%+ of dict matches.
-- The file is repetitive or random (repetitive.bin, random.bin).
-  No dict refs at all.
-
-### Compress time impact
-
-The LOCAL try costs ~5-10ms per block (one LZ77+dict pass + rANS
-encoding of 5 streams with 5348-bit bitmask). For blocks where
-LOCAL doesn't win, the codec's "smallest wins" logic falls back
-to the fixed-256 (or v3, or RLE) path — but the LOCAL work is
-already done. This is the "multi-pass cost" the user warned about.
-
-In practice, on the bench corpus, the LOCAL try adds ~80ms of total
-compress time but wins on mixed.bin (-8KB) and trained.dict (-4KB).
-Net win: +9KB saved, +80ms spent. The trade-off is positive in
-terms of ratio but not in terms of speed. For production use, a
-gating heuristic (e.g., only try LOCAL when entropy is in 4-7)
-could skip the expensive path for blocks where it's unlikely to win.
-
-### Format break (again)
-
-v4.7 files cannot be read by v4.8 decoders because the dict
-section for `dict_select=4` uses a 669-byte bitmask vs. v4.7's
-32-byte. Old decoders would see the bitmask as table-header bytes
-and panic. No backward-compat shim.
-
----
-
-## Entropy gatekeeper (sprint 2.8.5)
-
-Sprint 2.8 noted that the LOCAL path costs ~80ms total compress
-time on the bench corpus, even when it doesn't win. Sprint 2.8.5
-adds a fast entropy-based gatekeeper to skip the LOCAL pre-scan
-on blocks where it can't possibly win.
-
-### Design
-
-The gatekeeper is a single Shannon-entropy check on the full block:
-
-```rust
-pub fn quick_entropy_gate(block: &[u8]) -> bool {
-    // Skip if entropy is below 3.0 (highly repetitive — RLE/v3 win)
-    // or above 7.5 (random — pre-scan returns NONE anyway).
-    h >= ENTROPY_GATE_LO && h <= ENTROPY_GATE_HI
-}
-```
-
-Why **full block** (not just the first 500 bytes like the existing
-`dict_select_for_block` pre-scan): for files with non-uniform
-entropy distribution (e.g. `mixed.bin`, which has a ~5KB random
-header followed by 60KB of natural text in a single CDC block),
-a 500-byte sample sees the random header tail and incorrectly
-rejects blocks that would win on the dict. The full block
-preserves the v4.8 wins on heterogeneous files.
-
-### Where it's used
-
-- **LOCAL path** (`encode_v45_multistream_local`): gated by
-  `quick_entropy_gate` only. The LOCAL encoder is self-gating
-  internally via `select_local_dict_ids` returning 0 matches for
-  truly random blocks, so we don't need to also call
-  `should_try_v45` (which would re-introduce the 500-byte sample
-  bias).
-- **fixed-256 path** (`encode_v45_multistream`): already gated by
-  `should_try_v45`, which now front-loads `quick_entropy_gate` so
-  the much more expensive pre-scan (printable ratio, 4-byte
-  uniqueness, code-keyword matching) is skipped for clearly
-  random or repetitive blocks.
-
-### Measured impact (median of 3 runs)
-
-| File          | v4.8 LOCAL (ms) | v4.8.5 (ms) | Δ      |
-|---|---:|---:|---:|
-| **random.bin**    | 21.6  | **5.2**  | **-76%** |
-| repetitive.bin    | 2.3   | 2.6  | +13% (noise) |
-| text.txt          | 22.2  | 23.0 | noise |
-| mixed.bin         | 5.8   | 5.8  | tied |
-| code.rs           | 17.9  | 20.8 | noise |
-| data.json         | 99.9  | 99.3 | tied |
-| **Total**         | **170** | **160** | **-6%** |
-
-The headline: **random.bin goes from 21.6ms to 5.2ms (-76%)** —
-the LOCAL pre-scan was being run on 7 random blocks (~3ms each
-in `select_local_dict_ids`, returning 0 matches), and the
-gatekeeper now skips all 7. Other files are stable within noise
-because the LOCAL encoder is already self-gating and returns
-None cheaply for blocks it can't compress.
-
-### Trade-off honesty
-
-The full-block scan is ~5× more expensive per call than a 500-byte
-sample (~30 µs vs ~6 µs per block). For 30 blocks per file that's
-~1 ms of overhead per file. But the LOCAL pre-scan it replaces
-on rejected blocks costs 5-10 ms each, so the trade-off is
-positive whenever the gatekeeper rejects any block.
-
-The one file that regressed slightly in this design: `repetitive.bin`
-went from 2.3 to 2.6 ms (+0.3 ms). The blocks have entropy exactly
-3.0 (8 unique chars repeating), which is on the gatekeeper's lower
-boundary and passes. The LOCAL encoder then runs `select_local_dict_ids`
-on 4 blocks of 65 KB and finds 0 matches (~0.1 ms each). Could
-tighten the threshold to `h > 3.0` to recover this, but the
-correctness/stability trade-off isn't worth it for 0.3 ms.
-
-### Bonus fix: corpus-suite filter
-
-The bench binary (`src/bin/corpus_suite.rs`) was double-counting
-files because the corpus directory contained both
-extensioned (`code.rs`) and bare (`code`) versions of each test
-file (leftover from older test runs). The bench now filters to
-`name.contains('.')` so only proper extensioned files are
-processed. This made the bench reproducible across runs
-(previously the aggregate varied ±5% based on which duplicates
-existed at bench time).
-
----
-
-## Tauri bridge API (sprint 2.8.6)
-
-`src/api.rs` is the thin Rust bridge between the Tauri command
-handlers and the core compression engine. Designed to be the
-single integration point the Tauri UI calls.
-
-### Public surface
-
-```rust
-// Stateless, sync, CPU-bound. Wrap in spawn_blocking from Tauri.
-
-pub struct CompressResult { compressed: Vec<u8>, original_size: u64,
-    compressed_size: u64, ratio: f64, compress_time_ms: f64 }
-pub struct DecompressResult { data: Vec<u8>, size: u64,
-    decompress_time_ms: f64 }
-pub struct EngineInfo { version: String, format_version: u8,
-    dict_entries: u32, has_entropy_gate: bool, has_local_subdict: bool,
-    has_sparse_v3: bool, features: Vec<String> }
-pub struct SelfTestResult { roundtrip_ok: bool, ratio: f64,
-    compress_time_ms: f64, decompress_time_ms: f64 }
-pub struct ApiError { code: String, message: String }
-pub type ApiResult<T> = Result<T, ApiError>;
-
-pub fn compress_bytes(input: &[u8]) -> CompressResult;
-pub fn decompress_bytes(input: &[u8]) -> ApiResult<DecompressResult>;
-pub fn engine_info() -> EngineInfo;
-pub fn self_test() -> ApiResult<SelfTestResult>;
-```
-
-### Design principles
-
-- **Stateless** — no global state, safe to call from multiple
-  Tauri command threads concurrently.
-- **Rich results** — every call returns its stats so the UI can
-  show progress without doing math itself.
-- **Serializable** — all types derive `Serialize` / `Deserialize`
-  so they cross the Tauri IPC boundary directly. No JSON
-  marshalling glue code needed in the UI layer.
-- **Error-typed** — fallible operations return `ApiResult<T>`
-  with structured `ApiError { code, message }` (not bare
-  strings). The UI can switch on `code` for i18n / fallbacks.
-- **No Tauri dep** — `src/api.rs` is pure Rust + serde. Tauri
-  integration is a thin command-handler layer in the consumer.
-
-### Example: Tauri command handler
-
-```rust,ignore
-use tauri::command;
-use nexus_compress::api::{compress_bytes, decompress_bytes,
-    CompressResult, DecompressResult, ApiError};
-
-#[command]
-pub async fn compress_cmd(input: Vec<u8>)
-    -> Result<CompressResult, ApiError>
-{
-    tauri::async_runtime::spawn_blocking(move || compress_bytes(&input))
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))
-}
-
-#[command]
-pub async fn decompress_cmd(input: Vec<u8>)
-    -> Result<DecompressResult, ApiError>
-{
-    tauri::async_runtime::spawn_blocking(move || decompress_bytes(&input))
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))
-        .and_then(|r| r)
-}
-```
-
-### Error codes
-
-| code                          | meaning                                           |
-|-------------------------------|---------------------------------------------------|
-| `decompress.empty`            | input buffer is empty                             |
-| `decompress.invalid_header`   | header magic or version byte doesn't match        |
-| `decompress.corrupted`        | a block's payload failed to decode (panic caught) |
-| `internal`                    | background task join failure (Tauri layer)        |
-
-The panic-catching in `decompress_bytes` is conservative: the
-underlying `crate::decompress` currently panics on corrupted
-streams rather than returning `Result`. Catching the panic and
-returning a structured `ApiError` keeps the Tauri UI from
-crashing on user-supplied bad input. A future refactor should
-make `crate::decompress` return `Result` natively and remove
-the `catch_unwind`.
-
-### Tests
-
-10 unit tests in `src/api.rs` cover:
-- Roundtrip: small text, 8KB repetitive, 32KB natural text, 4KB
-  random, empty input.
-- Error paths: empty input, garbage input, error display format.
-- Serialization: `EngineInfo` survives a `serde_json` roundtrip.
-- Self-test: the canned 8KB sample roundtrips and compresses.
-
----
-
-## Optimal parser (sprint 2.9 — the final boss)
-
-Sprint 2.9's mission: re-enable the optimal LZ77 DP with a
-corrected cost model and decide once and for all whether it wins
-against lazy matching on the v4.8 bitstream.
-
-### Step 1: Cost telemetry (`src/cost_probe.rs`)
-
-The first job was to measure the REAL bits per op-type in the
-v4.8 bitstream, not what the v2-era cost model thought. The
-probe encodes each of the 5 rANS streams and reports the
-average bits per symbol:
-
-| File           | lit bits/sym | len bits/sym | dist_lo | dist_hi | dict_id |
-|----------------|-------------:|-------------:|--------:|--------:|--------:|
-| code.rs        | 5.48         | 2.42         | 2.60    | 1.80    | 5.33    |
-| text.txt       | 4.77         | 4.45         | 8.65    | 4.91    | 0       |
-| data.json      | 4.63         | 5.13         | 8.05    | 5.57    | 1.78    |
-| mixed.bin      | 8.94         | 4.32         | 6.59    | 3.42    | 0       |
-| trained.dict   | 6.07         | 3.22         | 7.86    | 3.50    | 0       |
-| **average**    | **~7**       | **~4**       | **~7**  | **~4**  | **~2**  |
-
-Adding the 2-bit op-flag per op:
-
-| Op type | Real cost (v4) | Old static (v2) | Over-estimate |
-|---------|---------------:|----------------:|--------------:|
-| Literal | 2 + 7 = **9**  | 13              | 1.4×          |
-| Match   | 2 + 4+7+4 = **17** | 32          | 1.9×          |
-| DictRef | 2 + 2 = **4**  | (didn't exist)  | n/a           |
-
-The old v2 constants were 1.4-1.9× too pessimistic.
-
-### Step 2: Cost model corrected (`src/cost.rs`)
-
-Updated to v4 constants:
-
-```rust
-pub const LITERAL_BITS: u32 = 8;   // was 13
-pub const MATCH_BITS: u32 = 17;    // was 32
-pub const MATCH_LENGTH_THRESHOLD: u32 = 4;  // was 3
-```
-
-Threshold changed from 3 to 4 because at L=3 the effective per-match
-cost is 17 vs 3×8=24 literals — a 7-bit win, but borderline
-(measured match cost is closer to 20 for natural text). At L=4
-the win is 32-17=15 bits, comfortable.
-
-### Step 3: Optimal DP re-enabled, then reverted
-
-Replaced `mf.encode(data)` (lazy) with `mf.encode_optimal(data)`
-in the standard v3 path of the codec. Built, ran bench, got:
-
-| File          | v4.8.6 (lazy) | v4.9 (optimal) | Δ       |
-|---------------|--------------:|---------------:|--------:|
-| code.rs       | 32.17x (3.3KB)| 32.17x (3.3KB)| tied    |
-| data.json     | 5.44x (117KB) | 5.43x (118KB)  | **slightly worse** |
-| mixed.bin     | 3.59x (27KB)  | 3.59x (27KB)   | tied    |
-| random.bin    | 1.00x         | 1.00x          | tied    |
-| repetitive.bin| 263.20x       | 263.20x        | tied    |
-| text.txt      | 2.98x (60KB)  | 2.98x (60KB)   | tied    |
-| trained.dict  | 1.43x (41KB)  | 1.43x (42KB)   | **slightly worse** |
-| **Aggregate** | 3.15x         | 3.15x          | tied    |
-| **Compress**  | 171ms         | **1411ms**     | **8.8× SLOWER** |
-
-### Verdict: lazy wins
-
-The optimal DP with the corrected v4 cost model is **8.8× slower
-with no measurable ratio gain** (and actually slightly worse on
-data.json and trained.dict — the DP's all-literals future-cost
-estimate is too coarse and fragments matches that lazy finds
-intact).
-
-This matches the lesson from the v0/v1 era: the cost model is
-necessary but not sufficient. The DP's future-cost estimate
-(all-literals past the lookahead) mis-represents the codec's
-actual cost for paths with mixed match/literal sequences, so
-the DP makes decisions that are locally optimal but globally
-suboptimal. Lazy matching + 1-lookahead approximates the
-codec's actual decisions well enough to match or beat the DP
-on this corpus.
-
-### `CompressionLevel` API
-
-The optimal parser is exposed as a `Premium` level in the Tauri
-API (sprint 2.8.6), behind a `compression_level` field that
-defaults to `Fast` (lazy). The premium path is the same as
-fast for now — the doc above documents the bench result. To
-re-enable the optimal DP for testing, edit
-`src/codec.rs::compress_premium` to call into a variant of the
-LZ77 pipeline that uses `encode_optimal` instead of `encode`.
-
-### Files added in sprint 2.9
-
-- `src/cost_probe.rs`: 5 per-stream bits/symbol probes +
-  corpus-wide op count. Run via `cargo test --lib --release
-  cost_probe -- --nocapture`.
-- `src/cost.rs`: rewritten with v4 constants
-  (literal=8, match=17, threshold=4).
-- `src/api.rs::CompressionLevel`: new enum, defaults to Fast.
-- `src/codec.rs::compress_premium`: stub for the premium path.
-
----
-
-## Build & test
-
-```bash
-cargo build --release                          # lib + CLI binaries
-cargo test --release                           # 140 lib + 5 v4 tests
-cargo build --release --bin nexus-rar \
-    --features tauri-app                       # desktop GUI (Tauri 2)
-cargo bench                                    # criterion benches
-./target/release/corpus_suite                  # corpus bench vs gzip/zstd
-```
-
-140 lib + 5 v4 integration tests = 145 total. Covers: rANS
-roundtrip (uniform, skewed, random, long, rebuild), LZ77
-roundtrip (text, long, random, optimal), content classifier,
-FNV-1a hash vectors, codec end-to-end (small text, empty,
-random, repetitive), bit-cost model calibration
-(sprint 2.9 v4 constants), optimal-vs-lazy correctness,
-Gear table integrity, CDC determinism + boundary stability,
-CDC `min`/`max` enforcement, gatekeeper entropy cases,
-LOCAL sub-dict roundtrips, sparse encoding for all 5
-streams, dict codec roundtrips (Trained/Code/JSON/Local),
-API roundtrips + serde + self_test + CompressionLevel.
-
----
-
-## NexusRAR — desktop GUI (Phase 2)
-
-`sprint 2.10+` adds a Tauri 2.x desktop application that
-wraps the v4 engine in a dark/cyberpunk GUI.
-
-### Layout
-
-```
-ui/
-├── index.html     # 3-panel layout: dropzone, controls, telemetry
-├── main.js        # vanilla ES2022 controller, talks to Rust via IPC
-└── styles.css     # dark cyberpunk theme: cyan #00f0ff + magenta #ff00aa
-```
-
-```
-src/
-├── tauri_app.rs       # Tauri builder + command registration
-└── tauri_commands.rs  # 5 IPC commands wrapping nexus_compress::api
-```
-
-### Build
-
-```bash
-cargo build --release --bin nexus-rar --features tauri-app
-./target/release/nexus-rar
-```
-
-The Tauri binary is ~5 MB (Rust + WKWebView), the UI is
-~30 KB of static files, no Node/bundler required.
-
-### IPC commands
-
-| Command                          | Wraps                                      |
-|----------------------------------|--------------------------------------------|
-| `compress_bytes_cmd`             | `api::compress_bytes`                      |
-| `decompress_bytes_cmd`           | `api::decompress_bytes`                    |
-| `compress_bytes_with_level_cmd`  | `api::compress_bytes_with_level` (Premium) |
-| `engine_info_cmd`                | `api::engine_info` (called on startup)     |
-| `self_test_cmd`                  | `api::self_test` (8KB canned sample)       |
-
-All CPU-bound commands use `tauri::async_runtime::spawn_blocking`
-so the UI stays at 60 FPS during compression.
-
-### UI features (v1)
-
-- **Dropzone** with drag-and-drop + click-to-browse
-- **Compression level slider**: Fast (lazy, default) / Premium
-  (experimental optimal DP)
-- **Action buttons**: compress, decompress, self-test
-- **Telemetry console** with timestamped log lines, color-coded
-  tags (info / ok / warn / err / rx / tx)
-- **Result strip** with original/compressed/ratio/time
-- **Engine features footer** showing the v4 capabilities
-  (entropy-gate, local-subdict, sparse-v3)
-- **Status pill** in the top bar (idle / working / ok / err)
-
-### Trade-offs / not-yet
-
-- **No file save dialog** (Tauri 2.x dialog plugin not yet wired
-  up — output is held in memory and shown in console).
-- **Folder support** is partial: the file input has
-  `webkitdirectory` but only the first file is processed.
-- **.icns / .ico bundle icons** not generated (only PNG for
-  dev builds). Add via `cargo tauri icon icons/icon.png`
-  before a release bundle.
-- **No CSP `unsafe-eval`** — the UI doesn't use eval; the
-  `script-src 'unsafe-inline'` allowance is for the inline
-  `<script>` blocks in `index.html` (none currently used)
-  or future inline event handlers.
-
----
-
-## v4 changelog
-
-**v4 (2026-07-06) — working roundtrip end-to-end.**
-
-The v3 entropy coder had a table-header bug: `n_symbols as u8` truncated
-256 to 0, so the decoder read an empty cum table and every symbol came
-back as `0xFFFFFFFF` (= "last symbol id"). With `len = 0xFFFFFFFF` in
-`MatchDecoder::decode`, the inner loop ran ~2^32 iterations and the
-process got OOM-killed. The reported v3 ratios above are therefore
-incorrect — they came from a codec whose decompressor was broken.
-
-v4 fixes the entropy coder by switching to the well-tested
-[`rans`](https://crates.io/crates/rans) crate (which wraps
-[ryg_rans](https://github.com/rygorous/ryg_rans) — Fabian Giesen's
-reference impl). Three prior attempts at a from-scratch entropy coder
-(Schindler bit-aligned arithmetic, Subbotin byte-aligned, custom rANS)
-all hit subtle precision/state-evolution bugs that only surfaced on
-specific test patterns (alternating vs repetitive vs skewed). The
-`rans` crate is zero-deps, well-tested, and gave a working roundtrip
-in ~30 lines of wrapper code.
-
-### v4 results (honest, end-to-end roundtrip verified)
-
-| File | Size | NexusCompress v4 | Ratio | zstd -19 (for context) | Gap |
-|---|---:|---:|---:|---:|---:|
-| code.rs | 105 KB | 3.3 KB | **32.17x** | 330 B (325x) | 10x worse |
-| data.json | 635 KB | 117 KB | **5.44x** | 50 KB (12.7x) | 2.3x worse |
-| mixed.bin | 95 KB | 27 KB | **3.59x** ⬆ | 18 KB (5.3x) | 1.5x worse |
-| random.bin | 256 KB | 256 KB | **1.00x** ✅ | 256 KB (1x) | EQUAL ✅ |
-| repetitive.bin | 256 KB | 996 B | **263.20x** 🚀 | 43 B (6096x) | 23x worse (but absolute = +1KB) |
-| text.txt | 178 KB | 60 KB | **2.98x** | 32 KB (5.6x) | 1.9x worse |
-| **aggregate** (excl. trained.dict) | 1.32 MB | 412 KB | **3.15x** | 365 KB (4.30x) | — |
-
-Sprint 2.5 + 2.6 + 2.7 + 2.8 (dict codec + sparse tables + local sub-dict) wins:
-- text.txt 1.96x → **2.98x** (+52%)
-- data.json 3.77x → **5.44x** (+44%)
-- code.rs 9.83x → **32.17x** (+227%)
-- mixed.bin 2.38x → **3.59x** (+51%, NEW with LOCAL sub-dict)
-- repetitive.bin 53.32x → **263.20x** (+394%)
-- .DS_Store 1.32x → **6.38x** (+383%)
-- random.bin: 1.00x tied (Raw blocks, no streams)
-
-Notes:
-- Sprint 2.5 added a 5th rANS stream for dict-ids, 2-bit packed op-flags,
-  and per-block sub-dict selection via a 500-byte pre-scan heuristic.
-- Sprint 2.6 replaced the dense 256-entry dict table with a sparse
-  format (32-byte bitmask + table only for set bits).
-- Sprint 2.7 generalized the sparse encoding to ALL 5 streams.
-- Sprint 2.8 added per-block LOCAL sub-dict selection from the full
-  5348-entry trained dict (vs. the fixed 256-entry compact version).
-  See "Local sub-dict selection (sprint 2.8)" below.
-
-### What the v4 commit history actually contains
-
-| Commit | What it does | Status |
-|---|---|---|
-| `v4 codec: all 6 corpus files roundtrip correctly` | Frequency-table header width fix (u16 not u8). | ✅ working |
-| `v4: rans_v4 wrapper using ryg_rans crate, all 6 tests pass` | `src/rans_v4.rs`: 30-line wrapper around `rans` crate. All 6 unit tests pass. | ✅ working |
-| `wip: byte-aligned subbotin (partial)` | `src/subbotin.rs`: failed from-scratch byte-aligned range coder. 2/10 tests. | ❌ abandoned |
-| `wip: range2 arithmetic coder from scratch (partial)` | `src/range2.rs`: failed from-scratch bit-aligned arithmetic coder. 4/10 tests. | ❌ abandoned |
-| `wip: v3.5 streaming rANS chunking in progress...` | Original v3 with the table-header bug. 0/6 corpus files roundtrip correctly. | ⚠️ superseded |
-
-The `src/range2.rs`, `src/subbotin.rs`, and original `src/rans.rs` were
-**deleted in the sprint 2.1 cleanup** (their lessons learned are
-preserved in agent memory at `~/.mavis/agents/mavis/memory/MEMORY.md`).
-The codebase no longer references any of these abandoned modules.
-
----
-
-## License
-
-MIT.
----
-
-## P2P Tunnel — Sprint 5.5.1
-
-The P2P tunnel lets you send a file to a friend over the internet
-without setting up a server. The architecture is:
-
-```
-SENDER                          CLOUDFLARE              RECEIVER
-  ├─ axum HTTP (port 49152+)         edge                 ├─ reqwest
-  ├─ SPAKE2 + Argon2id + AES-256-GCM ◄── TLS ──────────►  └─ decrypt
-  └─ pre-auth HMAC (anti-DoS)                             
-```
-
-### Transport modes
-
-| Mode | Requires | Stable? | Notes |
-|---|---|---|---|
-| **Quick** (default) | nothing | No — rate-limited by Cloudflare after 3-5 connections | For casual one-off use. |
-| **Named** | a free Cloudflare account | Yes — your own DNS, no rate limit | For serious use. |
-| **Direct** (Sprint 5.5.2) | LAN/port-forward | Coming soon | No Cloudflare dependency. |
-
-### Quick mode
-
-Click **GENERATE CODE** in the Send panel. The app spawns a
-`cloudflared --url` Quick Tunnel and shows you a 4-word code
-plus a token. Send both to the receiver. They paste the token
-into the Receive panel and click **START RECEIVING**.
-
-Cloudflare's public Quick Tunnel API throttles aggressive
-use (Error 1015). For sustained use, switch to **Named**.
-
-### Named mode — 5-minute setup
-
-1. **Create a free Cloudflare account** at
-   <https://dash.cloudflare.com/sign-up>.
-2. **Add your domain** to Cloudflare (or use a free `*.example.dev`
-   Cloudflare-managed domain if you don't own one).
-3. **Install `cloudflared`** on your machine and log in:
-   ```bash
-   cloudflared tunnel login
-   ```
-4. **Create a tunnel:**
-   ```bash
-   cloudflared tunnel create nexus-share
-   ```
-   This prints a long base64 token — copy it.
-5. **Create a DNS record** that points to the tunnel:
-   ```bash
-   cloudflared tunnel route dns nexus-share p2p.your-domain.com
-   ```
-6. **Open Nexus → Config panel → Tunnel transport:**
-   - Set **mode** to `named`.
-   - Set **hostname** to `p2p.your-domain.com` (the DNS record
-     you just created).
-   - Paste the **tunnel token** from step 4.
-   - Click **Save tunnel settings**.
-
-The token is stored in your OS keyring (macOS Keychain, Windows
-Credential Manager, Linux Secret Service) — never on disk.
-
-7. **Click GENERATE CODE** in the Send panel. The receiver
-   connects to `https://p2p.your-domain.com` and goes through
-   the same SPAKE2 + pre-auth HMAC + AES-256-GCM flow as Quick
-   mode. The connection is end-to-end encrypted: Cloudflare
-   only sees ciphertext.
-
-### Direct mode (Sprint 5.5.2)
-
-Not yet implemented. Will use mDNS for LAN discovery, UPnP for
-NAT traversal, and a direct TCP connection (no Cloudflare).
-Switch to Direct in the Config panel to see the "Coming soon"
-placeholder.
-
-### Security layers (from outer to inner)
-
-| Layer | Cost per request | Defends against |
-|---|---|---|
-| **Per-IP rate limit** | 0μs (blacklisted) | DoS, scrapers |
-| **Pre-auth HMAC** | ~5μs | Scanners without the code |
-| **SPAKE2** | ~500μs (Ed25519) | Proves both sides have the code |
-| **AES-256-GCM per chunk** | native speed | Tampering, content leak |
-
-All four layers MUST pass for the receiver to get a byte.
+**Made with Rust + Next.js + a lot of ☕ in Rome.**

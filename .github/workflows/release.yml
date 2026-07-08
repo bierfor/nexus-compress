@@ -1,0 +1,213 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 0.1.1). MUST match tauri.conf.json.'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  #  Build the GUI bundle for macOS + Linux + Windows.
+  #  Uses tauri-apps/tauri-action which handles signing
+  #  (if secrets are configured), bundling (.dmg / .deb / .msi),
+  #  and uploading assets to the release.
+  # ─────────────────────────────────────────────────────────────
+  build-gui:
+    name: build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            label: macOS · arm64
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            label: macOS · x86_64
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            label: Linux · x86_64
+          - platform: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            label: Linux · arm64
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: Windows · x86_64
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/Library/Caches/cargo
+            src-tauri/target
+            C:\Users\runneradmin\.cargo\registry
+            src-tauri\target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock', '**/src-tauri/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      # ─── macOS prerequisites
+      - name: Install macOS deps
+        if: matrix.platform == 'macos-latest'
+        run: |
+          brew install create-dmg
+
+      # ─── Linux prerequisites
+      - name: Install Linux deps (Tauri 2 system libs)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libwebkit2gtk-4.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup2.4-dev \
+            libjavascriptcoregtk-4.0-dev \
+            libavahi-client-dev \
+            libsecret-1-dev \
+            libfuse2
+
+      # ─── Windows prerequisites (WIX for MSI bundling)
+      - name: Install WIX (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Tauri's setup action installs the WiX toolset as needed.
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Frontend · install + build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Tauri · bundle via tauri-action
+        uses: tauri-apps/tauri-action@v0
+        env:
+          # Signing secrets (configured in repo Settings → Secrets).
+          # If unset, the action produces an unsigned build (still OK
+          # for CI sanity checks, but won't ship to end users).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS codesign + notarise
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows codesign
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', inputs.version) }}
+          releaseName: "NexusRAR ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', inputs.version) }}"
+          releaseBody: "Automated release — see CHANGELOG.md."
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }} --verbose
+
+      - name: Upload to workflow artifacts (fallback when no release)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-rar-${{ matrix.target }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**
+            src-tauri/target/${{ matrix.target }}/release/${{ matrix.target == 'x86_64-pc-windows-msvc' && 'nexus-rar.exe' || 'nexus-rar' }}
+          if-no-files-found: ignore
+
+  # ─────────────────────────────────────────────────────────────
+  #  Engine binaries (CLI only — for users who want compression
+  #  without the GUI). Single artifact per platform/arch.
+  # ─────────────────────────────────────────────────────────────
+  build-engine:
+    name: engine · ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-22.04' ||
+                 matrix.target == 'aarch64-unknown-linux-gnu' && 'ubuntu-22.04' ||
+                 matrix.target == 'x86_64-apple-darwin' && 'macos-latest' ||
+                 matrix.target == 'aarch64-apple-darwin' && 'macos-latest' ||
+                 'windows-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/Library/Caches/cargo
+            src-tauri/target
+            C:\Users\runneradmin\.cargo\registry
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.target }}-cargo-
+
+      - name: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }} --bin nexus --bin p2p_smoke
+
+      - name: Test (where Linux is fastest)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cargo test --release --bins
+          cargo test --release --bin p2p_smoke
+
+      - name: Package engine binary
+        shell: pwsh
+        run: |
+          $suffix = "${{ matrix.target }}"
+          $binary = if ($suffix -like '*windows*') { 'nexus.exe' } else { 'nexus' }
+          $smoke  = if ($suffix -like '*windows*') { 'p2p_smoke.exe' } else { 'p2p_smoke' }
+          $dir = "engine-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/$binary" "$dir/$binary"
+          Copy-Item "target/${{ matrix.target }}/release/$smoke"  "$dir/$smoke"
+          if (Test-Path "LICENSE") { Copy-Item LICENSE "$dir/LICENSE" }
+          if (Test-Path "README.md") { Copy-Item README.md "$dir/README.md" }
+          Compress-Archive -Path "$dir/*" -DestinationPath "$dir.zip"
+
+      - name: Upload engine archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-engine-${{ matrix.target }}
+          path: engine-${{ matrix.target }}.zip
+          if-no-files-found: ignore
