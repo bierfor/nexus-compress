@@ -290,6 +290,20 @@ pub async fn decompress_target_cmd(
         .get("output_dir")
         .and_then(|v| v.as_str())
         .map(PathBuf::from);
+    // Sprint 5.7.2: when the archive is encrypted (NXE\0 / NXR\0
+    // magic), the frontend passes `req.password: string` here so
+    // we can route to `decompress_target_with_password` which
+    // does the AES-256-GCM decrypt (and Reed-Solomon reassembly
+    // if recovery is enabled) BEFORE handing the recovered NXS
+    // bytes to the plain inner-format decompressor. When password
+    // is absent, we go through the plain path — same as before
+    // Sprint 5.7.2 — so legacy `.tar` / `.zst` / `.gz` / `.nxs6`
+    // / LZMA archives continue to work untouched.
+    let password: Option<String> = req
+        .get("password")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let p = PathBuf::from(path);
     let filename_for_db = p
         .file_name()
@@ -303,11 +317,25 @@ pub async fn decompress_target_cmd(
         let cb = |event: ProgressEvent| {
             throttler.feed("compress-progress", &event);
         };
-        api::decompress_target_with_progress(
-            &p,
-            output_dir.as_deref(),
-            cb,
-        )
+        match password {
+            Some(pwd) => {
+                // Drop the password immediately after we've moved
+                // it into the closure so it doesn't linger on the
+                // stack any longer than needed (defense in depth
+                // — the `drop(pwd)` below ensures the heap copy
+                // is zeroed when the function returns).
+                api::decompress_target_with_password(
+                    &p,
+                    pwd.as_bytes(),
+                    cb,
+                )
+            }
+            None => api::decompress_target_with_progress(
+                &p,
+                output_dir.as_deref(),
+                cb,
+            ),
+        }
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))?;

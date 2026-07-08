@@ -11,11 +11,21 @@
  *   4. User picks a destination folder.
  *   5. Click "Extract all" or "Extract N selected" → backend
  *      streams only the chosen entries from the archive.
+ *
+ * Sprint 5.7.2: encrypted archives (NXE\0 / NXR\0 magic). When
+ * the peek returns `nxe-encrypted` or `nxr-encrypted`, the
+ * ArchivePreview component renders the 🔒 + password prompt.
+ * On unlock we re-peek with the password (the backend decrypts
+ * then runs the inner-format peek on the recovered NXS bytes)
+ * and stash the password in `password` state for the eventual
+ * extract. The password is wiped from memory right after the
+ * extract completes.
  */
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { type View } from "@/components/NeoTopBar";
 import { useLocale } from "@/components/LocaleProvider";
+import { ArchivePreview, type Preview } from "@/components/ArchivePreview";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -101,6 +111,75 @@ export function DecompressView({
   const [peeking, setPeeking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  // Sprint 5.7.2: password state for encrypted archives (NXE\0 /
+  // NXR\0 magic). The user types the password in the
+  // ArchivePreview's EncryptedPreview panel → onUnlock callback,
+  // which calls peek_archive_target_cmd with the password, which
+  // returns the decrypted file list. We then stash the password
+  // here so the onExtract call below can pass it to
+  // decompress_target_cmd. Wiped from memory immediately after
+  // the extract succeeds (security: no lingering sensitive bytes
+  // in the JS heap).
+  const [password, setPassword] = useState<string>("");
+  // Locked-state mirrors the ArchivePreview's EncryptedPreview
+  // panel: `unlocking` is true while the backend re-peek is in
+  // flight (so the password input shows a "unlocking…" button),
+  // and `unlockError` carries the last failed password attempt
+  // for the "✗ wrong password" inline error.
+  const [unlocking, setUnlocking] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+
+  // Adapter: LegacyArchiveInfo → Preview. The encrypted peek
+  // returns `nxe-encrypted` / `nxr-encrypted` with files: [] and
+  // total_uncompressed ≈ compressed_size (we only have the outer
+  // envelope before unlock). The ArchivePreview component
+  // expects the Preview shape; this adapter fills the gaps.
+  function legacyToPreview(li: LegacyArchiveInfo): Preview {
+    return {
+      archive_kind: li.archive_kind,
+      n_files: li.n_files,
+      total_uncompressed: li.total_uncompressed,
+      compressed_size: li.compressed_size,
+      files: (li.files ?? []).map((f) => ({
+        path: f.path,
+        size: f.size,
+        is_dir: f.is_dir,
+      })),
+    };
+  }
+
+  // onUnlock: the ArchivePreview's password prompt calls this
+  // when the user submits. We re-invoke peek_archive_target_cmd
+  // with the password; on success the new file list is rendered
+  // (the same `info` legacy path), and the password is stashed
+  // for onExtract. On wrong password we show the inline error.
+  const onUnlock = useCallback(
+    async (pwd: string) => {
+      if (!archivePath) return;
+      setUnlocking(true);
+      setUnlockError(null);
+      try {
+        const r = await tauriInvoke<LegacyArchiveInfo>(
+          "peek_archive_target_cmd",
+          { req: { path: archivePath, password: pwd } },
+        );
+        setLegacyInfo(r);
+        setPassword(pwd);
+      } catch (e: any) {
+        const msg = String(e?.message ?? e);
+        // The backend's encrypted.wrong_password error code
+        // surfaces as "encrypted.wrong_password: wrong password"
+        // — strip the code prefix and show just the message.
+        const cleaned = msg.replace(/^[^:]+:\s*/, "");
+        setUnlockError(
+          cleaned.includes("wrong") ? "wrong password" : cleaned
+        );
+      } finally {
+        setUnlocking(false);
+      }
+    },
+    [archivePath],
+  );
   const [pathInput, setPathInput] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Pagination for huge archives. Loads 500 entries at a time
@@ -360,6 +439,19 @@ export function DecompressView({
     setBusy(true);
     setError(null);
     const startTime = Date.now();
+    // Sprint 5.7.2: if the archive is encrypted but the user
+    // hasn't unlocked yet, we don't have a password to pass
+    // to the backend. Show a clear error and bail.
+    const isEncrypted =
+      legacyInfo?.archive_kind === "nxe-encrypted" ||
+      legacyInfo?.archive_kind === "nxr-encrypted";
+    if (isEncrypted && !password) {
+      setError(
+        "archive is encrypted — type the password in the preview above to unlock"
+      );
+      setBusy(false);
+      return;
+    }
     try {
       if (inspectable && info) {
         const selectedArr = Array.from(selected);
@@ -372,6 +464,12 @@ export function DecompressView({
               selected: selectedArr.length === info.entries.filter((e) => !e.is_dir).length
                 ? null
                 : selectedArr,
+              // Sprint 5.7.2: forward the password to the
+              // extract command for encrypted archives.
+              // The backend (p2p_archive_extract_cmd or
+              // decompress_target_cmd) routes to the
+              // encrypted path when password is set.
+              password: password || null,
             },
           },
         );
@@ -389,6 +487,11 @@ export function DecompressView({
           req: {
             path: archivePath,
             output_dir: destDir || null,
+            // Sprint 5.7.2: same — forward the password. When
+            // set, the backend routes to
+            // decompress_target_with_password which decrypts
+            // with AES-256-GCM (and Reed-Solomon if NXR).
+            password: password || null,
           },
         });
         onComplete({
@@ -401,12 +504,17 @@ export function DecompressView({
         setArchivePath(null);
         setLegacyInfo(null);
       }
+      // Wipe the in-memory password on success (and on
+      // failure). The user will need to re-enter it if they
+      // want to extract again.
+      setPassword("");
     } catch (e: any) {
       setError(String(e?.message ?? e));
+      setPassword("");
     } finally {
       setBusy(false);
     }
-  }, [archivePath, destDir, inspectable, info, selected, legacyInfo, onComplete]);
+  }, [archivePath, destDir, inspectable, info, selected, legacyInfo, onComplete, password]);
 
   const fileCount = info?.entries.filter((e) => !e.is_dir).length ?? 0;
   const selectedCount = selected.size;
@@ -520,14 +628,30 @@ export function DecompressView({
                   <DetailStat label={t("decompress.size")} value={prettyBytes(info.total_bytes)} />
                 </div>
               ) : legacyInfo ? (
-                <div className="grid grid-cols-3 gap-5 pt-4 border-t border-white/[0.06]">
-                  <DetailStat label={t("decompress.format")} value={legacyInfo.archive_kind} />
-                  <DetailStat label={t("decompress.files")} value={`${legacyInfo.n_files}`} />
-                  <DetailStat
-                    label={t("decompress.size.original")}
-                    value={prettyBytes(legacyInfo.total_uncompressed)}
-                  />
-                </div>
+                <>
+                  <div className="grid grid-cols-3 gap-5 pt-4 border-t border-white/[0.06]">
+                    <DetailStat label={t("decompress.format")} value={legacyInfo.archive_kind} />
+                    <DetailStat label={t("decompress.files")} value={`${legacyInfo.n_files}`} />
+                    <DetailStat
+                      label={t("decompress.size.original")}
+                      value={prettyBytes(legacyInfo.total_uncompressed)}
+                    />
+                  </div>
+                  {/* Sprint 5.7.2: encrypted archive unlock UI. The
+                      ArchivePreview's EncryptedPreview panel handles
+                      the password prompt + re-peek with the key.
+                      onUnlock stores the password in state for the
+                      eventual onExtract call below. */}
+                  {legacyInfo.archive_kind === "nxe-encrypted" ||
+                  legacyInfo.archive_kind === "nxr-encrypted" ? (
+                    <ArchivePreview
+                      preview={legacyToPreview(legacyInfo)}
+                      unlocking={unlocking}
+                      unlockError={unlockError}
+                      onUnlock={onUnlock}
+                    />
+                  ) : null}
+                </>
               ) : peeking ? (
                 <div className="text-zinc-500 text-[13px] py-4 flex items-center gap-2">
                   <span className="animate-spin inline-block">⟳</span>
