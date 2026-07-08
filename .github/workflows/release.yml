@@ -213,29 +213,52 @@ jobs:
             src-tauri/target
             C:\Users\runneradmin\.cargo\registry
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ matrix.target }}-cargo-
+           restore-keys: |
+             ${{ matrix.target }}-cargo-
+
+      # Sprint 5.6.28 hotfix #8: build-engine compiles
+      # p2p_smoke which lives in src-tauri and pulls in
+      # tauri → gtk-3. Without these apt packages the build
+      # fails on gdk-sys / glib-sys / libsoup-3 etc.
+      - name: Install Linux Tauri 2 system libs
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libavahi-client-dev \
+            libsecret-1-dev
 
       - name: cargo build --release
         run: |
-          # Sprint 5.6.28 hotfix #5: under a Cargo workspace
-          # (which we added in #3 to fix tauri-cli's
-          # "default-run" lookup), plain `cargo build --bin nexus`
-          # is supposed to compile only the engine binary but
-          # cargo also pulls in the src-tauri crate's
-          # dependency tree, including gtk-sys / gdk-sys which
-          # requires libgdk-3.0-dev on Linux runners.
-          #
-          # Fix: use --package nexus-compress to restrict
-          # compilation strictly to the engine crate. This
-          # stops src-tauri's GTK dependency from being built
-          # here (it's built in the build-gui job instead).
+          # Sprint 5.6.28 hotfix #5: --package nexus-compress
+          # restricts compilation to just the engine crate,
+          # not the workspace. p2p_smoke (built below) lives
+          # in src-tauri and is built separately.
           cargo build --release --package nexus-compress --target ${{ matrix.target }} --bin nexus
           (cd src-tauri && cargo build --release --target ${{ matrix.target }} --bin p2p_smoke)
 
       - name: Test (where Linux is fastest)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
+          # Sprint 5.6.28 hotfix #8: install GTK system libs here
+          # too — we also compile p2p_smoke which lives in
+          # src-tauri and pulls in tauri → gtk-3.
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libavahi-client-dev \
+            libsecret-1-dev
           cargo test --release --bins
           (cd src-tauri && cargo test --release --bin p2p_smoke)
 
