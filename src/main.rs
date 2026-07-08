@@ -3,8 +3,9 @@
 //! Usage:
 //!   nexus c <input> <output>           # compress a file
 //!   nexus c --backend v5 --minify <in> <out>  # v5 LZMA + minify pre-filter
+//!   nexus c --password P --recovery low <in> <out>  # v4 + AES-256-GCM + RS (NXE/NXR)
 //!   nexus c <dir>  <output.nxar>        # compress a directory
-//!   nexus d <input.nexus|nxar> <output>
+//!   nexus d <input.nexus|nxar|nxe|nxr> <output>
 //!   nexus bench                          # run corpus benchmark
 //!
 //! Compression backends (v4 default, v5 = LZMA via xz2, v6 = v5 + smart preprocessor):
@@ -14,15 +15,28 @@
 //!   v5-extreme  — LZMA level 9 (max ratio)
 //!   v6          — LZMA + swc AST minify (for .js/.ts/.tsx/.jsx) OR conservative minify
 //!   v6-extreme  — same as v6 but LZMA level 9
+//!
+//! Encrypted + recovery (Sprint 5.7.2):
+//!   --password P     enable AES-256-GCM encryption; output magic = NXE\0
+//!                    or NXR\0 (if --recovery is also set)
+//!   --recovery LVL   parity budget: off (default if --password set means
+//!                    no parity → just encryption) | low (10%) | high (25%)
+//!                    Default if --password is set WITHOUT --recovery:
+//                    "low" (10% recovery — matches the design doc's
+//                    "recovery on by default" choice).
 
 use std::env;
 use std::fs;
 use std::path::Path;
 
+use nexus_compress::encrypted::{
+    compress_encrypted, decompress_encrypted, EncryptOptions, RecoveryLevel,
+};
 use nexus_compress::engine;
+use nexus_compress::crypto::KdfPreset;
 
 fn print_help() {
-    eprintln!("nexus CLI — NexusCompress v4 + v5 LZMA + v6 AST-aware + v6-solid");
+    eprintln!("nexus CLI — NexusCompress v4 + v5 LZMA + v6 AST-aware + v6-solid + NXE/NXR encrypted");
     eprintln!();
     eprintln!("USAGE:");
     eprintln!("    nexus c [OPTIONS] <input> <output>");
@@ -31,11 +45,17 @@ fn print_help() {
     eprintln!();
     eprintln!("OPTIONS:");
     eprintln!("    --backend NAME  v4 | v5 | v5-min | v5-extreme | v6 | v6-extreme");
-    eprintln!("                    (default: v4)");
+    eprintln!("                    (default: v4). Ignored if --password is set (encrypted");
+    eprintln!("                    path always uses v4 + AES-256-GCM).");
     eprintln!("    --minify        apply the conservative minify pre-filter (v5-min)");
     eprintln!("    --solid         directory: build a SOLID v6 archive (NXS6, LOSSY)");
     eprintln!("                    cross-file LZMA dictionary, max ratio on source code");
     eprintln!("    --level N       LZMA level 0..9 (default 6, used by --solid and v5/v6)");
+    eprintln!("    --password P    encrypt with AES-256-GCM (Sprint 5.7.2). Argon2id KDF");
+    eprintln!("                    with the Interactive preset (~100 ms on a modern desktop).");
+    eprintln!("                    Output magic: NXE\\0 (no recovery) or NXR\\0 (with recovery).");
+    eprintln!("    --recovery LVL  parity budget: off | low (10%) | high (25%). Default if");
+    eprintln!("                    --password is set without --recovery: low. 7z-style UX.");
     eprintln!("    -h, --help      show this help");
     eprintln!();
     eprintln!("EXAMPLES:");
@@ -46,7 +66,10 @@ fn print_help() {
     eprintln!("    nexus c --backend v6-extreme code.js out.lz  # LZMA -9 + swc");
     eprintln!("    nexus c --solid src/ out.nxs6        # SOLID v6 (lossy, max ratio)");
     eprintln!("    nexus c --solid --level 9 src/ out.nxs6  # SOLID v6, LZMA -9");
+    eprintln!("    nexus c --password hunter2 out.nxe secret.txt  # encrypted only (NXE)");
+    eprintln!("    nexus c --password hunter2 --recovery high big.iso out.nxr  # + RS");
     eprintln!("    nexus d out.nxs6 out_dir/            # auto-detect NXS6 / NXAR / v5");
+    eprintln!("    nexus d --password hunter2 out.nxr out_dir/  # decrypt NXR with recovery");
 }
 
 fn main() {
@@ -60,6 +83,8 @@ fn main() {
     let mut minify = false;
     let mut solid = false;
     let mut lzma_level: Option<u32> = None;
+    let mut password: Option<String> = None;
+    let mut recovery: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
     while let Some(a) = iter.next() {
         match a.as_str() {
@@ -74,6 +99,12 @@ fn main() {
             }
             "--level" => {
                 lzma_level = iter.next().and_then(|s| s.parse().ok());
+            }
+            "--password" => {
+                password = iter.next().cloned();
+            }
+            "--recovery" => {
+                recovery = iter.next().cloned();
             }
             "-h" | "--help" => {
                 print_help();
@@ -162,23 +193,64 @@ fn main() {
                 }
             } else {
                 let bytes = fs::read(input).expect("read input");
-                let out = if matches!(backend_name, "v6" | "v6-extreme") {
-                    // v6 needs the file extension to pick the right
-                    // preprocessor. engine::compress_with only does
-                    // conservative minify unconditionally, so we
-                    // call the v6 entry point directly.
-                    let ext = input.extension().and_then(|e| e.to_str());
-                    let level = if backend_name == "v6-extreme" { 9 } else { 6 };
-                    engine::compress_v6(&bytes, ext, level)
+                // ── Encrypted path (Sprint 5.7.2) ────────────
+                //
+                // If `--password` is set, route through
+                // `encrypted::compress_encrypted` which wraps
+                // the v4 codec (multi-stream LZ77+rANS) with
+                // AES-256-GCM per shard + optional Reed-Solomon
+                // parity shards. Output magic becomes
+                // NXE\0 (no recovery) or NXR\0 (with recovery).
+                //
+                // Default recovery level is "low" (10% parity)
+                // when --password is set WITHOUT --recovery —
+                // matches the design-doc decision that recovery
+                // is on-by-default (the user has to opt OUT, not
+                // opt IN).
+                if let Some(pwd) = password.as_deref() {
+                    let recovery_level = match recovery.as_deref() {
+                        Some(s) => RecoveryLevel::from_str(s).unwrap_or_else(|e| {
+                            eprintln!("{}", e);
+                            std::process::exit(2);
+                        }),
+                        None => RecoveryLevel::Low,
+                    };
+                    let opts = EncryptOptions {
+                        password: pwd.as_bytes(),
+                        recovery: recovery_level,
+                        preset: KdfPreset::Interactive,
+                    };
+                    let out = compress_encrypted(&bytes, &opts).expect("compress encrypted");
+                    fs::write(output, &out).expect("write output");
+                    let ratio = bytes.len() as f64 / out.len().max(1) as f64;
+                    let label = match recovery_level {
+                        RecoveryLevel::Off => "NXE",
+                        RecoveryLevel::Low => "NXR/low",
+                        RecoveryLevel::High => "NXR/high",
+                    };
+                    eprintln!(
+                        "{} -> {} ({:.2}x, encrypted+{})",
+                        positional[1], output, ratio, label,
+                    );
                 } else {
-                    engine::compress_with(backend_name, &bytes, minify).expect("compress")
-                };
-                fs::write(output, &out).expect("write output");
-                let ratio = bytes.len() as f64 / out.len().max(1) as f64;
-                eprintln!(
-                    "{} -> {} ({:.2}x, {})",
-                    positional[1], output, ratio, backend_name,
-                );
+                    let out = if matches!(backend_name, "v6" | "v6-extreme") {
+                        // v6 needs the file extension to pick the right
+                        // preprocessor. engine::compress_with only does
+                        // conservative minify unconditionally, so we
+                        // call the v6 entry point directly.
+                        let ext = input.extension().and_then(|e| e.to_str());
+                        let level = if backend_name == "v6-extreme" { 9 } else { 6 };
+                        engine::compress_v6(&bytes, ext, level)
+                    } else {
+                        engine::compress_with(backend_name, &bytes, minify).expect("compress")
+                    };
+                    fs::write(output, &out).expect("write output");
+                    let ratio = bytes.len() as f64 / out.len().max(1) as f64;
+                    eprintln!(
+                        "{} -> {} ({:.2}x, {})",
+                        positional[1], output, ratio, backend_name,
+                    );
+                }
             }
         }
         "d" | "decompress" => {
@@ -188,7 +260,36 @@ fn main() {
             }
             let input = fs::read(&positional[1]).expect("read input");
             // Auto-detect by magic.
-            if input.len() >= 5 && &input[0..5] == nexus_compress::solid_archive::MAGIC {
+            //
+            // Order matters: check the encrypted magics FIRST
+            // because both NXE\0 and NXR\0 start with 'N' and
+            // would not collide with the others (NXS\0, NXS6,
+            // NXAR), but we want to fail fast on the encrypted
+            // path with a "password required" message before
+            // trying the wrong decoder.
+            if input.len() >= 4
+                && (&input[0..4] == b"NXE\0" || &input[0..4] == b"NXR\0")
+            {
+                // Encrypted archive (Sprint 5.7.2). Requires
+                // `--password` to decrypt.
+                let Some(pwd) = password.as_deref() else {
+                    eprintln!(
+                        "error: {} is an encrypted archive (NXE/NXR magic); \
+                         pass --password to decrypt",
+                        positional[1]
+                    );
+                    std::process::exit(2);
+                };
+                let out = decompress_encrypted(&input, pwd.as_bytes())
+                    .expect("decompress encrypted");
+                fs::write(&positional[2], &out).expect("write output");
+                eprintln!(
+                    "{} -> {} ({} bytes, decrypted)",
+                    positional[1],
+                    positional[2],
+                    out.len()
+                );
+            } else if input.len() >= 5 && &input[0..5] == nexus_compress::solid_archive::MAGIC {
                 // NXS6 solid archive. Output is a directory; we
                 // write the preprocessed bytes of each file. LOSSY.
                 let out_path = Path::new(&positional[2]);
