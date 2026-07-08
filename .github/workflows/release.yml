@@ -288,8 +288,33 @@ jobs:
           smoke="p2p_smoke"
           dir="engine-${suffix}"
           mkdir -p "$dir"
-          cp "target/${suffix}/release/${binary}" "$dir/"
-          cp "src-tauri/target/${suffix}/release/${smoke}" "$dir/"
+          # Debug: list what cargo actually produced.
+          echo "=== root target/${suffix}/release/ ==="
+          ls -la "target/${suffix}/release/" 2>&1 | head -20 || echo "  (missing)"
+          echo "=== src-tauri/target/${suffix}/release/ ==="
+          ls -la "src-tauri/target/${suffix}/release/" 2>&1 | head -20 || echo "  (missing)"
+          echo "=== src-tauri/target/release/ ==="
+          ls -la "src-tauri/target/release/" 2>&1 | head -20 || echo "  (missing)"
+          # Copy the actual binary wherever cargo put it.
+          if [ -f "target/${suffix}/release/${binary}" ]; then
+            cp "target/${suffix}/release/${binary}" "$dir/"
+          else
+            echo "::error::${binary} not found at target/${suffix}/release/${binary}"
+            exit 1
+          fi
+          # p2p_smoke may be under src-tauri/target/release/ (when built
+          # without --target during the test step) or under the
+          # triple subdir. Try the --target location first, then the
+          # host-triple fallback.
+          if [ -f "src-tauri/target/${suffix}/release/${smoke}" ]; then
+            cp "src-tauri/target/${suffix}/release/${smoke}" "$dir/"
+          elif [ -f "src-tauri/target/release/${smoke}" ]; then
+            cp "src-tauri/target/release/${smoke}" "$dir/"
+            echo "::notice::p2p_smoke was found at host-triple path (src-tauri/target/release/)"
+          else
+            echo "::error::${smoke} not found under src-tauri/target/"
+            exit 1
+          fi
           if [ -f LICENSE ]; then cp LICENSE "$dir/"; fi
           if [ -f README.md ]; then cp README.md "$dir/"; fi
           (cd "$dir" && zip -r "../${dir}.zip" .)
@@ -304,8 +329,24 @@ jobs:
           $smoke  = 'p2p_smoke.exe'
           $dir = "engine-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          # Debug: list what cargo actually produced.
+          Write-Host "=== root target/$suffix/release/ ==="
+          if (Test-Path "target/$suffix/release/") { Get-ChildItem "target/$suffix/release/" | Select-Object -First 20 }
+          Write-Host "=== src-tauri/target/$suffix/release/ ==="
+          if (Test-Path "src-tauri/target/$suffix/release/") { Get-ChildItem "src-tauri/target/$suffix/release/" | Select-Object -First 20 }
+          Write-Host "=== src-tauri/target/release/ ==="
+          if (Test-Path "src-tauri/target/release/") { Get-ChildItem "src-tauri/target/release/" | Select-Object -First 20 }
           Copy-Item "target/${{ matrix.target }}/release/$binary" "$dir/$binary"
-          Copy-Item "src-tauri/target/${{ matrix.target }}/release/$smoke"  "$dir/$smoke"
+          # p2p_smoke fallback (host-triple path) mirrors the bash step.
+          if (Test-Path "src-tauri/target/${{ matrix.target }}/release/$smoke") {
+            Copy-Item "src-tauri/target/${{ matrix.target }}/release/$smoke" "$dir/$smoke"
+          } elseif (Test-Path "src-tauri/target/release/$smoke") {
+            Copy-Item "src-tauri/target/release/$smoke" "$dir/$smoke"
+            Write-Host "::notice::p2p_smoke was found at host-triple path (src-tauri/target/release/)"
+          } else {
+            Write-Host "::error::$smoke not found under src-tauri/target/"
+            exit 1
+          }
           if (Test-Path "LICENSE") { Copy-Item LICENSE "$dir/LICENSE" }
           if (Test-Path "README.md") { Copy-Item README.md "$dir/README.md" }
           Compress-Archive -Path "$dir/*" -DestinationPath "$dir.zip"
