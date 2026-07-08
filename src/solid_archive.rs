@@ -352,8 +352,7 @@ mod tests {
         vec![
             (
                 "src/index.ts".to_string(),
-                b"interface User { name: string; age: number; }\nconst x: number = 1;\n"
-                    .to_vec(),
+                b"interface User { name: string; age: number; }\nconst x: number = 1;\n".to_vec(),
             ),
             (
                 "src/util.ts".to_string(),
@@ -390,7 +389,8 @@ mod tests {
             if e.preprocessor == Preprocessor::Conservative {
                 let expected = minify::minify(&files[i].1);
                 assert_eq!(
-                    got, &expected[..],
+                    got,
+                    &expected[..],
                     "conservative minify mismatch for {}",
                     e.name
                 );

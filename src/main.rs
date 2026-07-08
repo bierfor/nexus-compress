@@ -177,10 +177,7 @@ fn main() {
                 let ratio = bytes.len() as f64 / out.len().max(1) as f64;
                 eprintln!(
                     "{} -> {} ({:.2}x, {})",
-                    positional[1],
-                    output,
-                    ratio,
-                    backend_name,
+                    positional[1], output, ratio, backend_name,
                 );
             }
         }
@@ -226,7 +223,12 @@ fn main() {
             } else {
                 let out = engine::decompress_any(&input).expect("decompress");
                 fs::write(&positional[2], &out).expect("write output");
-                eprintln!("{} -> {} ({} bytes)", positional[1], positional[2], out.len());
+                eprintln!(
+                    "{} -> {} ({} bytes)",
+                    positional[1],
+                    positional[2],
+                    out.len()
+                );
             }
         }
         "bench" => {
@@ -247,11 +249,7 @@ fn main() {
 /// Walk a directory recursively and return `(relative_path, bytes)`
 /// for every regular file, sorted by relative path for determinism.
 fn walk_dir(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
-    fn walk(
-        root: &Path,
-        dir: &Path,
-        out: &mut Vec<(String, Vec<u8>)>,
-    ) -> std::io::Result<()> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();

@@ -56,9 +56,9 @@ pub enum BlockType {
     Binary = 1,
     Structured = 2, // json / database / csv-like
     Multimedia = 3,
-    Random = 4,      // high-entropy, will barely compress
-    Raw = 5,         // stored uncompressed (incompressible detected)
-    Duplicate = 6,   // v1.3+: identical bytes to a previously-seen block
+    Random = 4,    // high-entropy, will barely compress
+    Raw = 5,       // stored uncompressed (incompressible detected)
+    Duplicate = 6, // v1.3+: identical bytes to a previously-seen block
     Unknown = 255,
 }
 

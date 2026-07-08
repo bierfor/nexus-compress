@@ -99,11 +99,7 @@ pub fn decompress_any(encoded: &[u8]) -> Result<Vec<u8>, String> {
 /// Compress with an engine chosen by name (`"v4"`, `"v5"`, `"v5-min"`).
 /// Returns the tagged compressed bytes. Used by the CLI's
 /// `--backend` flag.
-pub fn compress_with(
-    backend: &str,
-    input: &[u8],
-    pre_minify: bool,
-) -> Result<Vec<u8>, String> {
+pub fn compress_with(backend: &str, input: &[u8], pre_minify: bool) -> Result<Vec<u8>, String> {
     // Optional pre-filter: minify code/text before compression.
     // The minifier knows about .js/.ts/.json/.md; for other content
     // it returns the input unchanged. The pre-filter doesn't know
@@ -147,13 +143,8 @@ pub fn compress_with(
 /// pass the file extension from the path so we can pick the right
 /// preprocessor without sniffing.
 pub fn compress_v6(input: &[u8], ext_hint: Option<&str>, lzma_level: u32) -> Vec<u8> {
-    let ext = ext_hint
-        .map(|e| e.to_ascii_lowercase())
-        .unwrap_or_default();
-    let is_js_family = matches!(
-        ext.as_str(),
-        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx"
-    );
+    let ext = ext_hint.map(|e| e.to_ascii_lowercase()).unwrap_or_default();
+    let is_js_family = matches!(ext.as_str(), "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx");
     let pre: Vec<u8> = if is_js_family {
         // AST minify. Lossy. If parsing fails (rare for .js/.ts),
         // the ast_minify module falls back to passing the input
@@ -184,9 +175,15 @@ pub fn list_backends() -> &'static [&'static str] {
 pub struct V4Engine;
 
 impl CompressionEngine for V4Engine {
-    fn name(&self) -> &'static str { "v4" }
-    fn bench_label(&self) -> &'static str { "NexusCompress v4" }
-    fn format_byte(&self) -> u8 { V4_FORMAT_BYTE }
+    fn name(&self) -> &'static str {
+        "v4"
+    }
+    fn bench_label(&self) -> &'static str {
+        "NexusCompress v4"
+    }
+    fn format_byte(&self) -> u8 {
+        V4_FORMAT_BYTE
+    }
 
     fn compress(&self, input: &[u8]) -> Vec<u8> {
         // The v4 codec doesn't prefix the format byte (the magic
@@ -226,12 +223,16 @@ pub struct LzmaEngine {
 
 impl LzmaEngine {
     pub fn new(level: u32) -> Self {
-        Self { level: level.clamp(0, 9) }
+        Self {
+            level: level.clamp(0, 9),
+        }
     }
 }
 
 impl CompressionEngine for LzmaEngine {
-    fn name(&self) -> &'static str { "v5-lzma" }
+    fn name(&self) -> &'static str {
+        "v5-lzma"
+    }
     fn bench_label(&self) -> &'static str {
         match self.level {
             0..=3 => "NexusCompress v5 LZMA (fast)",
@@ -239,7 +240,9 @@ impl CompressionEngine for LzmaEngine {
             _ => "NexusCompress v5 LZMA (extreme)",
         }
     }
-    fn format_byte(&self) -> u8 { V5_LZMA_FORMAT_BYTE }
+    fn format_byte(&self) -> u8 {
+        V5_LZMA_FORMAT_BYTE
+    }
 
     fn compress(&self, input: &[u8]) -> Vec<u8> {
         // xz2's stream API expects Read/Write streams. For whole-
@@ -248,8 +251,8 @@ impl CompressionEngine for LzmaEngine {
         // preset (0=easy, 9=best).
         let mut out = Vec::with_capacity(input.len() / 2);
         out.push(self.format_byte()); // tag
-        // xz2's stream::write takes a compression level. The API
-        // also takes an `xz::Write` writer — we use Vec<u8>.
+                                      // xz2's stream::write takes a compression level. The API
+                                      // also takes an `xz::Write` writer — we use Vec<u8>.
         let mut writer = xz2::write::XzEncoder::new(&mut out, self.level);
         use std::io::Write;
         if writer.write_all(input).is_err() {

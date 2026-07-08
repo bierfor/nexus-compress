@@ -385,8 +385,7 @@ pub fn compress_bytes_with_backend(
         CompressionBackend::V5Min => {
             // LZMA + conservative text minify.
             let pre = crate::minify::minify(input);
-            crate::engine::compress_with("v5-min", &pre, false)
-                .unwrap_or_else(|_| pre)
+            crate::engine::compress_with("v5-min", &pre, false).unwrap_or_else(|_| pre)
         }
         CompressionBackend::V6 => {
             // swc AST minify (when file_name ends in .js/.ts/etc.)
@@ -504,78 +503,75 @@ where
         )
     })?;
 
-    let (compressed_bytes, total_original, n_files, is_dir): (Vec<u8>, u64, u64, bool) = if meta.is_file() {
-        progress(ProgressEvent {
-            phase: "reading".to_string(),
-            current_file: input_path
+    let (compressed_bytes, total_original, n_files, is_dir): (Vec<u8>, u64, u64, bool) =
+        if meta.is_file() {
+            progress(ProgressEvent {
+                phase: "reading".to_string(),
+                current_file: input_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                files_done: 0,
+                files_total: 1,
+                bytes_done: 0,
+                bytes_total: meta.len(),
+            });
+            let bytes = std::fs::read(input_path)
+                .map_err(|e| ApiError::new("target.read_failed", format!("read failed: {}", e)))?;
+            let file_name = input_path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            files_done: 0,
-            files_total: 1,
-            bytes_done: 0,
-            bytes_total: meta.len(),
-        });
-        let bytes = std::fs::read(input_path).map_err(|e| {
-            ApiError::new(
-                "target.read_failed",
-                format!("read failed: {}", e),
+                .unwrap_or_default();
+            let r = compress_bytes_with_backend(&bytes, &file_name, backend, lzma_level);
+            progress(ProgressEvent {
+                phase: "compressing".to_string(),
+                current_file: file_name.clone(),
+                files_done: 0,
+                files_total: 1,
+                bytes_done: meta.len(),
+                bytes_total: meta.len(),
+            });
+            let compressed = r.compressed;
+            progress(ProgressEvent {
+                phase: "done".to_string(),
+                current_file: file_name.clone(),
+                files_done: 1,
+                files_total: 1,
+                bytes_done: meta.len(),
+                bytes_total: meta.len(),
+            });
+            (compressed, meta.len(), 1u64, false)
+        } else if meta.is_dir() {
+            // Walk into the directory and use the directory backend.
+            // For V6Solid (the path that exercises the solid LZMA
+            // stream) we get per-file progress via the
+            // `solid_archive::compress_with_progress` hook. For other
+            // backends the directory backend dispatches per-file
+            // archiving (less interesting to show progress on, but we
+            // still emit a coarse-grain event so the UI gets something).
+            let total_size = walk_dir_total_bytes(input_path);
+            let (dir_result, archive) =
+                compress_directory_with_backend(input_path, backend, lzma_level)?;
+            progress(ProgressEvent {
+                phase: "done".to_string(),
+                current_file: String::new(),
+                files_done: dir_result.n_files,
+                files_total: dir_result.n_files,
+                bytes_done: total_size,
+                bytes_total: total_size,
+            });
+            (
+                archive,
+                dir_result.total_original_size,
+                dir_result.n_files,
+                true,
             )
-        })?;
-        let file_name = input_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let r = compress_bytes_with_backend(&bytes, &file_name, backend, lzma_level);
-        progress(ProgressEvent {
-            phase: "compressing".to_string(),
-            current_file: file_name.clone(),
-            files_done: 0,
-            files_total: 1,
-            bytes_done: meta.len(),
-            bytes_total: meta.len(),
-        });
-        let compressed = r.compressed;
-        progress(ProgressEvent {
-            phase: "done".to_string(),
-            current_file: file_name.clone(),
-            files_done: 1,
-            files_total: 1,
-            bytes_done: meta.len(),
-            bytes_total: meta.len(),
-        });
-        (compressed, meta.len(), 1u64, false)
-    } else if meta.is_dir() {
-        // Walk into the directory and use the directory backend.
-        // For V6Solid (the path that exercises the solid LZMA
-        // stream) we get per-file progress via the
-        // `solid_archive::compress_with_progress` hook. For other
-        // backends the directory backend dispatches per-file
-        // archiving (less interesting to show progress on, but we
-        // still emit a coarse-grain event so the UI gets something).
-        let total_size = walk_dir_total_bytes(input_path);
-        let (dir_result, archive) =
-            compress_directory_with_backend(input_path, backend, lzma_level)?;
-        progress(ProgressEvent {
-            phase: "done".to_string(),
-            current_file: String::new(),
-            files_done: dir_result.n_files,
-            files_total: dir_result.n_files,
-            bytes_done: total_size,
-            bytes_total: total_size,
-        });
-        (
-            archive,
-            dir_result.total_original_size,
-            dir_result.n_files,
-            true,
-        )
-    } else {
-        return Err(ApiError::new(
-            "target.not_file_or_dir",
-            format!("{} is neither file nor directory", input_path.display()),
-        ));
-    };
+        } else {
+            return Err(ApiError::new(
+                "target.not_file_or_dir",
+                format!("{} is neither file nor directory", input_path.display()),
+            ));
+        };
 
     let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
     let compressed_size = compressed_bytes.len() as u64;
@@ -685,12 +681,9 @@ where
         )
     })?;
     let mut head = [0u8; 8];
-    let n = file.read(&mut head).map_err(|e| {
-        ApiError::new(
-            "decompress.read_failed",
-            format!("read header: {}", e),
-        )
-    })?;
+    let n = file
+        .read(&mut head)
+        .map_err(|e| ApiError::new("decompress.read_failed", format!("read header: {}", e)))?;
     if n < 5 {
         return Err(ApiError::new(
             "decompress.too_short",
@@ -711,12 +704,10 @@ where
     let (kind, output_path, restored_size, n_files, is_dir) =
         if &head[..5] == crate::solid_archive::MAGIC {
             // NXS6: SOLID v6.
-            let bytes = std::fs::read(input_path).map_err(|e| {
-                ApiError::new("decompress.read_failed", format!("read: {}", e))
-            })?;
-            let (entries, solid) = crate::solid_archive::decompress(&bytes).map_err(|e| {
-                ApiError::new("solid.decompress_failed", e)
-            })?;
+            let bytes = std::fs::read(input_path)
+                .map_err(|e| ApiError::new("decompress.read_failed", format!("read: {}", e)))?;
+            let (entries, solid) = crate::solid_archive::decompress(&bytes)
+                .map_err(|e| ApiError::new("solid.decompress_failed", e))?;
             // Output dir: user override or sibling <stem>.extracted/.
             let out_dir = output_dir
                 .map(|p| p.to_path_buf())
@@ -776,9 +767,8 @@ where
             )
         } else if &head[..4] == b"NXAR" {
             // NXAR: per-file v4 archive.
-            let bytes = std::fs::read(input_path).map_err(|e| {
-                ApiError::new("decompress.read_failed", format!("read: {}", e))
-            })?;
+            let bytes = std::fs::read(input_path)
+                .map_err(|e| ApiError::new("decompress.read_failed", format!("read: {}", e)))?;
             let out_dir = output_dir
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| parent.join(&stem));
@@ -789,7 +779,10 @@ where
                 )
             })?;
             let result = decompress_directory(&bytes, &out_dir).map_err(|e| {
-                ApiError::new("nxar.decompress_failed", format!("{}/{}", e.code, e.message))
+                ApiError::new(
+                    "nxar.decompress_failed",
+                    format!("{}/{}", e.code, e.message),
+                )
             })?;
             progress(ProgressEvent {
                 phase: "compressing".to_string(),
@@ -808,9 +801,8 @@ where
             )
         } else if &head[..4] == b"NXS\x00" {
             // Single-file v4 stream.
-            let bytes = std::fs::read(input_path).map_err(|e| {
-                ApiError::new("decompress.read_failed", format!("read: {}", e))
-            })?;
+            let bytes = std::fs::read(input_path)
+                .map_err(|e| ApiError::new("decompress.read_failed", format!("read: {}", e)))?;
             let out = decompress_bytes(&bytes)?;
             let out_path = match output_dir {
                 Some(d) => d.join(format!("{}.out", stem)),
@@ -839,9 +831,8 @@ where
             )
         } else if head[0] == 0x05 {
             // Single-file v5/v6 LZMA stream.
-            let bytes = std::fs::read(input_path).map_err(|e| {
-                ApiError::new("decompress.read_failed", format!("read: {}", e))
-            })?;
+            let bytes = std::fs::read(input_path)
+                .map_err(|e| ApiError::new("decompress.read_failed", format!("read: {}", e)))?;
             let out = decompress_bytes(&bytes)?;
             let out_path = match output_dir {
                 Some(d) => d.join(format!("{}.out", stem)),
@@ -945,15 +936,13 @@ pub fn peek_archive_target(input_path: &Path) -> ApiResult<PeekResult> {
         )
     })?;
     let compressed_size = meta.len();
-    let bytes = std::fs::read(input_path).map_err(|e| {
-        ApiError::new("peek.read_failed", format!("read: {}", e))
-    })?;
+    let bytes = std::fs::read(input_path)
+        .map_err(|e| ApiError::new("peek.read_failed", format!("read: {}", e)))?;
 
     if &bytes[..5] == crate::solid_archive::MAGIC {
         // NXS6: parse the TOC inline (no LZMA decode).
-        let (entries, total) = crate::solid_archive::peek_toc(&bytes).map_err(|e| {
-            ApiError::new("solid.peek_failed", e)
-        })?;
+        let (entries, total) = crate::solid_archive::peek_toc(&bytes)
+            .map_err(|e| ApiError::new("solid.peek_failed", e))?;
         let files: Vec<ArchivePreviewEntry> = entries
             .into_iter()
             .map(|e| ArchivePreviewEntry {
@@ -970,9 +959,8 @@ pub fn peek_archive_target(input_path: &Path) -> ApiResult<PeekResult> {
             files,
         })
     } else if &bytes[..4] == b"NXAR" {
-        let result = peek_archive(&bytes).map_err(|e| {
-            ApiError::new("nxar.peek_failed", e.message)
-        })?;
+        let result =
+            peek_archive(&bytes).map_err(|e| ApiError::new("nxar.peek_failed", e.message))?;
         let total = result.total_original_size;
         let files: Vec<ArchivePreviewEntry> = result
             .entries
@@ -994,7 +982,11 @@ pub fn peek_archive_target(input_path: &Path) -> ApiResult<PeekResult> {
     } else if &bytes[..4] == b"NXS\x00" || bytes[0] == 0x05 {
         // Single-file archives: no TOC, no file list.
         Ok(PeekResult {
-            archive_kind: if bytes[0] == 0x05 { "v5-v6-single" } else { "v4" },
+            archive_kind: if bytes[0] == 0x05 {
+                "v5-v6-single"
+            } else {
+                "v4"
+            },
             n_files: 1,
             total_uncompressed: compressed_size, // best guess = compressed size
             compressed_size,
@@ -1101,7 +1093,6 @@ fn walk_dir_total_bytes(root: &Path) -> u64 {
     walk(root).unwrap_or(0)
 }
 
-
 /// Compress a directory using the chosen backend. The directory
 /// is walked recursively and each file is fed through the right
 /// preprocessor. For `V6Solid` the preprocessed bytes are
@@ -1159,20 +1150,15 @@ pub fn compress_directory_with_backend(
 /// Shared with the CLI's `walk_dir` helper — duplicated here to
 /// keep the Tauri boundary self-contained.
 fn walk_dir_for_solid(root: &Path) -> ApiResult<Vec<(String, Vec<u8>)>> {
-    fn walk(
-        root: &Path,
-        dir: &Path,
-        out: &mut Vec<(String, Vec<u8>)>,
-    ) -> Result<(), String> {
-        let entries = std::fs::read_dir(dir).map_err(|e| {
-            format!("read_dir({}) failed: {}", dir.display(), e)
-        })?;
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("read_dir({}) failed: {}", dir.display(), e))?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("dir entry failed: {}", e))?;
             let path = entry.path();
-            let file_type = entry.file_type().map_err(|e| {
-                format!("file_type({}) failed: {}", path.display(), e)
-            })?;
+            let file_type = entry
+                .file_type()
+                .map_err(|e| format!("file_type({}) failed: {}", path.display(), e))?;
             if file_type.is_dir() {
                 walk(root, &path, out)?;
             } else if file_type.is_file() {
@@ -1181,17 +1167,15 @@ fn walk_dir_for_solid(root: &Path) -> ApiResult<Vec<(String, Vec<u8>)>> {
                     .unwrap_or(&path)
                     .to_string_lossy()
                     .replace('\\', "/");
-                let bytes = std::fs::read(&path).map_err(|e| {
-                    format!("read({}) failed: {}", path.display(), e)
-                })?;
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| format!("read({}) failed: {}", path.display(), e))?;
                 out.push((rel, bytes));
             }
         }
         Ok(())
     }
     let mut out = Vec::new();
-    walk(root, root, &mut out)
-        .map_err(|e| ApiError::new("directory.io", e))?;
+    walk(root, root, &mut out).map_err(|e| ApiError::new("directory.io", e))?;
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
@@ -1223,10 +1207,7 @@ pub fn decompress_bytes(input: &[u8]) -> ApiResult<DecompressResult> {
     let data = match std::panic::catch_unwind(|| crate::decompress(input)) {
         Ok(Ok(d)) => d,
         Ok(Err(e)) => {
-            return Err(ApiError::new(
-                "decompress.invalid_header",
-                e,
-            ));
+            return Err(ApiError::new("decompress.invalid_header", e));
         }
         Err(_) => {
             return Err(ApiError::new(
@@ -1248,7 +1229,7 @@ pub fn decompress_bytes(input: &[u8]) -> ApiResult<DecompressResult> {
 pub fn engine_info() -> EngineInfo {
     EngineInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        format_version: 4, // v4 — see src/format.rs
+        format_version: 4,  // v4 — see src/format.rs
         dict_entries: 5348, // corpus/trained.dict
         has_entropy_gate: true,
         has_local_subdict: true,
@@ -1322,10 +1303,7 @@ pub fn compress_directory(
     if !input_dir.is_dir() {
         return Err(ApiError::new(
             "directory.not_found",
-            format!(
-                "path is not a directory: {}",
-                input_dir.display()
-            ),
+            format!("path is not a directory: {}", input_dir.display()),
         ));
     }
     crate::nxar::compress_directory(input_dir)
@@ -1371,10 +1349,7 @@ pub fn compress_directories(
     level: CompressionLevel,
 ) -> ApiResult<(DirectoryResult, Vec<u8>)> {
     if input_dirs.is_empty() {
-        return Err(ApiError::new(
-            "directory.empty",
-            "no directories provided",
-        ));
+        return Err(ApiError::new("directory.empty", "no directories provided"));
     }
     for d in input_dirs {
         if !d.is_dir() {
@@ -1432,8 +1407,8 @@ pub fn decompress_directory(archive: &[u8], output_dir: &Path) -> ApiResult<Dire
 /// `total_original_size` and `aggregate_ratio` are populated
 /// from the entry sizes.
 pub fn peek_archive(archive: &[u8]) -> ApiResult<crate::nxar::DirectoryResult> {
-    let entries = crate::nxar::peek_archive(archive)
-        .map_err(|e| ApiError::new("archive.malformed", e))?;
+    let entries =
+        crate::nxar::peek_archive(archive).map_err(|e| ApiError::new("archive.malformed", e))?;
     let n_files = entries.len() as u64;
     let total_original: u64 = entries.iter().map(|e| e.original_size).sum();
     let total_compressed: u64 = entries.iter().map(|e| e.compressed_size).sum();
@@ -1458,8 +1433,7 @@ pub fn peek_archive(archive: &[u8]) -> ApiResult<crate::nxar::DirectoryResult> {
 /// cross the IPC boundary (avoids the multi-second JSON
 /// serialization for large archives).
 pub fn peek_archive_file(path: &Path) -> ApiResult<Vec<crate::nxar::ArchiveEntry>> {
-    crate::nxar::peek_archive_file(path)
-        .map_err(|e| ApiError::new("archive.io", e))
+    crate::nxar::peek_archive_file(path).map_err(|e| ApiError::new("archive.io", e))
 }
 
 /// Peek + extract in one call. Reads the archive from `path`,
@@ -1469,9 +1443,11 @@ pub fn peek_archive_file(path: &Path) -> ApiResult<Vec<crate::nxar::ArchiveEntry
 pub fn peek_and_extract_file(
     path: &Path,
     extract_to: Option<&Path>,
-) -> ApiResult<(Vec<crate::nxar::ArchiveEntry>, Option<crate::nxar::DirectoryResult>)> {
-    crate::nxar::peek_and_extract_file(path, extract_to)
-        .map_err(|e| ApiError::new("archive.io", e))
+) -> ApiResult<(
+    Vec<crate::nxar::ArchiveEntry>,
+    Option<crate::nxar::DirectoryResult>,
+)> {
+    crate::nxar::peek_and_extract_file(path, extract_to).map_err(|e| ApiError::new("archive.io", e))
 }
 
 /// Open a path in the OS file manager (Finder on macOS, Explorer
@@ -1527,7 +1503,11 @@ mod tests {
         // a conservative ratio floor.
         let data: Vec<u8> = b"abcdefgh".iter().cycle().take(8 * 1024).cloned().collect();
         let r = compress_bytes(&data);
-        assert!(r.ratio > 5.0, "expected >5x ratio on 8KB repetitive, got {:.2}x", r.ratio);
+        assert!(
+            r.ratio > 5.0,
+            "expected >5x ratio on 8KB repetitive, got {:.2}x",
+            r.ratio
+        );
         let d = decompress_bytes(&r.compressed).expect("decompress");
         assert_eq!(d.data, data);
     }
@@ -1543,7 +1523,11 @@ mod tests {
             .cloned()
             .collect();
         let r = compress_bytes(&data);
-        assert!(r.ratio > 1.5, "expected >1.5x ratio on natural text, got {:.2}x", r.ratio);
+        assert!(
+            r.ratio > 1.5,
+            "expected >1.5x ratio on natural text, got {:.2}x",
+            r.ratio
+        );
         let d = decompress_bytes(&r.compressed).expect("decompress");
         assert_eq!(d.data, data);
     }
@@ -1561,7 +1545,11 @@ mod tests {
             *b = s as u8;
         }
         let r = compress_bytes(&data);
-        assert!(r.ratio < 1.05, "random data should not compress, got {:.2}x", r.ratio);
+        assert!(
+            r.ratio < 1.05,
+            "random data should not compress, got {:.2}x",
+            r.ratio
+        );
         let d = decompress_bytes(&r.compressed).expect("decompress");
         assert_eq!(d.data, data);
     }

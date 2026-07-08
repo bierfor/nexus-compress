@@ -29,6 +29,6 @@ pub mod rans_v4;
 pub mod rle;
 pub mod solid_archive;
 
+pub use api::{compress_directory_with_backend, CompressionBackend};
 pub use codec::{compress, compress_premium, decompress};
 pub use format::{BlockType, NexusHeader};
-pub use api::{compress_directory_with_backend, CompressionBackend};

@@ -150,7 +150,10 @@ impl MatchFinder {
             // Quick reject: first 3 bytes must match (hash guarantees this
             // for hash3 collisions only at the bucket level; we're checking
             // the actual bytes here).
-            if data[cand] != data[pos] || data[cand + 1] != data[pos + 1] || data[cand + 2] != data[pos + 2] {
+            if data[cand] != data[pos]
+                || data[cand + 1] != data[pos + 1]
+                || data[cand + 2] != data[pos + 2]
+            {
                 candidate = self.prev[cand % WINDOW_SIZE];
                 steps += 1;
                 continue;
@@ -283,7 +286,11 @@ impl MatchFinder {
             // 1. Try LZ77 match.
             let lz_match = if i + MIN_MATCH <= n {
                 let (l, d) = self.peek(data, i);
-                if l >= MIN_MATCH { Some((l, d)) } else { None }
+                if l >= MIN_MATCH {
+                    Some((l, d))
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -521,9 +528,7 @@ impl MatchFinder {
             }
             // cur now points to the position right after start. The op
             // that takes us 0 → cur is best_op[cur]. Emit it.
-            let first_op = best_op[cur]
-                .clone()
-                .unwrap_or(Op::Lit(data[i]));
+            let first_op = best_op[cur].clone().unwrap_or(Op::Lit(data[i]));
 
             // Emit and advance.
             match first_op {
@@ -551,12 +556,18 @@ impl MatchFinder {
 #[derive(Debug, Clone, Copy)]
 pub enum Op {
     Lit(u8),
-    Match { dist: u32, len: u32 },
+    Match {
+        dist: u32,
+        len: u32,
+    },
     /// Reference to a token in a pre-shared dictionary. The decoder
     /// materializes this by looking up `id` in its dictionary and
     /// emitting `len` bytes (or all of the token's bytes if `len`
     /// exceeds the token length).
-    DictRef { id: u16, len: u8 },
+    DictRef {
+        id: u16,
+        len: u8,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -809,7 +820,7 @@ mod tests {
         // Use encode() to populate the chain, but on a separate finder.
         let mut builder = MatchFinder::new();
         let _ = builder.encode(b"abc abc abc abc "); // populate chain with "abc"
-        // Now query candidates for "abcdef" at position 16.
+                                                     // Now query candidates for "abcdef" at position 16.
         let cands = builder.candidates(data, 16);
         // First candidate should be the longest.
         for w in cands.windows(2) {
@@ -940,13 +951,14 @@ mod tests {
             .iter()
             .filter(|o| matches!(o, Op::DictRef { .. }))
             .count();
-        let n_m = ops
-            .iter()
-            .filter(|o| matches!(o, Op::Match { .. }))
-            .count();
+        let n_m = ops.iter().filter(|o| matches!(o, Op::Match { .. })).count();
         // Should be exactly 1 DictRef and 1 Match (the long LZ77 match
         // for "the quick" at position 10).
-        assert_eq!(n_dr, 1, "expected 1 DictRef, got {} (matches={})", n_dr, n_m);
+        assert_eq!(
+            n_dr, 1,
+            "expected 1 DictRef, got {} (matches={})",
+            n_dr, n_m
+        );
         // The match should be at least 8 bytes (covers "the quick").
         if let Some(Op::Match { len, .. }) = ops.iter().find(|o| matches!(o, Op::Match { .. })) {
             assert!(*len >= 8, "expected match length >= 8, got {}", len);

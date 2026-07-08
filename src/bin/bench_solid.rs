@@ -92,7 +92,9 @@ fn main() {
             .expect("7z");
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         let ok = out.status.success();
-        let sz = std::fs::metadata(archive).map(|m| m.len() as usize).unwrap_or(0);
+        let sz = std::fs::metadata(archive)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
         let _ = std::fs::remove_file(archive);
         if !ok {
             eprintln!("  (7z failed — skipping)");
@@ -104,8 +106,12 @@ fn main() {
 
     // Markdown table
     println!("\n# SOLID v6 vs per-file v6 vs 7z — directory benchmark\n");
-    println!("Corpus: `./corpus_real/` ({} files, {} B / {:.2} MB)\n",
-        files.len(), total_original, total_original as f64 / 1024.0 / 1024.0);
+    println!(
+        "Corpus: `./corpus_real/` ({} files, {} B / {:.2} MB)\n",
+        files.len(),
+        total_original,
+        total_original as f64 / 1024.0 / 1024.0
+    );
     println!("| Backend | Compressed | Ratio | % of 7z | Time |");
     println!("|---|---:|---:|---:|---:|");
 
@@ -127,16 +133,24 @@ fn main() {
         };
         println!(
             "| {} | {} B | **{:.2}x** | {} | {:.0} ms |",
-            name,
-            size,
-            r,
-            pct,
-            ms,
+            name, size, r, pct, ms,
         );
     };
-    print_row("Per-file v6 (LZMA per file, no cross-file dict)", per_file_total, per_file_ms);
-    print_row("**SOLID v6 (LZMA -6, one stream over whole corpus)**", solid_l6.len(), solid_l6_ms);
-    print_row("**SOLID v6 extreme (LZMA -9)**", solid_l9.len(), solid_l9_ms);
+    print_row(
+        "Per-file v6 (LZMA per file, no cross-file dict)",
+        per_file_total,
+        per_file_ms,
+    );
+    print_row(
+        "**SOLID v6 (LZMA -6, one stream over whole corpus)**",
+        solid_l6.len(),
+        solid_l6_ms,
+    );
+    print_row(
+        "**SOLID v6 extreme (LZMA -9)**",
+        solid_l9.len(),
+        solid_l9_ms,
+    );
     if total_sevenz > 0 {
         print_row("7z -mx=9 (LZMA2, baseline)", sevenz_size, sevenz_ms);
     }
@@ -171,7 +185,10 @@ fn main() {
         );
         println!();
         if solid_vs_7z > 100.0 {
-            println!("* **SOLID v6 BEATS 7z** by {:.0}% on this corpus.", solid_vs_7z - 100.0);
+            println!(
+                "* **SOLID v6 BEATS 7z** by {:.0}% on this corpus.",
+                solid_vs_7z - 100.0
+            );
         } else {
             println!("* 7z is still ahead by {:.0}%.", 100.0 - solid_vs_7z);
         }

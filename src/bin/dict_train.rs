@@ -53,24 +53,39 @@ fn parse_args() -> Result<Args, String> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--max-size" => {
-                max_size = iter.next().ok_or("--max-size requires a value")?
-                    .parse().map_err(|_| "--max-size must be a positive integer")?;
+                max_size = iter
+                    .next()
+                    .ok_or("--max-size requires a value")?
+                    .parse()
+                    .map_err(|_| "--max-size must be a positive integer")?;
             }
             "--max-entries" => {
-                max_entries = iter.next().ok_or("--max-entries requires a value")?
-                    .parse().map_err(|_| "--max-entries must be a positive integer")?;
+                max_entries = iter
+                    .next()
+                    .ok_or("--max-entries requires a value")?
+                    .parse()
+                    .map_err(|_| "--max-entries must be a positive integer")?;
             }
             "--min-len" => {
-                min_len = iter.next().ok_or("--min-len requires a value")?
-                    .parse().map_err(|_| "--min-len must be a positive integer")?;
+                min_len = iter
+                    .next()
+                    .ok_or("--min-len requires a value")?
+                    .parse()
+                    .map_err(|_| "--min-len must be a positive integer")?;
             }
             "--max-len" => {
-                max_len = iter.next().ok_or("--max-len requires a value")?
-                    .parse().map_err(|_| "--max-len must be a positive integer")?;
+                max_len = iter
+                    .next()
+                    .ok_or("--max-len requires a value")?
+                    .parse()
+                    .map_err(|_| "--max-len must be a positive integer")?;
             }
             "--min-freq" => {
-                min_freq = iter.next().ok_or("--min-freq requires a value")?
-                    .parse().map_err(|_| "--min-freq must be a positive integer")?;
+                min_freq = iter
+                    .next()
+                    .ok_or("--min-freq requires a value")?
+                    .parse()
+                    .map_err(|_| "--min-freq must be a positive integer")?;
             }
             "--output" | "-o" => {
                 output = PathBuf::from(iter.next().ok_or("--output requires a value")?);
@@ -147,7 +162,11 @@ fn main() {
     if !args.quiet {
         eprintln!(
             "dict_train: max_size={} max_entries={} min_len={} max_len={} min_freq={} output={}",
-            args.max_size, args.max_entries, args.min_len, args.max_len, args.min_freq,
+            args.max_size,
+            args.max_entries,
+            args.min_len,
+            args.max_len,
+            args.min_freq,
             args.output.display()
         );
     }
@@ -212,12 +231,24 @@ fn main() {
 
     eprintln!();
     eprintln!("Dictionary trained in {:?}", train_elapsed);
-    eprintln!("  scanned          : {} substrings", stats.total_substrings_scanned);
+    eprintln!(
+        "  scanned          : {} substrings",
+        stats.total_substrings_scanned
+    );
     eprintln!("  tokens kept      : {} entries", stats.unique_tokens_kept);
-    eprintln!("  token bytes used : {} / {} (max)", stats.dict_bytes, args.max_size);
-    eprintln!("  written to       : {} ({} bytes on disk)", args.output.display(), serial.len());
-    eprintln!("  total elapsed    : read {:?} + train {:?} + write {:?}",
-        read_elapsed, train_elapsed, write_elapsed);
+    eprintln!(
+        "  token bytes used : {} / {} (max)",
+        stats.dict_bytes, args.max_size
+    );
+    eprintln!(
+        "  written to       : {} ({} bytes on disk)",
+        args.output.display(),
+        serial.len()
+    );
+    eprintln!(
+        "  total elapsed    : read {:?} + train {:?} + write {:?}",
+        read_elapsed, train_elapsed, write_elapsed
+    );
     eprintln!();
     eprintln!("Top 20 entries:");
     let mut entries: Vec<(Vec<u8>,)> = dict.iter().map(|(_, t)| (t.to_vec(),)).collect();

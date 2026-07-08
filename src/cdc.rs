@@ -97,12 +97,7 @@ impl GearChunker {
 ///
 /// `bits` controls the average chunk size: `avg_chunk ≈ 2^bits` bytes.
 /// A bit value of 16 gives ~64 KB average, matching the LZ77 window.
-pub fn chunkify(
-    data: &[u8],
-    min_chunk: usize,
-    max_chunk: usize,
-    bits: u32,
-) -> Vec<(usize, usize)> {
+pub fn chunkify(data: &[u8], min_chunk: usize, max_chunk: usize, bits: u32) -> Vec<(usize, usize)> {
     let mut chunks = Vec::new();
     let mut chunker = GearChunker::new(min_chunk, max_chunk, bits);
     let mut start = 0usize;
@@ -205,7 +200,9 @@ mod tests {
             assert!(
                 closest < tolerance,
                 "base boundary at {} drifted by {} (>{}) in mutated stream",
-                b_off, closest, tolerance
+                b_off,
+                closest,
+                tolerance
             );
         }
     }
@@ -233,7 +230,9 @@ mod tests {
         assert!(
             (0.3..=0.7).contains(&ratio),
             "low bit distribution too skewed: {} / {} = {:.3}",
-            low_bit_ones, total, ratio
+            low_bit_ones,
+            total,
+            ratio
         );
     }
 }

@@ -43,7 +43,9 @@ pub struct Fnv1a {
 
 impl Fnv1a {
     pub fn new() -> Self {
-        Self { state: 0xcbf29ce484222325 } // FNV offset basis (64-bit)
+        Self {
+            state: 0xcbf29ce484222325,
+        } // FNV offset basis (64-bit)
     }
 
     pub fn update(&mut self, bytes: &[u8]) {
@@ -53,7 +55,9 @@ impl Fnv1a {
         }
     }
 
-    pub fn finish(self) -> u64 { self.state }
+    pub fn finish(self) -> u64 {
+        self.state
+    }
 
     pub fn hash(bytes: &[u8]) -> u64 {
         let mut h = Self::new();
@@ -84,12 +88,18 @@ pub struct DedupTable {
 
 impl DedupTable {
     pub fn new() -> Self {
-        Self { hash_to_entry: HashMap::new() }
+        Self {
+            hash_to_entry: HashMap::new(),
+        }
     }
 
     /// Number of unique blocks recorded.
-    pub fn len(&self) -> usize { self.hash_to_entry.len() }
-    pub fn is_empty(&self) -> bool { self.hash_to_entry.is_empty() }
+    pub fn len(&self) -> usize {
+        self.hash_to_entry.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.hash_to_entry.is_empty()
+    }
 
     /// Check if `block`'s hash has been seen.
     ///
@@ -114,7 +124,9 @@ impl DedupTable {
             if orig_len == block.len() {
                 if let Some(orig) = original_content(orig_id) {
                     if orig == block {
-                        return DedupResult::Duplicate { original_id: orig_id };
+                        return DedupResult::Duplicate {
+                            original_id: orig_id,
+                        };
                     }
                 }
             }
@@ -172,7 +184,11 @@ mod tests {
         }
         // Now we can look up content for prior blocks.
         let with_content = |id: u32| -> Option<Vec<u8>> {
-            if id == 0 { Some(block_a.to_vec()) } else { Some(block_b.to_vec()) }
+            if id == 0 {
+                Some(block_a.to_vec())
+            } else {
+                Some(block_b.to_vec())
+            }
         };
         match dt.lookup(block_a_dup, 2, with_content) {
             DedupResult::Duplicate { original_id: 0 } => {}
@@ -230,7 +246,11 @@ mod tests {
         // the same hash (we force this by inserting manually).
         // Real lookup:
         let r = dt.lookup(real_a, 1, |id| {
-            if id == 0 { Some(real_a.to_vec()) } else { None }
+            if id == 0 {
+                Some(real_a.to_vec())
+            } else {
+                None
+            }
         });
         assert!(matches!(r, DedupResult::Duplicate { original_id: 0 }));
         // Fake lookup (different content but same hash via direct insert):
@@ -238,9 +258,17 @@ mod tests {
         let orig = b"original content that won't match";
         let h = Fnv1a::hash(orig);
         dt2.hash_to_entry.insert(h, (0, fake_a.len())); // wrong content!
-        let r = dt2.lookup(fake_a, 1, |id| {
-            if id == 0 { Some(orig.to_vec()) } else { None }
-        });
+        let r = dt2.lookup(
+            fake_a,
+            1,
+            |id| {
+                if id == 0 {
+                    Some(orig.to_vec())
+                } else {
+                    None
+                }
+            },
+        );
         // Should be Unique because content doesn't match (length differs
         // here; with the same length but different bytes the result
         // would still be Unique via the != check).
@@ -290,8 +318,11 @@ mod tests {
         let mut unique_contents: Vec<Vec<u8>> = Vec::new();
         for (_block_id, expected_unique_id, content, is_duplicate) in &cases {
             if !*is_duplicate {
-                assert_eq!(unique_contents.len() as u32, *expected_unique_id,
-                    "unique_id should match unique_contents index");
+                assert_eq!(
+                    unique_contents.len() as u32,
+                    *expected_unique_id,
+                    "unique_id should match unique_contents index"
+                );
                 unique_contents.push(content.clone());
             }
         }
@@ -299,10 +330,14 @@ mod tests {
         // is in range and the content matches.
         for (_block_id, expected_unique_id, content, is_duplicate) in &cases {
             if *is_duplicate {
-                let referenced = unique_contents.get(*expected_unique_id as usize)
+                let referenced = unique_contents
+                    .get(*expected_unique_id as usize)
                     .expect("decoder cache out of sync with encoder unique_id");
-                assert_eq!(referenced, content,
-                    "content mismatch at unique_id {}", expected_unique_id);
+                assert_eq!(
+                    referenced, content,
+                    "content mismatch at unique_id {}",
+                    expected_unique_id
+                );
             }
         }
     }

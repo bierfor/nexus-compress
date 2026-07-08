@@ -5,7 +5,10 @@
 //! `commands.rs`. The Next.js frontend in `../frontend/` is served
 //! from `frontendDist` (or `devUrl` during development).
 
-#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 mod archive_inspect;
 mod commands;

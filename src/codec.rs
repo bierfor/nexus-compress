@@ -46,9 +46,7 @@
 use crate::cdc;
 use crate::classifier::{classify, BlockStats};
 use crate::dedup::{DedupResult, DedupTable};
-use crate::format::{
-    BlockHeader, BlockType, NexusHeader, VERSION_V0, VERSION_V2, VERSION_V3,
-};
+use crate::format::{BlockHeader, BlockType, NexusHeader, VERSION_V0, VERSION_V2, VERSION_V3};
 use crate::lz77::{MatchDecoder, MatchFinder, Op};
 use crate::rans_v4::{decode_table, rans_decode, FreqTable};
 use std::io::{Cursor, Read};
@@ -248,9 +246,7 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, stats: &BlockStats) ->
     // we ONLY try it when the pre-scan suggests dict refs will help
     // (select != NONE) and the block is large enough that the table
     // overhead (≈5 KB for 5 tables) is amortized.
-    let dict_path = if block.len() >= 8 * 1024
-        && crate::dict_codec::should_try_v45(block)
-    {
+    let dict_path = if block.len() >= 8 * 1024 && crate::dict_codec::should_try_v45(block) {
         crate::dict_codec::encode_v45_multistream(block).map(|mut payload| {
             payload.insert(0, TAG_V3_MULTISTREAM_DICT);
             payload
@@ -274,9 +270,7 @@ fn encode_block(block: &[u8], block_type: &mut BlockType, stats: &BlockStats) ->
     // rejects blocks that would win on the dict. The LOCAL encoder
     // is self-gating: `select_local_dict_ids` returns 0 matches for
     // truly random blocks, so the function returns None cheaply.
-    let local_path = if block.len() >= 8 * 1024
-        && crate::dict_codec::quick_entropy_gate(block)
-    {
+    let local_path = if block.len() >= 8 * 1024 && crate::dict_codec::quick_entropy_gate(block) {
         crate::dict_codec::encode_v45_multistream_local(block).map(|mut payload| {
             payload.insert(0, TAG_V3_MULTISTREAM_DICT);
             payload
@@ -380,8 +374,10 @@ fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
     //    sparse encoding from sprint 2.6.
     let (lit_table_section, lit_stream) = crate::rans_v4::sparse_rans_encode_u8(&literals, 12);
     let (len_table_section, len_stream) = crate::rans_v4::sparse_rans_encode_u8(&lengths, 12);
-    let (dist_lo_table_section, dist_lo_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_lows, 12);
-    let (dist_hi_table_section, dist_hi_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_highs, 12);
+    let (dist_lo_table_section, dist_lo_stream) =
+        crate::rans_v4::sparse_rans_encode_u8(&dist_lows, 12);
+    let (dist_hi_table_section, dist_hi_stream) =
+        crate::rans_v4::sparse_rans_encode_u8(&dist_highs, 12);
 
     // 4. Op-flags stream (one byte per op: 0 = literal, 1 = match).
     let mut ops_bytes = Vec::with_capacity(ops.len() + 4);
@@ -390,9 +386,9 @@ fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
         match op {
             Op::Lit(_) => ops_bytes.push(0),
             Op::Match { .. } => ops_bytes.push(1),
-            Op::DictRef { .. } => unreachable!(
-                "DictRef ops not handled by codec yet (see lz77.rs::encode_with_dict)"
-            ),
+            Op::DictRef { .. } => {
+                unreachable!("DictRef ops not handled by codec yet (see lz77.rs::encode_with_dict)")
+            }
         }
     }
 
@@ -413,7 +409,8 @@ fn encode_v3_multistream(data: &[u8]) -> Option<Vec<u8>> {
     //    The densified rANS table uses the SAME encode_table format
     //    as the dense table — only n_symbols changes.
     let mut out = Vec::with_capacity(
-        8 * 8 + lit_table_section.len()
+        8 * 8
+            + lit_table_section.len()
             + lit_stream.len()
             + len_table_section.len()
             + len_stream.len()
@@ -483,12 +480,9 @@ fn read_u32(buf: &[u8], off: &mut usize) -> u32 {
 
 pub fn decompress(input: &[u8]) -> Result<Vec<u8>, String> {
     let mut cursor = Cursor::new(input);
-    let header = NexusHeader::read(&mut cursor).map_err(|e| {
-        format!("invalid .nexus header: {:?}", e)
-    })?;
-    if header.version != VERSION_V0
-        && header.version != VERSION_V2
-        && header.version != VERSION_V3
+    let header =
+        NexusHeader::read(&mut cursor).map_err(|e| format!("invalid .nexus header: {:?}", e))?;
+    if header.version != VERSION_V0 && header.version != VERSION_V2 && header.version != VERSION_V3
     {
         return Err(format!(
             "unsupported .nexus version {} (expected {}, {}, or {})",
@@ -505,15 +499,34 @@ pub fn decompress(input: &[u8]) -> Result<Vec<u8>, String> {
         let mut payload = vec![0u8; bh.compressed_size as usize];
         cursor.read_exact(&mut payload).unwrap();
 
-        let block = decode_block(&payload, bh.uncompressed_size as usize, bh.block_type, &mut cache, header.version);
-        eprintln!("[decompress] block {} of {}: type={:?} uncompressed={} compressed={} decoded={}",
-            block_idx, header.block_count, bh.block_type, bh.uncompressed_size, bh.compressed_size, block.len());
+        let block = decode_block(
+            &payload,
+            bh.uncompressed_size as usize,
+            bh.block_type,
+            &mut cache,
+            header.version,
+        );
+        eprintln!(
+            "[decompress] block {} of {}: type={:?} uncompressed={} compressed={} decoded={}",
+            block_idx,
+            header.block_count,
+            bh.block_type,
+            bh.uncompressed_size,
+            bh.compressed_size,
+            block.len()
+        );
         out.extend_from_slice(&block);
     }
     Ok(out)
 }
 
-fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType, cache: &mut Vec<Vec<u8>>, _version: u8) -> Vec<u8> {
+fn decode_block(
+    payload: &[u8],
+    uncompressed_size: usize,
+    block_type: BlockType,
+    cache: &mut Vec<Vec<u8>>,
+    _version: u8,
+) -> Vec<u8> {
     if uncompressed_size == 0 {
         return vec![];
     }
@@ -521,14 +534,15 @@ fn decode_block(payload: &[u8], uncompressed_size: usize, block_type: BlockType,
 
     // Duplicate block: payload = [tag][u32 original_id]
     if payload[0] == TAG_DUPLICATE || block_type == BlockType::Duplicate {
-        let original_id =
-            u32::from_le_bytes(payload[1..5].try_into().unwrap()) as usize;
-        let original = cache
-            .get(original_id)
-            .unwrap_or_else(|| panic!(
+        let original_id = u32::from_le_bytes(payload[1..5].try_into().unwrap()) as usize;
+        let original = cache.get(original_id).unwrap_or_else(|| {
+            panic!(
                 "Duplicate references unknown block id {} (cache.len()={}, block_type={:?})",
-                original_id, cache.len(), block_type
-            ));
+                original_id,
+                cache.len(),
+                block_type
+            )
+        });
         return original.clone();
     }
 
@@ -695,8 +709,10 @@ fn decode_block_v3(payload: &[u8], cache: &mut Vec<Vec<u8>>, was_rle: bool) -> V
 
     let lit_values = crate::rans_v4::sparse_rans_decode_u8(lit_table_bytes, lit_stream, n_lits);
     let len_values = crate::rans_v4::sparse_rans_decode_u8(len_table_bytes, len_stream, n_matches);
-    let dist_lo_values = crate::rans_v4::sparse_rans_decode_u8(dist_lo_table_bytes, dist_lo_stream, n_matches);
-    let dist_hi_values = crate::rans_v4::sparse_rans_decode_u8(dist_hi_table_bytes, dist_hi_stream, n_matches);
+    let dist_lo_values =
+        crate::rans_v4::sparse_rans_decode_u8(dist_lo_table_bytes, dist_lo_stream, n_matches);
+    let dist_hi_values =
+        crate::rans_v4::sparse_rans_decode_u8(dist_hi_table_bytes, dist_hi_stream, n_matches);
 
     // Reconstruct ops by interleaving per the flags
     let mut ops: Vec<Op> = Vec::with_capacity(n_ops);

@@ -105,7 +105,11 @@ impl Dictionary {
             est_freq,
         });
         let first = token[0];
-        let second = if token.len() >= 2 { Some(token[1]) } else { None };
+        let second = if token.len() >= 2 {
+            Some(token[1])
+        } else {
+            None
+        };
         self.by_prefix
             .entry((first, second))
             .or_default()
@@ -123,7 +127,11 @@ impl Dictionary {
             return None;
         }
         let first = data[pos];
-        let second = if pos + 1 < data.len() { Some(data[pos + 1]) } else { None };
+        let second = if pos + 1 < data.len() {
+            Some(data[pos + 1])
+        } else {
+            None
+        };
 
         // Collect candidates from both buckets (if applicable).
         let mut candidates: Vec<(u16, u8)> = Vec::new();
@@ -423,45 +431,138 @@ pub fn default_combined_dict() -> Dictionary {
 // Total entries across all three: ~130 (fits in 1KB of static memory).
 
 const TEXT_TOKENS: &[(&[u8], u32)] = &[
-    (b"the", 1000), (b"and", 800), (b"ing", 600), (b"tion", 400),
-    (b"er ", 500), (b"in ", 700), (b"an ", 600), (b"is ", 500),
-    (b"to ", 600), (b"of ", 800), (b"ed ", 500), (b"or ", 400),
-    (b"for", 400), (b"ith", 300), (b"ith ", 250), (b"as ", 300),
-    (b"at ", 300), (b"be ", 300), (b"by ", 200), (b"that", 300),
-    (b"this", 250), (b"with", 300), (b"from", 200), (b"have", 200),
-    (b"are ", 200), (b"was ", 200), (b"not ", 200), (b"but ", 200),
-    (b"all", 150), (b"can", 150), (b"had", 150), (b"her", 150),
-    (b"one", 150), (b"our", 150), (b"out", 150), (b"day", 150),
-    (b"get", 150), (b"use", 150), (b"man", 100), (b"new", 100),
-    (b"now", 100), (b"old", 100), (b"see", 100), (b"way", 100),
-    (b"who", 100), (b"boy", 100), (b"did", 100), (b"its", 100),
-    (b"let", 100), (b"put", 100), (b"say", 100), (b"she", 100),
-    (b"too", 100), (b"two", 100),
+    (b"the", 1000),
+    (b"and", 800),
+    (b"ing", 600),
+    (b"tion", 400),
+    (b"er ", 500),
+    (b"in ", 700),
+    (b"an ", 600),
+    (b"is ", 500),
+    (b"to ", 600),
+    (b"of ", 800),
+    (b"ed ", 500),
+    (b"or ", 400),
+    (b"for", 400),
+    (b"ith", 300),
+    (b"ith ", 250),
+    (b"as ", 300),
+    (b"at ", 300),
+    (b"be ", 300),
+    (b"by ", 200),
+    (b"that", 300),
+    (b"this", 250),
+    (b"with", 300),
+    (b"from", 200),
+    (b"have", 200),
+    (b"are ", 200),
+    (b"was ", 200),
+    (b"not ", 200),
+    (b"but ", 200),
+    (b"all", 150),
+    (b"can", 150),
+    (b"had", 150),
+    (b"her", 150),
+    (b"one", 150),
+    (b"our", 150),
+    (b"out", 150),
+    (b"day", 150),
+    (b"get", 150),
+    (b"use", 150),
+    (b"man", 100),
+    (b"new", 100),
+    (b"now", 100),
+    (b"old", 100),
+    (b"see", 100),
+    (b"way", 100),
+    (b"who", 100),
+    (b"boy", 100),
+    (b"did", 100),
+    (b"its", 100),
+    (b"let", 100),
+    (b"put", 100),
+    (b"say", 100),
+    (b"she", 100),
+    (b"too", 100),
+    (b"two", 100),
 ];
 
 const CODE_TOKENS: &[(&[u8], u32)] = &[
-    (b"fn ", 500), (b"let ", 800), (b"mut ", 600), (b"match ", 400),
-    (b"if ", 600), (b"else", 300), (b"self.", 400), (b"pub ", 500),
-    (b"struct", 300), (b"use ", 400), (b"impl ", 300), (b"for ", 400),
-    (b"in ", 300), (b"return", 200), (b"=>", 250), (b"->", 200),
-    (b"..", 200), (b"::", 400), (b"==", 200), (b"!=", 100),
-    (b"<=", 100), (b">=", 100), (b"&&", 100), (b"||", 100),
-    (b"    ", 800), (b"\n    ", 400), (b"\n}", 200), (b"\n    fn", 200),
-    (b"\n    let", 200), (b"\n    if", 100), (b"\n    for", 100),
-    (b"\n    match", 100), (b"Option<", 50), (b"Result<", 50),
-    (b"Vec<", 50), (b"String", 50), (b"usize", 50), (b"u32", 50),
-    (b"u8", 30), (b"u64", 30), (b"i32", 30), (b"i64", 30),
-    (b"bool", 30), (b"true", 100), (b"false", 100), (b"Some(", 100),
-    (b"None", 100), (b"Ok(", 100), (b"Err(", 100),
+    (b"fn ", 500),
+    (b"let ", 800),
+    (b"mut ", 600),
+    (b"match ", 400),
+    (b"if ", 600),
+    (b"else", 300),
+    (b"self.", 400),
+    (b"pub ", 500),
+    (b"struct", 300),
+    (b"use ", 400),
+    (b"impl ", 300),
+    (b"for ", 400),
+    (b"in ", 300),
+    (b"return", 200),
+    (b"=>", 250),
+    (b"->", 200),
+    (b"..", 200),
+    (b"::", 400),
+    (b"==", 200),
+    (b"!=", 100),
+    (b"<=", 100),
+    (b">=", 100),
+    (b"&&", 100),
+    (b"||", 100),
+    (b"    ", 800),
+    (b"\n    ", 400),
+    (b"\n}", 200),
+    (b"\n    fn", 200),
+    (b"\n    let", 200),
+    (b"\n    if", 100),
+    (b"\n    for", 100),
+    (b"\n    match", 100),
+    (b"Option<", 50),
+    (b"Result<", 50),
+    (b"Vec<", 50),
+    (b"String", 50),
+    (b"usize", 50),
+    (b"u32", 50),
+    (b"u8", 30),
+    (b"u64", 30),
+    (b"i32", 30),
+    (b"i64", 30),
+    (b"bool", 30),
+    (b"true", 100),
+    (b"false", 100),
+    (b"Some(", 100),
+    (b"None", 100),
+    (b"Ok(", 100),
+    (b"Err(", 100),
 ];
 
 const JSON_TOKENS: &[(&[u8], u32)] = &[
-    (b"\"", 500), (b":\"", 600), (b"\":", 100), (b",\"", 800),
-    (b"\":\"", 200), (b"\": ", 200), (b", ", 1000), (b": ", 800),
-    (b"null", 200), (b"true", 200), (b"false", 200),
-    (b"[\"", 200), (b"\"]", 200), (b"{\"", 200), (b"\"}", 200),
-    (b"[[", 50), (b"]]", 50), (b"{{", 50), (b"}}", 50),
-    (b"\\\"", 100), (b"\\\\", 50), (b"\\n", 50), (b"\\t", 50),
+    (b"\"", 500),
+    (b":\"", 600),
+    (b"\":", 100),
+    (b",\"", 800),
+    (b"\":\"", 200),
+    (b"\": ", 200),
+    (b", ", 1000),
+    (b": ", 800),
+    (b"null", 200),
+    (b"true", 200),
+    (b"false", 200),
+    (b"[\"", 200),
+    (b"\"]", 200),
+    (b"{\"", 200),
+    (b"\"}", 200),
+    (b"[[", 50),
+    (b"]]", 50),
+    (b"{{", 50),
+    (b"}}", 50),
+    (b"\\\"", 100),
+    (b"\\\\", 50),
+    (b"\\n", 50),
+    (b"\\t", 50),
 ];
 
 // ---------------------------------------------------------------------
@@ -713,7 +814,10 @@ mod tests {
         let corpus: &[&[u8]] = &[b"abc abc abc abc abc"];
         let (d, stats) = Dictionary::train_from_corpus(corpus, 1024, 3, 8, 2);
         assert!(d.get(0).is_some(), "dict should have at least one entry");
-        assert!(d.lookup_at(b"abc", 0).is_some(), "dict should contain 'abc'");
+        assert!(
+            d.lookup_at(b"abc", 0).is_some(),
+            "dict should contain 'abc'"
+        );
         assert!(stats.dict_bytes > 0);
     }
 
@@ -736,7 +840,10 @@ mod tests {
         // Look for either "abc" or "abcdef" — both should be valid.
         let has_abc = d.lookup_at(b"abc", 0).is_some();
         let has_abcdef = d.lookup_at(b"abcdef", 0).is_some();
-        assert!(has_abc || has_abcdef, "dict should contain 'abc' or 'abcdef'");
+        assert!(
+            has_abc || has_abcdef,
+            "dict should contain 'abc' or 'abcdef'"
+        );
     }
 
     #[test]
@@ -748,7 +855,10 @@ mod tests {
         }
         let corpus: &[&[u8]] = &[&big];
         let (_d, stats) = Dictionary::train_from_corpus(corpus, 200, 3, 8, 2);
-        assert!(stats.dict_bytes <= 200, "dict should be bounded by max_bytes");
+        assert!(
+            stats.dict_bytes <= 200,
+            "dict should be bounded by max_bytes"
+        );
     }
 
     #[test]
@@ -775,7 +885,7 @@ mod tests {
         let corpus: &[&[u8]] = &[data];
         let (d, _stats) = Dictionary::train_from_corpus(corpus, 1024, 3, 8, 2);
 
-        use crate::lz77::{MatchFinder, MatchDecoder};
+        use crate::lz77::{MatchDecoder, MatchFinder};
         let mut enc = MatchFinder::new();
         let ops = enc.encode_with_dict(data, &d);
         let mut dec = MatchDecoder::with_dict(d);

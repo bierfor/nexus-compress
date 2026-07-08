@@ -21,9 +21,7 @@
 //! - `Config` is `#[non_exhaustive]` — use `Config::default()`
 //!   with the `.with_minify(true)` builder.
 
-use swc_core::common::{
-    comments::Comments, sync::Lrc, FileName, SourceMap,
-};
+use swc_core::common::{comments::Comments, sync::Lrc, FileName, SourceMap};
 use swc_core::ecma::ast::{EsVersion, Program};
 use swc_core::ecma::codegen::{text_writer::JsWriter, Config, Emitter};
 use swc_core::ecma::parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax, TsSyntax};

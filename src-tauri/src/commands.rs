@@ -9,8 +9,8 @@
 //! the return values to the frontend via JSON.
 
 use nexus_compress::api::{
-    self, ApiResult, BackendInfo, CompressResult, CompressionBackend, CompressionLevel,
-    CompressTargetResult, DecompressResult, DecompressTargetResult, EngineInfo, PeekResult,
+    self, ApiResult, BackendInfo, CompressResult, CompressTargetResult, CompressionBackend,
+    CompressionLevel, DecompressResult, DecompressTargetResult, EngineInfo, PeekResult,
     ProgressEvent, SelfTestResult,
 };
 use std::path::PathBuf;
@@ -39,13 +39,10 @@ pub async fn compress_bytes_with_level_cmd(
     input: Vec<u8>,
     level: String,
 ) -> Result<CompressResult, String> {
-    let level = CompressionLevel::from_str(&level)
-        .map_err(|e| format!("invalid_level: {}", e))?;
-    tauri::async_runtime::spawn_blocking(move || {
-        api::compress_bytes_with_level(&input, level)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {}", e))
+    let level = CompressionLevel::from_str(&level).map_err(|e| format!("invalid_level: {}", e))?;
+    tauri::async_runtime::spawn_blocking(move || api::compress_bytes_with_level(&input, level))
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {}", e))
 }
 
 #[tauri::command]
@@ -65,8 +62,8 @@ pub async fn compress_bytes_with_backend_cmd(
     backend: String,
     lzma_level: u32,
 ) -> Result<CompressResult, String> {
-    let backend = CompressionBackend::from_str(&backend)
-        .map_err(|e| format!("invalid_backend: {}", e))?;
+    let backend =
+        CompressionBackend::from_str(&backend).map_err(|e| format!("invalid_backend: {}", e))?;
     tauri::async_runtime::spawn_blocking(move || {
         api::compress_bytes_with_backend(&input, &file_name, backend, lzma_level)
     })
@@ -80,8 +77,8 @@ pub async fn compress_directory_with_backend_cmd(
     backend: String,
     lzma_level: u32,
 ) -> Result<(api::DirectoryResult, Vec<u8>), String> {
-    let backend = CompressionBackend::from_str(&backend)
-        .map_err(|e| format!("invalid_backend: {}", e))?;
+    let backend =
+        CompressionBackend::from_str(&backend).map_err(|e| format!("invalid_backend: {}", e))?;
     let path = PathBuf::from(input_dir);
     tauri::async_runtime::spawn_blocking(move || {
         to_ipc(
@@ -125,16 +122,13 @@ pub async fn compress_target_cmd(
         .get("backend")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing 'backend' in req".to_string())?;
-    let lzma_level = req
-        .get("lzma_level")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(6) as u32;
+    let lzma_level = req.get("lzma_level").and_then(|v| v.as_u64()).unwrap_or(6) as u32;
     let output_dir = req
         .get("output_dir")
         .and_then(|v| v.as_str())
         .map(PathBuf::from);
-    let backend = CompressionBackend::from_str(backend_str)
-        .map_err(|e| format!("invalid_backend: {}", e))?;
+    let backend =
+        CompressionBackend::from_str(backend_str).map_err(|e| format!("invalid_backend: {}", e))?;
     let p = PathBuf::from(path);
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -210,9 +204,7 @@ pub async fn decompress_target_cmd(
 /// The frontend uses this to render a WinRAR-style preview
 /// before the user commits to extracting.
 #[tauri::command]
-pub async fn peek_archive_target_cmd(
-    req: serde_json::Value,
-) -> Result<PeekResult, String> {
+pub async fn peek_archive_target_cmd(req: serde_json::Value) -> Result<PeekResult, String> {
     let path = req
         .get("path")
         .and_then(|v| v.as_str())
@@ -262,9 +254,7 @@ pub struct ArchiveExtractResp {
 }
 
 #[tauri::command]
-pub async fn p2p_archive_list_cmd(
-    req: serde_json::Value,
-) -> Result<ArchiveListResp, String> {
+pub async fn p2p_archive_list_cmd(req: serde_json::Value) -> Result<ArchiveListResp, String> {
     let path_str = req
         .get("path")
         .and_then(|v| v.as_str())
@@ -295,17 +285,12 @@ pub async fn p2p_archive_list_cmd(
             // without enumerating the whole archive. For typical
             // archives this means touching only a few KB of the
             // file, regardless of total size.
-            let page =
-                crate::archive_inspect::list_paginated(&path, offset, limit)?;
+            let page = crate::archive_inspect::list_paginated(&path, offset, limit)?;
             // Total stats — use a separate cheap count of just
             // header bytes by reading the file's end (for tar
             // there's no central header, so we approximate via
             // the same iterator).
-            let total_bytes: u64 = page
-                .entries
-                .iter()
-                .map(|e| e.size)
-                .sum();
+            let total_bytes: u64 = page.entries.iter().map(|e| e.size).sum();
             // For the total file count, we approximate: if
             // has_more, we know the page is the start of more.
             // We don't enumerate everything — the UI shows
@@ -345,9 +330,7 @@ pub async fn p2p_archive_list_cmd(
 }
 
 #[tauri::command]
-pub async fn p2p_archive_extract_cmd(
-    req: serde_json::Value,
-) -> Result<ArchiveExtractResp, String> {
+pub async fn p2p_archive_extract_cmd(req: serde_json::Value) -> Result<ArchiveExtractResp, String> {
     let path_str = req
         .get("path")
         .and_then(|v| v.as_str())
@@ -360,14 +343,11 @@ pub async fn p2p_archive_extract_cmd(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    let selected: Option<Vec<String>> = req
-        .get("selected")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect()
-        });
+    let selected: Option<Vec<String>> = req.get("selected").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect()
+    });
     let path = PathBuf::from(&path_str);
     // Resolve output_dir: use the user-supplied path, or fall back
     // to the directory that contains the archive.
@@ -445,7 +425,6 @@ fn reveal_in_finder(path: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 // ============================================================================
 //  File/folder pickers (Sprint 5.5.5: blocking pattern — fixes hang on macOS)
@@ -572,16 +551,12 @@ pub async fn self_test_cmd() -> Result<SelfTestResult, String> {
     to_ipc(api::self_test())
 }
 
-
-
-
 #[tauri::command]
 pub async fn compress_directory_cmd(
     input_dir: String,
     level: String,
 ) -> Result<(api::DirectoryResult, Vec<u8>), String> {
-    let level = CompressionLevel::from_str(&level)
-        .map_err(|e| format!("invalid_level: {}", e))?;
+    let level = CompressionLevel::from_str(&level).map_err(|e| format!("invalid_level: {}", e))?;
     let path = PathBuf::from(input_dir);
     tauri::async_runtime::spawn_blocking(move || {
         to_ipc(api::compress_directory(&path, level).map(|(r, a)| (r, a.to_vec())))
@@ -595,8 +570,7 @@ pub async fn compress_directories_cmd(
     input_dirs: Vec<String>,
     level: String,
 ) -> Result<(api::DirectoryResult, Vec<u8>), String> {
-    let level = CompressionLevel::from_str(&level)
-        .map_err(|e| format!("invalid_level: {}", e))?;
+    let level = CompressionLevel::from_str(&level).map_err(|e| format!("invalid_level: {}", e))?;
     let paths: Vec<PathBuf> = input_dirs.into_iter().map(PathBuf::from).collect();
     tauri::async_runtime::spawn_blocking(move || {
         let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
@@ -761,10 +735,7 @@ fn maybe_extract_tar(
             .output();
     }
 
-    eprintln!(
-        "[p2p] extraction complete: {}",
-        extracted_path.display()
-    );
+    eprintln!("[p2p] extraction complete: {}", extracted_path.display());
 
     Ok((extracted_path, Some(extracted_name)))
 }
@@ -872,25 +843,20 @@ pub async fn p2p_send_start_cmd(
         .path()
         .app_data_dir()
         .map_err(|e| format!("resolve app_data_dir: {}", e))?;
-    std::fs::create_dir_all(&app_data_dir)
-        .map_err(|e| format!("mkdir app_data_dir: {}", e))?;
+    std::fs::create_dir_all(&app_data_dir).map_err(|e| format!("mkdir app_data_dir: {}", e))?;
     let started = p2p_tunnel::start_sender(file_path.clone(), code.clone(), app_data_dir).await?;
     // Sprint 5.6.16: if the user picked a directory, start_sender
     // The filename is already computed correctly by start_sender
     // (it adds .tar for directories, preserves the original name
     // for files and already-compressed formats). Read it from the
     // token rather than re-computing it here to avoid drift.
-    let filename = started
-        .token
-        .filename
-        .clone()
-        .unwrap_or_else(|| {
-            file_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file")
-                .to_string()
-        });
+    let filename = started.token.filename.clone().unwrap_or_else(|| {
+        file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string()
+    });
     let file_size = started.token.size;
     let upnp_status = started.upnp_info.as_ref().map(|info| UpnpStatusInfo {
         external_ip: info.external_ip.to_string(),
@@ -957,9 +923,7 @@ pub async fn p2p_send_start_cmd(
 }
 
 #[tauri::command]
-pub async fn p2p_send_abort_cmd(
-    state: State<'_, Arc<P2pState>>,
-) -> Result<(), String> {
+pub async fn p2p_send_abort_cmd(state: State<'_, Arc<P2pState>>) -> Result<(), String> {
     let mut active = state.active.lock().await;
     if let Some(started) = active.take() {
         // Dropping StartedSend kills the tunnel child (Drop on
@@ -993,20 +957,17 @@ pub struct P2pReceiveResp {
 
 #[tauri::command]
 pub async fn p2p_receive_cmd(req: serde_json::Value) -> Result<P2pReceiveResp, String> {
-    let req: P2pReceiveReq = serde_json::from_value(req)
-        .map_err(|e| format!("invalid p2p_receive request: {}", e))?;
+    let req: P2pReceiveReq =
+        serde_json::from_value(req).map_err(|e| format!("invalid p2p_receive request: {}", e))?;
     let token = p2p_tunnel::P2pToken::from_compact(&req.token)
         .map_err(|e| format!("invalid token: {}", e))?;
     let output_path = PathBuf::from(&req.output_path);
     if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir output parent: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir output parent: {}", e))?;
     }
     let result = p2p_tunnel::receive_send_file(token, output_path).await?;
-    let (final_path, final_filename) = maybe_extract_tar(
-        result.output_path,
-        result.filename.as_deref(),
-    )?;
+    let (final_path, final_filename) =
+        maybe_extract_tar(result.output_path, result.filename.as_deref())?;
     Ok(P2pReceiveResp {
         bytes_written: result.bytes_written,
         output_path: final_path.to_string_lossy().to_string(),
@@ -1037,14 +998,11 @@ pub async fn p2p_receive_direct_cmd(req: serde_json::Value) -> Result<P2pReceive
         .unwrap_or(5);
     let output_path = PathBuf::from(&output_path_str);
     if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir output parent: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir output parent: {}", e))?;
     }
     let result = p2p_tunnel::receive_direct_file(token_v2, output_path, timeout_secs).await?;
-    let (final_path, final_filename) = maybe_extract_tar(
-        result.output_path,
-        result.filename.as_deref(),
-    )?;
+    let (final_path, final_filename) =
+        maybe_extract_tar(result.output_path, result.filename.as_deref())?;
     Ok(P2pReceiveResp {
         bytes_written: result.bytes_written,
         output_path: final_path.to_string_lossy().to_string(),
@@ -1062,9 +1020,7 @@ pub struct P2pPeekFilenameResp {
 }
 
 #[tauri::command]
-pub async fn p2p_peek_filename_cmd(
-    req: serde_json::Value,
-) -> Result<P2pPeekFilenameResp, String> {
+pub async fn p2p_peek_filename_cmd(req: serde_json::Value) -> Result<P2pPeekFilenameResp, String> {
     let token = req
         .get("token")
         .and_then(|v| v.as_str())
@@ -1096,8 +1052,8 @@ pub struct P2pTunnelConfigResp {
 pub async fn p2p_get_tunnel_config_cmd(
     app: tauri::AppHandle,
 ) -> Result<P2pTunnelConfigResp, String> {
-    use tauri::Manager; // brings .path() into scope on AppHandle
     use p2p_tunnel::p2p_config::{load_tunnel_config, TokenStore};
+    use tauri::Manager; // brings .path() into scope on AppHandle
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -1132,11 +1088,11 @@ pub async fn p2p_save_tunnel_config_cmd(
     app: tauri::AppHandle,
     req: serde_json::Value,
 ) -> Result<(), String> {
-    use tauri::Manager; // brings .path() into scope on AppHandle
     use p2p_tunnel::p2p_config::{
-        default_token_store, save_tunnel_config, validate_hostname, validate_token,
-        TokenStore, TransportMode, TunnelConfig,
+        default_token_store, save_tunnel_config, validate_hostname, validate_token, TokenStore,
+        TransportMode, TunnelConfig,
     };
+    use tauri::Manager; // brings .path() into scope on AppHandle
     let req: P2pSaveTunnelConfigReq = serde_json::from_value(req)
         .map_err(|e| format!("invalid save_tunnel_config request: {}", e))?;
     let mode = match req.mode.as_str() {
@@ -1151,11 +1107,7 @@ pub async fn p2p_save_tunnel_config_cmd(
         .map_err(|e| format!("resolve app_data_dir: {}", e))?;
     // Validate and normalize hostname (only relevant for Named
     // mode, but we validate if present).
-    let hostname = req
-        .hostname
-        .as_deref()
-        .map(validate_hostname)
-        .transpose()?;
+    let hostname = req.hostname.as_deref().map(validate_hostname).transpose()?;
     let hostname = hostname.map(|s| s.strip_prefix("https://").unwrap_or(&s).to_string());
     // Validate the token (if provided). This is the FIRST
     // place we touch the secret — the token is in memory

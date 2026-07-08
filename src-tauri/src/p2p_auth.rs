@@ -122,8 +122,7 @@ pub fn build_auth_header(
     path: &str,
 ) -> String {
     let canonical = canonical_request(timestamp_unix, method, path);
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(pre_key)
-        .expect("HMAC key");
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(pre_key).expect("HMAC key");
     mac.update(canonical.as_bytes());
     let sig = mac.finalize().into_bytes();
     format!("{}|{}", timestamp_unix, hex::encode(sig))
@@ -201,13 +200,8 @@ pub fn verify_request(state: &AuthState, req: &Request) -> Result<(), ()> {
     // 4. Recompute HMAC over the canonical request and
     //    compare in constant time (HMAC's verify_slice is
     //    constant-time internally).
-    let canonical = canonical_request(
-        auth_ts,
-        req.method().as_str(),
-        req.uri().path(),
-    );
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(state.pre_key.as_slice())
-        .map_err(|_| ())?;
+    let canonical = canonical_request(auth_ts, req.method().as_str(), req.uri().path());
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(state.pre_key.as_slice()).map_err(|_| ())?;
     mac.update(canonical.as_bytes());
     mac.verify_slice(&sig).map_err(|_| ())?;
     Ok(())
@@ -392,7 +386,11 @@ mod tests {
     fn verify_request_rejects_malformed_header() {
         let s = state();
         // No pipe.
-        let req = build_request("POST", "/spake", Some((HEADER_NAME, String::from("not-a-pipe"))));
+        let req = build_request(
+            "POST",
+            "/spake",
+            Some((HEADER_NAME, String::from("not-a-pipe"))),
+        );
         assert!(verify_request(&s, &req).is_err());
     }
 
@@ -400,7 +398,11 @@ mod tests {
     fn verify_request_rejects_bad_ts() {
         let s = state();
         // Pipe + non-numeric ts.
-        let req = build_request("POST", "/spake", Some((HEADER_NAME, String::from("abc|deadbeef"))));
+        let req = build_request(
+            "POST",
+            "/spake",
+            Some((HEADER_NAME, String::from("abc|deadbeef"))),
+        );
         assert!(verify_request(&s, &req).is_err());
     }
 
@@ -408,7 +410,11 @@ mod tests {
     fn verify_request_rejects_bad_sig_hex() {
         let s = state();
         // Valid ts, invalid hex.
-        let req = build_request("POST", "/spake", Some((HEADER_NAME, String::from("1000|xyz"))));
+        let req = build_request(
+            "POST",
+            "/spake",
+            Some((HEADER_NAME, String::from("1000|xyz"))),
+        );
         assert!(verify_request(&s, &req).is_err());
     }
 

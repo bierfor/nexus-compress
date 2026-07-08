@@ -66,9 +66,9 @@ pub fn minify(input: &[u8]) -> Vec<u8> {
 
     let mut in_block_comment = false;
     let mut last_was_newline = true; // we are at "line start"
-    // Whitespace inside a line: track that we need to emit a single
-    // space at the next non-whitespace char, but never more than one
-    // (collapse runs).
+                                     // Whitespace inside a line: track that we need to emit a single
+                                     // space at the next non-whitespace char, but never more than one
+                                     // (collapse runs).
     let mut pending_space = false;
 
     while let Some(c) = chars.next() {

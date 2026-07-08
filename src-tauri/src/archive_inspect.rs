@@ -13,7 +13,7 @@
 //! Reading the entry list is O(headers), not O(payload).
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArchiveEntry {
@@ -62,11 +62,7 @@ pub fn list_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
 /// `has_more`. For a 30 GB tar with 1M files, only the first
 /// ~256 KB of headers are touched (regardless of where the page
 /// starts), and only `limit` entries are returned over IPC.
-pub fn list_paginated(
-    path: &Path,
-    offset: usize,
-    limit: usize,
-) -> Result<PageResult, String> {
+pub fn list_paginated(path: &Path, offset: usize, limit: usize) -> Result<PageResult, String> {
     match detect_format(path)? {
         "tar" => list_tar_paginated(path, offset, limit),
         "solid" => list_solid_paginated(path, offset, limit),
@@ -89,8 +85,7 @@ pub fn extract_entries(
     output_dir: &Path,
     selected: Option<Vec<String>>,
 ) -> Result<Vec<String>, String> {
-    std::fs::create_dir_all(output_dir)
-        .map_err(|e| format!("mkdir output: {}", e))?;
+    std::fs::create_dir_all(output_dir).map_err(|e| format!("mkdir output: {}", e))?;
     match detect_format(path)? {
         "tar" => extract_tar_entries(path, output_dir, selected),
         "solid" => extract_solid_entries(path, output_dir, selected),
@@ -113,11 +108,7 @@ fn list_tar_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
             .into_owned();
         let size = entry.size();
         let is_dir = entry.header().entry_type().is_dir();
-        out.push(ArchiveEntry {
-            name,
-            size,
-            is_dir,
-        });
+        out.push(ArchiveEntry { name, size, is_dir });
     }
     Ok(out)
 }
@@ -125,18 +116,13 @@ fn list_tar_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
 /// Streaming paginated tar listing. Reads only enough headers
 /// to fill the requested window + one more entry (used to
 /// detect has_more without enumerating the whole archive).
-fn list_tar_paginated(
-    path: &Path,
-    offset: usize,
-    limit: usize,
-) -> Result<PageResult, String> {
+fn list_tar_paginated(path: &Path, offset: usize, limit: usize) -> Result<PageResult, String> {
     let f = std::fs::File::open(path).map_err(|e| format!("open tar: {}", e))?;
     let mut ar = tar::Archive::new(f);
     // Skip `offset` headers, then collect up to limit+1.
     let mut out = Vec::with_capacity(limit + 1);
     let mut skipped = 0usize;
-    let mut entry_iter =
-        ar.entries().map_err(|e| format!("tar entries: {}", e))?;
+    let mut entry_iter = ar.entries().map_err(|e| format!("tar entries: {}", e))?;
     while skipped < offset {
         match entry_iter.next() {
             Some(Ok(_)) => skipped += 1,
@@ -162,11 +148,7 @@ fn list_tar_paginated(
             .into_owned();
         let size = entry.size();
         let is_dir = entry.header().entry_type().is_dir();
-        out.push(ArchiveEntry {
-            name,
-            size,
-            is_dir,
-        });
+        out.push(ArchiveEntry { name, size, is_dir });
         count += 1;
     }
     let has_more = out.len() > limit;
@@ -213,8 +195,7 @@ fn extract_tar_entries(
                 .map_err(|e| format!("mkdir {}: {}", dest.display(), e))?;
         } else {
             if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("mkdir parent: {}", e))?;
+                std::fs::create_dir_all(parent).map_err(|e| format!("mkdir parent: {}", e))?;
             }
             entry
                 .unpack(&dest)
@@ -244,8 +225,7 @@ fn extract_tar_entries(
 // archives (full decompression is the only way to do selective).
 
 fn list_solid_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("read solid archive: {}", e))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("read solid archive: {}", e))?;
     let entries = nexus_compress::solid_archive::parse_toc(&bytes)
         .map_err(|e| format!("parse solid toc: {}", e))?;
     Ok(entries
@@ -270,13 +250,8 @@ fn list_solid_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
 /// already O(headers) and the headers are tiny (~50 bytes
 /// each), so even 100k entries parses in tens of milliseconds.
 /// We slice the result for the requested window.
-fn list_solid_paginated(
-    path: &Path,
-    offset: usize,
-    limit: usize,
-) -> Result<PageResult, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("read solid archive: {}", e))?;
+fn list_solid_paginated(path: &Path, offset: usize, limit: usize) -> Result<PageResult, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read solid archive: {}", e))?;
     let entries = nexus_compress::solid_archive::parse_toc(&bytes)
         .map_err(|e| format!("parse solid toc: {}", e))?;
     let total = entries.len();
@@ -309,8 +284,7 @@ fn extract_solid_entries(
     selected: Option<Vec<String>>,
 ) -> Result<Vec<String>, String> {
     use nexus_compress::solid_archive::decompress as solid_decompress;
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("read solid archive: {}", e))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("read solid archive: {}", e))?;
     // Step 1: read the TOC (cheap — no LZMA).
     let entries = nexus_compress::solid_archive::parse_toc(&bytes)
         .map_err(|e| format!("parse solid toc: {}", e))?;
@@ -319,8 +293,8 @@ fn extract_solid_entries(
     // have the preprocessed bytes of every entry concatenated
     // in the order they were compressed. Per-entry offsets
     // come from the TOC.
-    let (_entries, solid_uncompressed) = solid_decompress(&bytes)
-        .map_err(|e| format!("solid decompress: {}", e))?;
+    let (_entries, solid_uncompressed) =
+        solid_decompress(&bytes).map_err(|e| format!("solid decompress: {}", e))?;
     let selected_set: Option<std::collections::HashSet<String>> =
         selected.map(|v| v.into_iter().collect());
     let mut written = Vec::new();
@@ -339,8 +313,7 @@ fn extract_solid_entries(
         // parent for each file.
         let dest = output_dir.join(&entry_path);
         if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir parent: {}", e))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir parent: {}", e))?;
         }
         // Slice the preprocessed bytes for this entry. For
         // Raw files the bytes are unchanged; for Conservative /

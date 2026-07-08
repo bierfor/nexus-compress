@@ -147,7 +147,9 @@ mod tests {
 
     #[test]
     fn alternating() {
-        let data: Vec<u8> = (0..100u8).map(|i| if i % 2 == 0 { 0x55 } else { 0xAA }).collect();
+        let data: Vec<u8> = (0..100u8)
+            .map(|i| if i % 2 == 0 { 0x55 } else { 0xAA })
+            .collect();
         roundtrip(&data, "alternating low/high");
     }
 
@@ -161,9 +163,12 @@ mod tests {
     fn runs_compress() {
         let data = vec![0xAA; 1000];
         let rle = compress_rle(&data);
-        assert!(rle.len() < data.len() / 4,
-                "run of 1000 same bytes should compress well: {} -> {}",
-                data.len(), rle.len());
+        assert!(
+            rle.len() < data.len() / 4,
+            "run of 1000 same bytes should compress well: {} -> {}",
+            data.len(),
+            rle.len()
+        );
     }
 
     #[test]
@@ -177,8 +182,12 @@ mod tests {
         }
         let rle = compress_rle(&data);
         // Worst case 2x for all-unique. Real data should be close to 1.5-2x.
-        assert!(rle.len() <= data.len() * 2,
-                "RLE exploded: {} bytes -> {} (max should be {} = 2x)",
-                data.len(), rle.len(), data.len() * 2);
+        assert!(
+            rle.len() <= data.len() * 2,
+            "RLE exploded: {} bytes -> {} (max should be {} = 2x)",
+            data.len(),
+            rle.len(),
+            data.len() * 2
+        );
     }
 }

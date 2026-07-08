@@ -237,21 +237,15 @@ pub fn load_tunnel_config(app_data_dir: &Path) -> Result<TunnelConfig, String> {
         return Ok(TunnelConfig::default());
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("read config: {}", e))?;
-    let mut cfg: TunnelConfig = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("parse config: {}", e))?;
+    let mut cfg: TunnelConfig =
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse config: {}", e))?;
     // Sprint 5.6.5: migrate legacy Quick/Named configs to Direct
     // when no token is saved in keyring. Quick mode is rate-limited
     // (Error 1015) and Named mode requires the user to set up a
     // Cloudflare account + tunnel — both are pain for the typical
     // user. Direct mode (LAN mDNS + UPnP cross-NAT) just works.
-    if cfg.mode == TransportMode::Quick
-        || cfg.mode == TransportMode::Named
-    {
-        let has_token = default_token_store()
-            .get_token()
-            .ok()
-            .flatten()
-            .is_some();
+    if cfg.mode == TransportMode::Quick || cfg.mode == TransportMode::Named {
+        let has_token = default_token_store().get_token().ok().flatten().is_some();
         if !has_token {
             eprintln!(
                 "[p2p-config] migrating {:?} -> Direct (no token in keyring)",
@@ -268,10 +262,7 @@ pub fn load_tunnel_config(app_data_dir: &Path) -> Result<TunnelConfig, String> {
 /// Persist the non-secret part of the tunnel config to disk.
 /// The token (if any) must be persisted via
 /// `TokenStore::set_token`.
-pub fn save_tunnel_config(
-    app_data_dir: &Path,
-    cfg: &TunnelConfig,
-) -> Result<(), String> {
+pub fn save_tunnel_config(app_data_dir: &Path, cfg: &TunnelConfig) -> Result<(), String> {
     std::fs::create_dir_all(app_data_dir).map_err(|e| format!("mkdir: {}", e))?;
     let path = app_data_dir.join(TUNNEL_CONFIG_FILE);
     let json = serde_json::to_vec_pretty(cfg).map_err(|e| format!("serialize: {}", e))?;
@@ -343,10 +334,7 @@ pub fn validate_hostname(hostname: &str) -> Result<String, String> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
     {
-        return Err(format!(
-            "hostname contains invalid characters: {}",
-            host
-        ));
+        return Err(format!("hostname contains invalid characters: {}", host));
     }
     Ok(format!("https://{}", host))
 }
@@ -377,21 +365,14 @@ pub fn derive_service_short_name(code: &str) -> String {
     h.update(code.as_bytes());
     let hash = h.finalize();
     // Take the first 3 bytes = 6 hex chars.
-    let hex: String = hash[..3]
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect();
+    let hex: String = hash[..3].iter().map(|b| format!("{:02x}", b)).collect();
     format!("nx-{}", hex)
 }
 
 /// Derive the full mDNS service name (with type suffix). The
 /// receiver uses this string to filter browse results.
 pub fn derive_mdns_service_name(code: &str) -> String {
-    format!(
-        "{}.{}",
-        derive_service_short_name(code),
-        SERVICE_TYPE
-    )
+    format!("{}.{}", derive_service_short_name(code), SERVICE_TYPE)
 }
 
 /// v2 token, parsed. `service_hash` is the 6-hex-char hash and
@@ -411,15 +392,13 @@ pub fn format_v2_token(service_hash: &str, code: &str) -> String {
 /// Parse a v2 token string. Returns the parsed parts on success
 /// or a human-readable error on failure.
 pub fn parse_v2_token(s: &str) -> Result<P2pTokenV2, String> {
-    let body = s
-        .strip_prefix(TOKEN_PREFIX_V2)
-        .ok_or_else(|| {
-            format!(
-                "P2P v2 token must start with '{}', got: {}",
-                TOKEN_PREFIX_V2,
-                &s.chars().take(8).collect::<String>()
-            )
-        })?;
+    let body = s.strip_prefix(TOKEN_PREFIX_V2).ok_or_else(|| {
+        format!(
+            "P2P v2 token must start with '{}', got: {}",
+            TOKEN_PREFIX_V2,
+            &s.chars().take(8).collect::<String>()
+        )
+    })?;
     // nx:2:direct:<hash>:<code>
     // The code can contain ':' in theory (4-word codes don't
     // but defense in depth), so we splitn(3, ':') after the
@@ -535,26 +514,20 @@ pub fn format_v3_token(
 ) -> String {
     format!(
         "{}relay:{}:{}:{}:{}",
-        TOKEN_PREFIX_V3,
-        external_ip,
-        external_port,
-        service_hash,
-        code
+        TOKEN_PREFIX_V3, external_ip, external_port, service_hash, code
     )
 }
 
 /// Parse a v3 token string. Returns the parsed parts on success
 /// or a human-readable error on failure.
 pub fn parse_v3_token(s: &str) -> Result<P2pTokenV3, String> {
-    let body = s
-        .strip_prefix(TOKEN_PREFIX_V3)
-        .ok_or_else(|| {
-            format!(
-                "P2P v3 token must start with '{}', got: {}",
-                TOKEN_PREFIX_V3,
-                &s.chars().take(8).collect::<String>()
-            )
-        })?;
+    let body = s.strip_prefix(TOKEN_PREFIX_V3).ok_or_else(|| {
+        format!(
+            "P2P v3 token must start with '{}', got: {}",
+            TOKEN_PREFIX_V3,
+            &s.chars().take(8).collect::<String>()
+        )
+    })?;
     // nx:3:relay:<ip>:<port>:<hash>:<code>
     // We splitn(5, ':') to allow the code to contain ':' (it
     // shouldn't, but defense in depth — code is just 4 words).
@@ -976,10 +949,7 @@ mod tests {
         );
         assert!(parse_v3_token(&bad).is_err());
         // Empty code.
-        let bad = format!(
-            "{}relay:203.0.113.42:49152:abc123:",
-            TOKEN_PREFIX_V3
-        );
+        let bad = format!("{}relay:203.0.113.42:49152:abc123:", TOKEN_PREFIX_V3);
         assert!(parse_v3_token(&bad).is_err());
     }
 

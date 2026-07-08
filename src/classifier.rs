@@ -15,10 +15,10 @@ use crate::format::BlockType;
 #[derive(Debug, Clone, Copy)]
 pub struct BlockStats {
     pub size: usize,
-    pub entropy: f32,            // 0..=8 bits/byte
-    pub printable_ratio: f32,    // 0..=1
-    pub struct_score: f32,       // 0..=1, heuristic for JSON/CSV/SQL
-    pub run_avg: f32,            // average run length
+    pub entropy: f32,         // 0..=8 bits/byte
+    pub printable_ratio: f32, // 0..=1
+    pub struct_score: f32,    // 0..=1, heuristic for JSON/CSV/SQL
+    pub run_avg: f32,         // average run length
 }
 
 pub fn classify(data: &[u8]) -> BlockType {

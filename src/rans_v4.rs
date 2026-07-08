@@ -91,11 +91,15 @@ pub fn decode_table(bytes: &[u8]) -> FreqTable {
     let mut cum = Vec::with_capacity(n + 1);
     for i in 0..=n {
         let off = 3 + i * 4;
-        let v = u32::from_le_bytes([bytes[off], bytes[off+1], bytes[off+2], bytes[off+3]]);
+        let v = u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
         cum.push(v);
     }
     let total = *cum.last().unwrap();
-    FreqTable { cum, total, scale_bits }
+    FreqTable {
+        cum,
+        total,
+        scale_bits,
+    }
 }
 
 /// Encode symbols using the table. Returns a byte stream that the decoder
@@ -119,8 +123,11 @@ pub fn rans_encode(symbols: &[u32], table: &FreqTable) -> Vec<u8> {
         if let Some(s) = enc_symbols.get(sym as usize).and_then(|o| o.as_ref()) {
             enc.put(s);
         } else {
-            panic!("symbol id {} out of range for table with {} symbols",
-                   sym, table.n_symbols());
+            panic!(
+                "symbol id {} out of range for table with {} symbols",
+                sym,
+                table.n_symbols()
+            );
         }
     }
 
@@ -201,10 +208,7 @@ pub fn sparse_bitmask_remap(data: &[u8]) -> ([u8; SPARSE_BITMASK_BYTES], Vec<u16
         reverse[orig as usize] = dense_idx as u16;
     }
     // Densified data: each original byte becomes its dense index.
-    let dense_data: Vec<u32> = data
-        .iter()
-        .map(|&b| reverse[b as usize] as u32)
-        .collect();
+    let dense_data: Vec<u32> = data.iter().map(|&b| reverse[b as usize] as u32).collect();
     (bitmask, remap, dense_data)
 }
 
@@ -229,10 +233,7 @@ fn build_sparse_table(dense_data: &[u32], n_symbols: usize, scale_bits: u32) -> 
 /// is `[32 bytes bitmask][densified rANS table]` — the decoder
 /// splits these by reading the first 32 bytes as the bitmask and the
 /// remainder as the rANS table.
-pub fn sparse_rans_encode_u8(
-    data: &[u8],
-    scale_bits: u32,
-) -> (Vec<u8>, Vec<u8>) {
+pub fn sparse_rans_encode_u8(data: &[u8], scale_bits: u32) -> (Vec<u8>, Vec<u8>) {
     let (bitmask, _remap, dense_data) = sparse_bitmask_remap(data);
     if dense_data.is_empty() {
         // Empty stream: 32-byte bitmask + 0 table + 0 stream.
@@ -254,11 +255,7 @@ pub fn sparse_rans_encode_u8(
 /// decode (the caller knows this from the op-flags count).
 ///
 /// Returns the original (un-densified) u8 values.
-pub fn sparse_rans_decode_u8(
-    table_section: &[u8],
-    stream_bytes: &[u8],
-    n: usize,
-) -> Vec<u8> {
+pub fn sparse_rans_decode_u8(table_section: &[u8], stream_bytes: &[u8], n: usize) -> Vec<u8> {
     if n == 0 {
         return Vec::new();
     }
@@ -359,8 +356,14 @@ mod tests {
         let table = FreqTable::from_counts(&[100, 30, 10, 5, 2, 1, 1, 1]);
         let total = 150u32;
         let intervals = [
-            (0u32, 100u32), (100, 130), (130, 140), (140, 145),
-            (145, 147), (147, 148), (148, 149), (149, 150),
+            (0u32, 100u32),
+            (100, 130),
+            (130, 140),
+            (140, 145),
+            (145, 147),
+            (147, 148),
+            (148, 149),
+            (149, 150),
         ];
         let mut s: u32 = 0xcafebabe;
         let mut symbols = Vec::with_capacity(500);

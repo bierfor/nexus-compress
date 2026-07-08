@@ -130,13 +130,20 @@ async fn main() {
     println!("============================================================");
     println!("p2p_smoke — Field test for Quick Cloudflare P2P tunnel");
     println!("============================================================");
-    println!("file     : {} ({})", file_path.display(), pretty_size(file_size(&file_path)));
+    println!(
+        "file     : {} ({})",
+        file_path.display(),
+        pretty_size(file_size(&file_path))
+    );
     println!("mode     : {}", mode);
     println!("data dir : {}", app_data_dir.display());
     println!();
 
     let cloudflared_before = count_cloudflared();
-    println!("[probe] cloudflared processes before: {}", cloudflared_before);
+    println!(
+        "[probe] cloudflared processes before: {}",
+        cloudflared_before
+    );
 
     let result = match mode {
         "both" => run_both(&file_path, &app_data_dir).await,
@@ -154,7 +161,10 @@ async fn main() {
     };
 
     let cloudflared_after = count_cloudflared();
-    println!("[probe] cloudflared processes after:  {}", cloudflared_after);
+    println!(
+        "[probe] cloudflared processes after:  {}",
+        cloudflared_after
+    );
     if cloudflared_after > cloudflared_before {
         println!(
             "[probe] ⚠ WARNING: {} cloudflared process(es) leaked!",
@@ -180,10 +190,7 @@ fn usage() {
 //  Mode: both — sender + receiver in the same process
 // ============================================================================
 
-async fn run_both(
-    file_path: &PathBuf,
-    app_data_dir: &PathBuf,
-) -> Result<TestResult, String> {
+async fn run_both(file_path: &PathBuf, app_data_dir: &PathBuf) -> Result<TestResult, String> {
     let total_start = Instant::now();
     println!("[1/5] starting sender (bind port, spawn cloudflared)...");
     let sender_start = Instant::now();
@@ -245,10 +252,8 @@ async fn run_both(
     }
 
     println!("[2/5] running receiver against public URL...");
-    let output_path = std::env::temp_dir().join(format!(
-        "p2p_smoke_received_{}.bin",
-        std::process::id()
-    ));
+    let output_path =
+        std::env::temp_dir().join(format!("p2p_smoke_received_{}.bin", std::process::id()));
     let spake_start = Instant::now();
     // Inject timing hooks by wrapping receive_send_file. We
     // can't easily get the SPAKE2 timing from inside the
@@ -311,10 +316,7 @@ fn estimate_handshake_ms() -> u128 {
 //  Mode: sender — print token, wait for Ctrl+C
 // ============================================================================
 
-async fn run_sender(
-    file_path: &PathBuf,
-    app_data_dir: &PathBuf,
-) -> Result<TestResult, String> {
+async fn run_sender(file_path: &PathBuf, app_data_dir: &PathBuf) -> Result<TestResult, String> {
     let started = start_sender(file_path.clone(), random_code(), app_data_dir.clone()).await?;
     let public_url = started.tunnel.url.clone();
     let token = started.token_compact.clone();
@@ -406,10 +408,8 @@ async fn run_drop(
 
     // Spawn the receiver as a background task. We'll abort it
     // after `drop_at_mb` MB.
-    let output_path = std::env::temp_dir().join(format!(
-        "p2p_smoke_drop_{}.bin",
-        std::process::id()
-    ));
+    let output_path =
+        std::env::temp_dir().join(format!("p2p_smoke_drop_{}.bin", std::process::id()));
     let token_clone = token.clone();
     let output_clone = output_path.clone();
     let receiver_task = tokio::spawn(async move {
@@ -422,7 +422,10 @@ async fn run_drop(
     // Wait for the output file to exist and reach drop_at_mb
     // bytes. We poll at 50ms.
     let target_bytes = drop_at_mb * 1024 * 1024;
-    println!("[drop] waiting for output file to reach {} bytes...", target_bytes);
+    println!(
+        "[drop] waiting for output file to reach {} bytes...",
+        target_bytes
+    );
     let mut bytes_at_abort: u64 = 0;
     let mut elapsed_ms: u128 = 0;
     let poll_start = Instant::now();
@@ -435,11 +438,17 @@ async fn run_drop(
             }
         }
         if receiver_task.is_finished() {
-            println!("[drop] receiver finished before reaching target (file size: {} bytes)", bytes_at_abort);
+            println!(
+                "[drop] receiver finished before reaching target (file size: {} bytes)",
+                bytes_at_abort
+            );
             break;
         }
         if poll_start.elapsed() > Duration::from_secs(120) {
-            println!("[drop] timed out waiting for target bytes (got {})", bytes_at_abort);
+            println!(
+                "[drop] timed out waiting for target bytes (got {})",
+                bytes_at_abort
+            );
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -530,10 +539,21 @@ fn print_report(r: &TestResult) {
     if !r.public_url.is_empty() {
         println!("  public URL          : {}", r.public_url);
     }
-    println!("  file size           : {} ({})", r.file_size, pretty_size(r.file_size));
-    println!("  bytes received      : {} ({})", r.bytes_written, pretty_size(r.bytes_written));
+    println!(
+        "  file size           : {} ({})",
+        r.file_size,
+        pretty_size(r.file_size)
+    );
+    println!(
+        "  bytes received      : {} ({})",
+        r.bytes_written,
+        pretty_size(r.bytes_written)
+    );
     println!("  sender ready        : {} ms", r.sender_ready_ms);
-    println!("  Argon2id+SPAKE2     : ~{} ms (estimated, single-machine)", r.spake_handshake_ms);
+    println!(
+        "  Argon2id+SPAKE2     : ~{} ms (estimated, single-machine)",
+        r.spake_handshake_ms
+    );
     println!("  file transfer       : {} ms", r.file_transfer_ms);
     if r.file_transfer_ms > 0 && r.bytes_written > 0 {
         println!("  throughput          : {:.2} MB/s", r.throughput_mbps());

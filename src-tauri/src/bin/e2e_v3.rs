@@ -7,16 +7,16 @@
 //!    transfer).
 //! 4. Assert: bytes match the original.
 
-#[path = "../p2p_tunnel.rs"]
-mod p2p_tunnel;
+#[path = "../archive_inspect.rs"]
+mod archive_inspect;
 #[path = "../p2p_auth.rs"]
 mod p2p_auth;
 #[path = "../p2p_config.rs"]
 mod p2p_config;
+#[path = "../p2p_tunnel.rs"]
+mod p2p_tunnel;
 #[path = "../upnp_hole.rs"]
 mod upnp_hole;
-#[path = "../archive_inspect.rs"]
-mod archive_inspect;
 
 use p2p_tunnel::{peek_filename, receive_direct_file, start_direct_sender};
 use std::time::Duration;
@@ -26,10 +26,7 @@ use tokio::time::timeout;
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     // 1. Setup: create a temp file with known content.
-    let tmp = std::env::temp_dir().join(format!(
-        "e2e_v3_{}.html",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("e2e_v3_{}.html", std::process::id()));
     let original = b"<html><body>test content for Sofia Baldi's CV</body></html>";
     {
         let mut f = tokio::fs::File::create(&tmp).await.expect("create");
@@ -48,8 +45,7 @@ async fn main() {
     // ~/Library/Application Support/com.nexus-rar.tunnel
     let cfg_dir_b = std::env::var("HOME")
         .map(|h| {
-            std::path::PathBuf::from(h)
-                .join("Library/Application Support/com.nexus-rar.tunnel")
+            std::path::PathBuf::from(h).join("Library/Application Support/com.nexus-rar.tunnel")
         })
         .unwrap_or_else(|_| std::env::temp_dir().join("nexus-rar-home"));
     let _ = std::fs::create_dir_all(&cfg_dir_b);
@@ -66,8 +62,10 @@ async fn main() {
 
     let v3_token = started.token_compact.clone();
     println!("[e2e] token = {}", v3_token);
-    println!("[e2e] token.v = {}, filename = {:?}",
-        started.token.v, started.token.filename);
+    println!(
+        "[e2e] token.v = {}, filename = {:?}",
+        started.token.v, started.token.filename
+    );
     assert!(
         started.token.filename.is_some(),
         "sender must include filename in token"
@@ -80,9 +78,7 @@ async fn main() {
 
     // 4. PEEK the filename (the new command). Should succeed without
     //    consuming the SPAKE state.
-    let peeked = peek_filename(&v3_token, 5)
-        .await
-        .expect("peek_filename");
+    let peeked = peek_filename(&v3_token, 5).await.expect("peek_filename");
     println!("[e2e] peeked filename = {:?}", peeked);
     assert_eq!(peeked.as_deref(), started.token.filename.as_deref());
 
@@ -92,10 +88,7 @@ async fn main() {
     assert!(peeked2.is_ok(), "peek should be idempotent");
 
     // 6. Now do the FULL receive. SPAKE state is fresh.
-    let out = std::env::temp_dir().join(format!(
-        "e2e_v3_RECEIVED_{}.html",
-        std::process::id()
-    ));
+    let out = std::env::temp_dir().join(format!("e2e_v3_RECEIVED_{}.html", std::process::id()));
     let _ = std::fs::remove_file(&out);
 
     let result = timeout(
@@ -112,11 +105,7 @@ async fn main() {
         result.output_path.display(),
         result.filename
     );
-    assert_eq!(
-        result.bytes_written as usize,
-        original.len(),
-        "bytes match"
-    );
+    assert_eq!(result.bytes_written as usize, original.len(), "bytes match");
     assert_eq!(
         result.filename.as_deref(),
         started.token.filename.as_deref(),
@@ -133,10 +122,7 @@ async fn main() {
     //    the state. Now it should succeed because the
     //    regenerate-on-empty path kicks in.
     println!("[e2e] regression: double-receive with same token...");
-    let out2 = std::env::temp_dir().join(format!(
-        "e2e_v3_RECEIVED2_{}.html",
-        std::process::id()
-    ));
+    let out2 = std::env::temp_dir().join(format!("e2e_v3_RECEIVED2_{}.html", std::process::id()));
     let _ = std::fs::remove_file(&out2);
     let result2 = timeout(
         Duration::from_secs(15),
@@ -148,10 +134,7 @@ async fn main() {
     let got2 = std::fs::read(&out2).expect("read second file");
     assert_eq!(got2, original, "second-receive bytes match");
     assert_eq!(result2.bytes_written as usize, original.len());
-    println!(
-        "[e2e] double-receive OK — {} bytes",
-        result2.bytes_written
-    );
+    println!("[e2e] double-receive OK — {} bytes", result2.bytes_written);
 
     // 9. Multi-chunk regression test (Sprint 5.6.13).
     //    Send a file LARGER than the 64 KiB chunk size so the
@@ -161,13 +144,12 @@ async fn main() {
     //    first decrypted with the wrong nonce and failed
     //    AES-GCM auth ("decrypt chunk @65536: p2p: auth...").
     println!("[e2e] regression: multi-chunk file (128 KiB)...");
-    let tmp_multi = std::env::temp_dir().join(format!(
-        "e2e_v3_multi_{}.bin",
-        std::process::id()
-    ));
+    let tmp_multi = std::env::temp_dir().join(format!("e2e_v3_multi_{}.bin", std::process::id()));
     let multi: Vec<u8> = (0..(128 * 1024)).map(|i| (i % 251) as u8).collect();
     {
-        let mut f = tokio::fs::File::create(&tmp_multi).await.expect("create multi");
+        let mut f = tokio::fs::File::create(&tmp_multi)
+            .await
+            .expect("create multi");
         f.write_all(&multi).await.expect("write multi");
     }
     let started_multi = start_direct_sender(
@@ -178,10 +160,8 @@ async fn main() {
     .await
     .expect("start multi sender");
     let multi_token = started_multi.token_compact.clone();
-    let out_multi = std::env::temp_dir().join(format!(
-        "e2e_v3_MULTI_RECEIVED_{}.bin",
-        std::process::id()
-    ));
+    let out_multi =
+        std::env::temp_dir().join(format!("e2e_v3_MULTI_RECEIVED_{}.bin", std::process::id()));
     let _ = std::fs::remove_file(&out_multi);
     let result_multi = timeout(
         Duration::from_secs(15),
@@ -207,10 +187,7 @@ async fn main() {
     //     that can be untarred with the standard system tool
     //     (or by double-click in Finder).
     println!("[e2e] regression: folder -> .tar roundtrip...");
-    let folder = std::env::temp_dir().join(format!(
-        "e2e_v3_folder_{}",
-        std::process::id()
-    ));
+    let folder = std::env::temp_dir().join(format!("e2e_v3_folder_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&folder);
     std::fs::create_dir(&folder).expect("mkdir folder");
     for i in 0..5 {
@@ -230,17 +207,12 @@ async fn main() {
     assert!(
         started_folder.token.filename.as_deref() == Some("folder.tar")
             || started_folder.token.filename.as_deref()
-                == Some(&format!(
-                    "e2e_v3_folder_{}.tar",
-                    std::process::id()
-                )),
+                == Some(&format!("e2e_v3_folder_{}.tar", std::process::id())),
         "filename should be .tar not .nxs6: got {:?}",
         started_folder.token.filename
     );
     let folder_token = started_folder.token_compact.clone();
-    let out_folder = std::env::temp_dir().join(format!(
-        "e2e_v3_FOLDER_RECEIVED.tar",
-    ));
+    let out_folder = std::env::temp_dir().join(format!("e2e_v3_FOLDER_RECEIVED.tar",));
     let _ = std::fs::remove_file(&out_folder);
     let result_folder = timeout(
         Duration::from_secs(15),
@@ -284,8 +256,7 @@ async fn main() {
     //     extract_entries with a subset only writes the chosen
     //     files.
     println!("[e2e] regression: archive inspection (WinRAR-style browsing)...");
-    let entries = crate::archive_inspect::list_entries(&out_folder)
-        .expect("list entries");
+    let entries = crate::archive_inspect::list_entries(&out_folder).expect("list entries");
     // tar archives contain directory entries alongside files,
     // and on some systems long-name entries get split into
     // separate headers. We don't assert exact count — we just
@@ -293,27 +264,17 @@ async fn main() {
     // right basename and non-zero size.
     assert!(!entries.is_empty(), "tar should have entries");
     for i in 0..5 {
-        let hit = entries.iter().any(|e| {
-            !e.is_dir
-                && e.name.ends_with(&format!("file_{}.txt", i))
-                && e.size > 0
-        });
+        let hit = entries
+            .iter()
+            .any(|e| !e.is_dir && e.name.ends_with(&format!("file_{}.txt", i)) && e.size > 0);
         assert!(hit, "file_{}.txt missing from entries", i);
     }
-    let selective_dir = std::env::temp_dir().join(format!(
-        "e2e_v3_SELECTIVE_{}",
-        std::process::id()
-    ));
+    let selective_dir =
+        std::env::temp_dir().join(format!("e2e_v3_SELECTIVE_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&selective_dir);
     let selected = vec![
-        format!(
-            "e2e_v3_folder_{}/file_1.txt",
-            std::process::id()
-        ),
-        format!(
-            "e2e_v3_folder_{}/file_3.txt",
-            std::process::id()
-        ),
+        format!("e2e_v3_folder_{}/file_1.txt", std::process::id()),
+        format!("e2e_v3_folder_{}/file_3.txt", std::process::id()),
     ];
     let written = crate::archive_inspect::extract_entries(
         &out_folder,
@@ -324,16 +285,16 @@ async fn main() {
     assert_eq!(written.len(), 2, "selective should write 2 files");
     // WinRAR-style: preserve the archive's internal hierarchy.
     // Both extracted files end up under dest/<folder>/.
-    let sub_dir = selective_dir.join(format!(
-        "e2e_v3_folder_{}",
-        std::process::id()
-    ));
+    let sub_dir = selective_dir.join(format!("e2e_v3_folder_{}", std::process::id()));
     let mut read_dir = std::fs::read_dir(&sub_dir).expect("readdir sub");
     let mut names: Vec<String> = read_dir
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    assert_eq!(names, vec!["file_1.txt".to_string(), "file_3.txt".to_string()]);
+    assert_eq!(
+        names,
+        vec!["file_1.txt".to_string(), "file_3.txt".to_string()]
+    );
     println!(
         "[e2e] inspection OK — listed {} entries, selectively extracted 2",
         entries.len()
@@ -346,10 +307,7 @@ async fn main() {
     //     LZMA-decompressing the payload, and selective
     //     extraction writes only the chosen entries.
     println!("[e2e] regression: .nxs6 (V6Solid) central directory...");
-    let nxs6_src = std::env::temp_dir().join(format!(
-        "e2e_v3_nxs6_src_{}",
-        std::process::id()
-    ));
+    let nxs6_src = std::env::temp_dir().join(format!("e2e_v3_nxs6_src_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&nxs6_src);
     std::fs::create_dir(&nxs6_src).expect("mkdir nxs6 src");
     for i in 0..4 {
@@ -365,15 +323,11 @@ async fn main() {
         1,
     )
     .expect("v6solid compress");
-    let nxs6_path = std::env::temp_dir().join(format!(
-        "e2e_v3_solid_{}.nxs6",
-        std::process::id()
-    ));
+    let nxs6_path = std::env::temp_dir().join(format!("e2e_v3_solid_{}.nxs6", std::process::id()));
     let _ = std::fs::remove_file(&nxs6_path);
     std::fs::write(&nxs6_path, &archive_bytes).expect("write nxs6");
     // List
-    let entries_solid =
-        archive_inspect::list_entries(&nxs6_path).expect("list nxs6");
+    let entries_solid = archive_inspect::list_entries(&nxs6_path).expect("list nxs6");
     assert_eq!(
         entries_solid.len(),
         result.entries.len(),
@@ -384,10 +338,8 @@ async fn main() {
         assert!(!e.is_dir);
     }
     // Selective extract 2 of the 4
-    let selective_solid_dir = std::env::temp_dir().join(format!(
-        "e2e_v3_SOLID_OUT_{}",
-        std::process::id()
-    ));
+    let selective_solid_dir =
+        std::env::temp_dir().join(format!("e2e_v3_SOLID_OUT_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&selective_solid_dir);
     let picks: Vec<String> = entries_solid
         .iter()
@@ -395,12 +347,9 @@ async fn main() {
         .map(|e| e.name.clone())
         .collect();
     assert_eq!(picks.len(), 2);
-    let written = archive_inspect::extract_entries(
-        &nxs6_path,
-        &selective_solid_dir,
-        Some(picks.clone()),
-    )
-    .expect("extract nxs6 selective");
+    let written =
+        archive_inspect::extract_entries(&nxs6_path, &selective_solid_dir, Some(picks.clone()))
+            .expect("extract nxs6 selective");
     assert_eq!(written.len(), 2);
     let mut read = std::fs::read_dir(&selective_solid_dir).expect("readdir");
     let mut names: Vec<String> = read
@@ -421,10 +370,7 @@ async fn main() {
     let _ = std::fs::remove_dir_all(&nxs6_src);
     let _ = std::fs::remove_dir_all(&selective_solid_dir);
     let _ = std::fs::remove_file(&nxs6_path);
-    let out2 = std::env::temp_dir().join(format!(
-        "e2e_v3_RECEIVED2_{}.html",
-        std::process::id()
-    ));
+    let out2 = std::env::temp_dir().join(format!("e2e_v3_RECEIVED2_{}.html", std::process::id()));
     let _ = std::fs::remove_file(&out2);
     let result2 = timeout(
         Duration::from_secs(15),
@@ -436,10 +382,7 @@ async fn main() {
     let got2 = std::fs::read(&out2).expect("read second file");
     assert_eq!(got2, original, "second-receive bytes match");
     assert_eq!(result2.bytes_written as usize, original.len());
-    println!(
-        "[e2e] double-receive OK — {} bytes",
-        result2.bytes_written
-    );
+    println!("[e2e] double-receive OK — {} bytes", result2.bytes_written);
 
     // 8. Cleanup.
     drop(started);

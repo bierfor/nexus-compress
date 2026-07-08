@@ -57,8 +57,14 @@ fn main() {
     let corpus: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let inputs: Vec<&str> = if corpus.is_empty() {
         // Default: use the 3 main corpus files.
-        vec!["corpus/code.rs", "corpus/text.txt", "corpus/data.json",
-             "corpus/mixed.bin", "corpus/random.bin", "corpus/repetitive.bin"]
+        vec![
+            "corpus/code.rs",
+            "corpus/text.txt",
+            "corpus/data.json",
+            "corpus/mixed.bin",
+            "corpus/random.bin",
+            "corpus/repetitive.bin",
+        ]
     } else {
         corpus
     };

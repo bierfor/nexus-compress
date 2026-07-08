@@ -76,7 +76,9 @@ fn main() {
         std::process::exit(2);
     }
 
-    eprintln!("[bench_suite] NexusCompress v4 + v5 LZMA vs gzip -9 vs zstd -19 vs 7z (LZMA2 -mx=9)\n");
+    eprintln!(
+        "[bench_suite] NexusCompress v4 + v5 LZMA vs gzip -9 vs zstd -19 vs 7z (LZMA2 -mx=9)\n"
+    );
     eprintln!("Running benchmarks... (this may take a few seconds)\n");
 
     let entries: Vec<_> = std::fs::read_dir(corpus_dir)
@@ -111,12 +113,10 @@ fn main() {
         let nexus_ok = decompressed == data;
 
         // v5 LZMA balanced (level 6, no minify)
-        let (v5_compressed, v5_c_ms) = timed(|| {
-            engine::compress_with("v5", &data, false).expect("v5 compress")
-        });
-        let (v5_decompressed, v5_d_ms) = timed(|| {
-            engine::decompress_any(&v5_compressed).expect("v5 decompress")
-        });
+        let (v5_compressed, v5_c_ms) =
+            timed(|| engine::compress_with("v5", &data, false).expect("v5 compress"));
+        let (v5_decompressed, v5_d_ms) =
+            timed(|| engine::decompress_any(&v5_compressed).expect("v5 decompress"));
         let v5_ok = v5_decompressed == data;
 
         // v5 LZMA balanced + minify
@@ -127,21 +127,18 @@ fn main() {
         // is the post-decompression expectation). This is the only
         // way the roundtrip is meaningful for a lossy pre-filter.
         let minified_input = minify::minify(&data);
-        let (v5m_compressed, v5m_c_ms) = timed(|| {
-            engine::compress_with("v5-min", &data, true).expect("v5-min compress")
-        });
-        let (v5m_decompressed, v5m_d_ms) = timed(|| {
-            engine::decompress_any(&v5m_compressed).expect("v5-min decompress")
-        });
+        let (v5m_compressed, v5m_c_ms) =
+            timed(|| engine::compress_with("v5-min", &data, true).expect("v5-min compress"));
+        let (v5m_decompressed, v5m_d_ms) =
+            timed(|| engine::decompress_any(&v5m_compressed).expect("v5-min decompress"));
         let v5m_ok = v5m_decompressed == minified_input;
 
         // v5 LZMA extreme (level 9, no minify)
         let (v5e_compressed, v5e_c_ms) = timed(|| {
             engine::compress_with("v5-extreme", &data, false).expect("v5-extreme compress")
         });
-        let (v5e_decompressed, v5e_d_ms) = timed(|| {
-            engine::decompress_any(&v5e_compressed).expect("v5-extreme decompress")
-        });
+        let (v5e_decompressed, v5e_d_ms) =
+            timed(|| engine::decompress_any(&v5e_compressed).expect("v5-extreme decompress"));
         let v5e_ok = v5e_decompressed == data;
 
         // gzip
@@ -159,7 +156,9 @@ fn main() {
             let _ = std::fs::write(&gzip_path, &out.stdout);
             ms
         };
-        let gzip_size = std::fs::metadata(&gzip_path).map(|m| m.len() as usize).unwrap_or(0);
+        let gzip_size = std::fs::metadata(&gzip_path)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
         let gzip_d_ms = {
             let t0 = Instant::now();
             let child = Command::new("gzip")
@@ -197,7 +196,9 @@ fn main() {
             let _ = child.wait();
             t0.elapsed().as_secs_f64() * 1000.0
         };
-        let zstd_size = std::fs::metadata(&zstd_path).map(|m| m.len() as usize).unwrap_or(0);
+        let zstd_size = std::fs::metadata(&zstd_path)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
         let zstd_d_ms = {
             let t0 = Instant::now();
             let mut child = Command::new("zstd")
@@ -241,7 +242,9 @@ fn main() {
                 .arg(&path)
                 .output();
             let c_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            let sz = std::fs::metadata(&sevenz_path).map(|m| m.len() as usize).unwrap_or(0);
+            let sz = std::fs::metadata(&sevenz_path)
+                .map(|m| m.len() as usize)
+                .unwrap_or(0);
             let t0 = Instant::now();
             let out = Command::new(sevenz_bin)
                 .args(&["e", "-y", "-bb0", "-bso0", "-so"])
@@ -260,7 +263,11 @@ fn main() {
             data.len() as f64 / v5_compressed.len().max(1) as f64,
             data.len() as f64 / v5m_compressed.len().max(1) as f64,
             data.len() as f64 / v5e_compressed.len().max(1) as f64,
-            if sevenz_size > 0 { data.len() as f64 / sevenz_size as f64 } else { 0.0 },
+            if sevenz_size > 0 {
+                data.len() as f64 / sevenz_size as f64
+            } else {
+                0.0
+            },
         );
 
         rows.push(Row {
@@ -309,7 +316,11 @@ fn main() {
         let v5e = ratio(r.size, r.v5e_size);
         let g = ratio(r.size, r.gzip_size);
         let z = ratio(r.size, r.zstd_size);
-        let lz = if r.sevenz_size > 0 { format!("{:.2}x", ratio(r.size, r.sevenz_size)) } else { "n/a".to_string() };
+        let lz = if r.sevenz_size > 0 {
+            format!("{:.2}x", ratio(r.size, r.sevenz_size))
+        } else {
+            "n/a".to_string()
+        };
         println!(
             "| {} | {} B | **{:.2}x** ({}) | **{:.2}x** ({}) | **{:.2}x** ({}) | **{:.2}x** ({}) | {:.2}x ({}) | {:.2}x ({}) | {} |",
             r.file, r.size,
@@ -328,7 +339,11 @@ fn main() {
     println!("| File | v4 | v5 LZMA | v5 + minify | v5 extreme | gzip -9 | zstd -19 | 7z |");
     println!("|---|---:|---:|---:|---:|---:|---:|---:|");
     for r in &rows {
-        let lz = if r.sevenz_size > 0 { format!("{:.1}", r.sevenz_compress_ms) } else { "n/a".to_string() };
+        let lz = if r.sevenz_size > 0 {
+            format!("{:.1}", r.sevenz_compress_ms)
+        } else {
+            "n/a".to_string()
+        };
         println!(
             "| {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {} |",
             r.file,
@@ -347,7 +362,11 @@ fn main() {
     println!("| File | v4 | v5 LZMA | v5 + minify | v5 extreme | gzip -9 | zstd -19 | 7z |");
     println!("|---|---:|---:|---:|---:|---:|---:|---:|");
     for r in &rows {
-        let lz = if r.sevenz_size > 0 { format!("{:.1}", r.sevenz_decompress_ms) } else { "n/a".to_string() };
+        let lz = if r.sevenz_size > 0 {
+            format!("{:.1}", r.sevenz_decompress_ms)
+        } else {
+            "n/a".to_string()
+        };
         println!(
             "| {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {} |",
             r.file,
@@ -365,13 +384,34 @@ fn main() {
     println!("\n## Roundtrip verification");
     let mut all_ok = true;
     for r in &rows {
-        if !r.nexus_ok { println!("  ❌ v4 {}: MISMATCH", r.file); all_ok = false; }
-        if !r.v5_ok { println!("  ❌ v5 LZMA {}: MISMATCH", r.file); all_ok = false; }
-        if !r.v5m_ok { println!("  ❌ v5 + minify {}: MISMATCH", r.file); all_ok = false; }
-        if !r.v5e_ok { println!("  ❌ v5 extreme {}: MISMATCH", r.file); all_ok = false; }
-        if !r.gzip_ok { println!("  ❌ gzip {}: MISMATCH", r.file); all_ok = false; }
-        if !r.zstd_ok { println!("  ❌ zstd {}: MISMATCH", r.file); all_ok = false; }
-        if r.sevenz_size > 0 && !r.sevenz_ok { println!("  ❌ 7z {}: MISMATCH", r.file); all_ok = false; }
+        if !r.nexus_ok {
+            println!("  ❌ v4 {}: MISMATCH", r.file);
+            all_ok = false;
+        }
+        if !r.v5_ok {
+            println!("  ❌ v5 LZMA {}: MISMATCH", r.file);
+            all_ok = false;
+        }
+        if !r.v5m_ok {
+            println!("  ❌ v5 + minify {}: MISMATCH", r.file);
+            all_ok = false;
+        }
+        if !r.v5e_ok {
+            println!("  ❌ v5 extreme {}: MISMATCH", r.file);
+            all_ok = false;
+        }
+        if !r.gzip_ok {
+            println!("  ❌ gzip {}: MISMATCH", r.file);
+            all_ok = false;
+        }
+        if !r.zstd_ok {
+            println!("  ❌ zstd {}: MISMATCH", r.file);
+            all_ok = false;
+        }
+        if r.sevenz_size > 0 && !r.sevenz_ok {
+            println!("  ❌ 7z {}: MISMATCH", r.file);
+            all_ok = false;
+        }
     }
     if all_ok {
         println!("  ✅ All compressors roundtrip OK on all corpus files.");
@@ -401,15 +441,31 @@ fn main() {
         ("NexusCompress v4", total_nexus, total_nexus_ms),
         ("NexusCompress v5 LZMA (balanced)", total_v5, total_v5_ms),
         ("NexusCompress v5 LZMA + minify", total_v5m, total_v5m_ms),
-        ("NexusCompress v5 LZMA extreme (-9)", total_v5e, total_v5e_ms),
+        (
+            "NexusCompress v5 LZMA extreme (-9)",
+            total_v5e,
+            total_v5e_ms,
+        ),
         ("gzip -9", total_gzip, total_gzip_ms),
         ("zstd -19", total_zstd, total_zstd_ms),
         ("7z -mx=9 (LZMA2)", total_sevenz, total_sevenz_ms),
     ] {
         let ratio = total_size as f64 / total.max(1) as f64;
-        let total_str = if total > 0 { format!("{} B", total) } else { "n/a".to_string() };
-        let ratio_str = if total > 0 { format!("{:.2}x", ratio) } else { "n/a".to_string() };
-        let ms_str = if total > 0 { format!("{:.1}", ms) } else { "n/a".to_string() };
+        let total_str = if total > 0 {
+            format!("{} B", total)
+        } else {
+            "n/a".to_string()
+        };
+        let ratio_str = if total > 0 {
+            format!("{:.2}x", ratio)
+        } else {
+            "n/a".to_string()
+        };
+        let ms_str = if total > 0 {
+            format!("{:.1}", ms)
+        } else {
+            "n/a".to_string()
+        };
         println!("| {} | {} | {} | {} |", name, total_str, ratio_str, ms_str);
     }
 
@@ -436,7 +492,11 @@ fn main() {
 }
 
 fn ratio(orig: usize, comp: usize) -> f64 {
-    if comp == 0 { 0.0 } else { orig as f64 / comp as f64 }
+    if comp == 0 {
+        0.0
+    } else {
+        orig as f64 / comp as f64
+    }
 }
 
 fn fmt_bytes(n: usize) -> String {

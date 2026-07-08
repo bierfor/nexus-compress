@@ -94,16 +94,15 @@ impl UpnpHole {
         }
         // 1. Search for the router's UPnP gateway. Blocking,
         //    bounded by `SearchOptions::default()` (~3s timeout).
-        let gateway = igd::search_gateway(SearchOptions::default())
-            .map_err(|e| {
-                format!(
-                    "UPnP gateway not found ({}). The router may \
+        let gateway = igd::search_gateway(SearchOptions::default()).map_err(|e| {
+            format!(
+                "UPnP gateway not found ({}). The router may \
                      have UPnP disabled, or the network blocks \
                      SSDP multicast. Direct Mode will fall back \
                      to LAN-only.",
-                    e
-                )
-            })?;
+                e
+            )
+        })?;
         // 2. Discover our external IP (the WAN IP the router
         //    advertises to the internet).
         let external_ip = gateway
@@ -170,8 +169,7 @@ impl Drop for UpnpHole {
 /// Register a cleanup callback in the global registry. The
 /// callback removes the port mapping from the router.
 fn register_cleanup(gateway: Arc<Gateway>, external_port: u16) {
-    let registry = EMERGENCY_REGISTRY
-        .get_or_init(|| Mutex::new(Vec::new()));
+    let registry = EMERGENCY_REGISTRY.get_or_init(|| Mutex::new(Vec::new()));
     let mut reg = registry.lock().expect("registry mutex poisoned");
     reg.push(Box::new(move || {
         let _ = gateway.remove_port(PortMappingProtocol::TCP, external_port);
@@ -279,13 +277,10 @@ mod tests {
     #[ignore]
     fn live_open_and_close() {
         if std::env::var("UPNP_LIVE_TEST").is_err() {
-            eprintln!(
-                "skipping live UPnP test (set UPNP_LIVE_TEST=1 to run)"
-            );
+            eprintln!("skipping live UPnP test (set UPNP_LIVE_TEST=1 to run)");
             return;
         }
-        let (hole, info) =
-            UpnpHole::open(54321).expect("open upnp hole on real router");
+        let (hole, info) = UpnpHole::open(54321).expect("open upnp hole on real router");
         eprintln!(
             "opened UPnP hole: external={}:{}, internal={}:{}",
             info.external_ip, info.external_port, info.internal_ip, info.internal_port

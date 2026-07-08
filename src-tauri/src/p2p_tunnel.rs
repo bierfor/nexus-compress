@@ -312,7 +312,10 @@ impl SpakeHandshake {
             .finish(peer_message)
             .map_err(|e| format!("spake2 finish: {:?}", e))?;
         if shared.len() != 32 {
-            return Err(format!("spake2 shared secret is {} bytes, expected 32", shared.len()));
+            return Err(format!(
+                "spake2 shared secret is {} bytes, expected 32",
+                shared.len()
+            ));
         }
         let mut out = Zeroizing::new([0u8; 32]);
         out.copy_from_slice(&shared);
@@ -412,9 +415,8 @@ fn safe_basename(input: &str) -> Option<String> {
     let upper = trimmed.to_ascii_uppercase();
     let stem = upper.split('.').next().unwrap_or("");
     const RESERVED: &[&str] = &[
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     if RESERVED.contains(&stem) {
         return None;
@@ -448,7 +450,9 @@ impl P2pToken {
     /// End-to-end: derive all the keys this transfer will use.
     /// Returns (encryption_key, hmac_key, salt_bytes, file_hash_bytes).
     #[allow(dead_code)] // used by unit tests + future "resume" feature
-    pub fn derive_keys(&self) -> Result<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>, [u8; 16], [u8; 32]), String> {
+    pub fn derive_keys(
+        &self,
+    ) -> Result<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>, [u8; 16], [u8; 32]), String> {
         let salt_bytes = self.salt_bytes()?;
         let fhash_bytes = self.fhash_bytes()?;
         let kek = derive_kek(self.code.as_bytes(), &salt_bytes);
@@ -534,44 +538,280 @@ pub fn pick_random_local_port() -> u16 {
 /// `derive_kek` it raises the brute-force cost from "seconds"
 /// to "years" on a 32 MiB profile.
 const CODE_WORDS: &[&str] = &[
-    "alpha", "amber", "apple", "arrow", "aspen", "atlas", "aurora", "autumn",
-    "baker", "balcony", "banana", "basil", "basket", "battery", "beacon",
-    "bear", "beetle", "bell", "berry", "bison", "black", "blade", "blanket",
-    "blaze", "blizzard", "block", "blue", "boat", "bolt", "bongo", "boulder",
-    "boxer", "brain", "brand", "brave", "breeze", "brick", "bridge", "bright",
-    "broom", "brown", "brush", "bubble", "bucket", "bunker", "butter",
-    "cable", "cactus", "candy", "canyon", "cargo", "carrot", "casino",
-    "castle", "cave", "cedar", "cement", "center", "chair", "chalk",
-    "cherry", "chess", "chimney", "chorus", "chrome", "cinder", "circle",
-    "citrus", "city", "civil", "clamp", "clay", "clear", "cliff", "climate",
-    "clock", "cloud", "clover", "clutch", "cobalt", "cocoa", "coffee",
-    "comet", "compass", "cone", "copper", "coral", "cosmic", "cotton",
-    "courage", "cowboy", "crane", "crater", "crayon", "creek", "cricket",
-    "crisp", "crowd", "crown", "crunch", "crust", "crystal", "cube",
-    "current", "curtain", "cushion", "cyber", "cycle", "dagger", "daisy",
-    "dance", "dawn", "decoy", "delta", "denim", "desert", "diamond",
-    "diary", "dice", "diesel", "dinosaur", "disco", "ditto", "diver",
-    "dock", "dollar", "dolphin", "donor", "dorm", "dragon", "drama",
-    "drift", "drum", "dune", "dusk", "eagle", "earth", "easel", "echo",
-    "eclipse", "edge", "eel", "elastic", "elbow", "elder", "elf", "ember",
-    "emerald", "empire", "energy", "engine", "epoch", "equator", "ether",
-    "evergreen", "exile", "fable", "factory", "fairy", "falcon", "fanfare",
-    "farm", "feather", "fennel", "fern", "ferret", "field", "fingerprint",
-    "fire", "fish", "fjord", "flame", "flannel", "flash", "flat", "flax",
-    "flicker", "flight", "flint", "flora", "flute", "focus", "fog",
-    "forest", "forge", "fortune", "fossil", "fountain", "fox", "frame",
-    "frost", "fudge", "fury", "gadget", "galaxy", "garden", "garnet",
-    "gateway", "gauge", "gazelle", "gecko", "gem", "ginger", "glacier",
-    "glade", "glider", "globe", "glow", "gnome", "goat", "goblin",
-    "golden", "gondola", "goose", "gorge", "gospel", "granite", "grape",
-    "green", "grid", "griffin", "grit", "ground", "grove", "guava",
-    "guitar", "gypsy", "habit", "hammer", "happy", "harbor", "hardy",
-    "harvest", "hatch", "haven", "hawk", "hazel", "heart", "heaven",
-    "hedge", "helix", "hemlock", "hero", "hex", "hibiscus", "hickory",
-    "highland", "hill", "history", "hive", "hoard", "hollow", "honey",
-    "hood", "hoof", "horizon", "horn", "horse", "hound", "hunter",
-    "hurricane", "ice", "icon", "igloo", "iguana", "image", "impala",
-    "inferno", "iris", "iron", "island", "ivory", "ivy", "jacket",
+    "alpha",
+    "amber",
+    "apple",
+    "arrow",
+    "aspen",
+    "atlas",
+    "aurora",
+    "autumn",
+    "baker",
+    "balcony",
+    "banana",
+    "basil",
+    "basket",
+    "battery",
+    "beacon",
+    "bear",
+    "beetle",
+    "bell",
+    "berry",
+    "bison",
+    "black",
+    "blade",
+    "blanket",
+    "blaze",
+    "blizzard",
+    "block",
+    "blue",
+    "boat",
+    "bolt",
+    "bongo",
+    "boulder",
+    "boxer",
+    "brain",
+    "brand",
+    "brave",
+    "breeze",
+    "brick",
+    "bridge",
+    "bright",
+    "broom",
+    "brown",
+    "brush",
+    "bubble",
+    "bucket",
+    "bunker",
+    "butter",
+    "cable",
+    "cactus",
+    "candy",
+    "canyon",
+    "cargo",
+    "carrot",
+    "casino",
+    "castle",
+    "cave",
+    "cedar",
+    "cement",
+    "center",
+    "chair",
+    "chalk",
+    "cherry",
+    "chess",
+    "chimney",
+    "chorus",
+    "chrome",
+    "cinder",
+    "circle",
+    "citrus",
+    "city",
+    "civil",
+    "clamp",
+    "clay",
+    "clear",
+    "cliff",
+    "climate",
+    "clock",
+    "cloud",
+    "clover",
+    "clutch",
+    "cobalt",
+    "cocoa",
+    "coffee",
+    "comet",
+    "compass",
+    "cone",
+    "copper",
+    "coral",
+    "cosmic",
+    "cotton",
+    "courage",
+    "cowboy",
+    "crane",
+    "crater",
+    "crayon",
+    "creek",
+    "cricket",
+    "crisp",
+    "crowd",
+    "crown",
+    "crunch",
+    "crust",
+    "crystal",
+    "cube",
+    "current",
+    "curtain",
+    "cushion",
+    "cyber",
+    "cycle",
+    "dagger",
+    "daisy",
+    "dance",
+    "dawn",
+    "decoy",
+    "delta",
+    "denim",
+    "desert",
+    "diamond",
+    "diary",
+    "dice",
+    "diesel",
+    "dinosaur",
+    "disco",
+    "ditto",
+    "diver",
+    "dock",
+    "dollar",
+    "dolphin",
+    "donor",
+    "dorm",
+    "dragon",
+    "drama",
+    "drift",
+    "drum",
+    "dune",
+    "dusk",
+    "eagle",
+    "earth",
+    "easel",
+    "echo",
+    "eclipse",
+    "edge",
+    "eel",
+    "elastic",
+    "elbow",
+    "elder",
+    "elf",
+    "ember",
+    "emerald",
+    "empire",
+    "energy",
+    "engine",
+    "epoch",
+    "equator",
+    "ether",
+    "evergreen",
+    "exile",
+    "fable",
+    "factory",
+    "fairy",
+    "falcon",
+    "fanfare",
+    "farm",
+    "feather",
+    "fennel",
+    "fern",
+    "ferret",
+    "field",
+    "fingerprint",
+    "fire",
+    "fish",
+    "fjord",
+    "flame",
+    "flannel",
+    "flash",
+    "flat",
+    "flax",
+    "flicker",
+    "flight",
+    "flint",
+    "flora",
+    "flute",
+    "focus",
+    "fog",
+    "forest",
+    "forge",
+    "fortune",
+    "fossil",
+    "fountain",
+    "fox",
+    "frame",
+    "frost",
+    "fudge",
+    "fury",
+    "gadget",
+    "galaxy",
+    "garden",
+    "garnet",
+    "gateway",
+    "gauge",
+    "gazelle",
+    "gecko",
+    "gem",
+    "ginger",
+    "glacier",
+    "glade",
+    "glider",
+    "globe",
+    "glow",
+    "gnome",
+    "goat",
+    "goblin",
+    "golden",
+    "gondola",
+    "goose",
+    "gorge",
+    "gospel",
+    "granite",
+    "grape",
+    "green",
+    "grid",
+    "griffin",
+    "grit",
+    "ground",
+    "grove",
+    "guava",
+    "guitar",
+    "gypsy",
+    "habit",
+    "hammer",
+    "happy",
+    "harbor",
+    "hardy",
+    "harvest",
+    "hatch",
+    "haven",
+    "hawk",
+    "hazel",
+    "heart",
+    "heaven",
+    "hedge",
+    "helix",
+    "hemlock",
+    "hero",
+    "hex",
+    "hibiscus",
+    "hickory",
+    "highland",
+    "hill",
+    "history",
+    "hive",
+    "hoard",
+    "hollow",
+    "honey",
+    "hood",
+    "hoof",
+    "horizon",
+    "horn",
+    "horse",
+    "hound",
+    "hunter",
+    "hurricane",
+    "ice",
+    "icon",
+    "igloo",
+    "iguana",
+    "image",
+    "impala",
+    "inferno",
+    "iris",
+    "iron",
+    "island",
+    "ivory",
+    "ivy",
+    "jacket",
 ];
 
 /// Generate a `n`-word pass phrase from `CODE_WORDS`, joined
@@ -627,7 +867,11 @@ fn cloudflared_download_url() -> Option<String> {
     // The previous version constructed `cloudflared-darwin-arm64`
     // without the `.tgz` suffix, causing a 404 on every macOS
     // download. Now each platform gets the right filename.
-    let filename = match (cfg!(target_os = "windows"), cfg!(target_os = "macos"), cfg!(target_os = "linux")) {
+    let filename = match (
+        cfg!(target_os = "windows"),
+        cfg!(target_os = "macos"),
+        cfg!(target_os = "linux"),
+    ) {
         (true, _, _) => "cloudflared-windows-amd64.exe".to_string(),
         (_, true, _) => {
             // Apple Silicon vs Intel — feature detection at
@@ -670,8 +914,7 @@ pub async fn download_cloudflared(app_data_dir: &Path) -> Result<PathBuf, String
         .ok_or_else(|| "unsupported OS for cloudflared auto-download".to_string())?;
     let target = cloudflared_data_path(app_data_dir);
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create bin dir: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create bin dir: {}", e))?;
     }
     eprintln!("p2p: downloading cloudflared from {}", url);
     let bytes = reqwest::get(&url)
@@ -778,7 +1021,11 @@ pub async fn start_quick_tunnel(
     local_port: u16,
 ) -> Result<TunnelHandle, String> {
     let mut cmd = Command::new(cloudflared_bin);
-    cmd.args(["tunnel", "--url", &format!("http://localhost:{}", local_port)]);
+    cmd.args([
+        "tunnel",
+        "--url",
+        &format!("http://localhost:{}", local_port),
+    ]);
     cmd.kill_on_drop(true);
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::piped());
@@ -804,7 +1051,12 @@ pub async fn start_quick_tunnel(
     })
     .await
     .map_err(|_| "timeout waiting for cloudflared URL (30s)".to_string())??;
-    Ok(TunnelHandle { url, child: Some(child), mdns: None, upnp: None })
+    Ok(TunnelHandle {
+        url,
+        child: Some(child),
+        mdns: None,
+        upnp: None,
+    })
 }
 
 // ============================================================================
@@ -947,7 +1199,12 @@ pub async fn start_named_tunnel(
             eprintln!("[cloudflared] {}", line);
         }
     });
-    Ok(TunnelHandle { url, child: Some(child), mdns: None, upnp: None })
+    Ok(TunnelHandle {
+        url,
+        child: Some(child),
+        mdns: None,
+        upnp: None,
+    })
 }
 
 // ============================================================================
@@ -960,10 +1217,10 @@ pub async fn start_named_tunnel(
 // blacklist clears. Good enough for a demo-grade defense —
 // a real production system would use Redis or similar.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Instant;
 use tokio::sync::Mutex as AsyncMutex;
-use std::collections::HashMap;
 
 /// Maximum sustained rate per IP, in requests/second.
 const RATE_LIMIT_PER_SEC: f64 = 10.0;
@@ -1023,8 +1280,7 @@ impl RateLimit {
             last_refill: now,
         });
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
-        bucket.tokens = (bucket.tokens + elapsed * self.refill_per_sec)
-            .min(self.capacity);
+        bucket.tokens = (bucket.tokens + elapsed * self.refill_per_sec).min(self.capacity);
         bucket.last_refill = now;
         if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
@@ -1090,8 +1346,7 @@ fn advertise_direct_service(
     port: u16,
 ) -> Result<mdns_sd::ServiceDaemon, String> {
     use mdns_sd::ServiceInfo;
-    let daemon = mdns_sd::ServiceDaemon::new()
-        .map_err(|e| format!("mdns daemon: {}", e))?;
+    let daemon = mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {}", e))?;
     let instance_name = format!("nx-{}", service_hash);
     let host_name = format!("{}.local.", instance_name);
     // mdns-sd's `ServiceInfo::new` requires the service type
@@ -1107,9 +1362,9 @@ fn advertise_direct_service(
         &service_type,
         &instance_name,
         &host_name,
-        "",   // domain (empty = local)
+        "", // domain (empty = local)
         port,
-        &[] as &[(&str, &str)],  // TXT records (empty)
+        &[] as &[(&str, &str)], // TXT records (empty)
     )
     .map_err(|e| format!("mdns ServiceInfo: {}", e))?
     .enable_addr_auto();
@@ -1128,8 +1383,7 @@ async fn resolve_direct_service(
 ) -> Result<(std::net::IpAddr, u16), String> {
     use mdns_sd::ServiceEvent;
     use tokio::sync::mpsc;
-    let daemon = mdns_sd::ServiceDaemon::new()
-        .map_err(|e| format!("mdns daemon: {}", e))?;
+    let daemon = mdns_sd::ServiceDaemon::new().map_err(|e| format!("mdns daemon: {}", e))?;
     // The mdns-sd crate returns a crossbeam-channel Receiver.
     // Bridge it to a tokio mpsc channel so we can use
     // tokio::time::timeout / tokio::select without blocking.
@@ -1139,8 +1393,7 @@ async fn resolve_direct_service(
     // constant deliberately omits it (because ServiceInfo::new
     // needs it AND we'd get '..' otherwise), so we append it
     // here for the browse query.
-    let service_type_for_browse =
-        format!("{}.", p2p_config::SERVICE_TYPE);
+    let service_type_for_browse = format!("{}.", p2p_config::SERVICE_TYPE);
     let _browse = daemon
         .browse(&service_type_for_browse)
         .map_err(|e| format!("mdns browse: {}", e))?;
@@ -1160,17 +1413,10 @@ async fn resolve_direct_service(
             }
         }
     });
-    let service_fullname = format!(
-        "nx-{}.{}.",
-        service_hash,
-        p2p_config::SERVICE_TYPE
-    );
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_secs(timeout_secs);
+    let service_fullname = format!("nx-{}.{}.", service_hash, p2p_config::SERVICE_TYPE);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     loop {
-        let remaining = deadline.saturating_duration_since(
-            tokio::time::Instant::now()
-        );
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             break;
         }
@@ -1193,12 +1439,8 @@ async fn resolve_direct_service(
                         .iter()
                         .copied()
                         .find(|a| matches!(a, std::net::IpAddr::V4(_)))
-                        .or_else(|| {
-                            info.get_addresses().iter().copied().next()
-                        })
-                        .ok_or_else(|| {
-                            "mDNS resolved but no A records".to_string()
-                        })?;
+                        .or_else(|| info.get_addresses().iter().copied().next())
+                        .ok_or_else(|| "mDNS resolved but no A records".to_string())?;
                     let port = info.get_port();
                     let _ = daemon.shutdown();
                     forwarder.abort();
@@ -1301,8 +1543,7 @@ pub async fn start_direct_sender(
         let archive_bytes = std::fs::metadata(&temp_path)
             .map_err(|e| format!("stat temp archive: {}", e))?
             .len();
-        let sha = sha256_file_hex(&temp_path)
-            .map_err(|e| format!("sha256 temp archive: {}", e))?;
+        let sha = sha256_file_hex(&temp_path).map_err(|e| format!("sha256 temp archive: {}", e))?;
         eprintln!(
             "[p2p] tarred directory {} -> {} ({} bytes, sha256={})",
             file_path.display(),
@@ -1350,8 +1591,7 @@ pub async fn start_direct_sender(
 
     // 4. Begin SPAKE2 (sender = side B).
     let kek = derive_kek(code.as_bytes(), &salt);
-    let (spake, t_b) =
-        SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")?;
+    let (spake, t_b) = SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")?;
 
     // 5. Build the shared state + axum router. Same auth as
     //    Quick/Named: rate-limit (0μs reject) → pre-auth HMAC
@@ -1443,18 +1683,12 @@ pub async fn start_direct_sender(
         Ok((hole, info)) => {
             eprintln!(
                 "[p2p] UPnP hole opened: external={}:{} -> internal={}:{}",
-                info.external_ip,
-                info.external_port,
-                info.internal_ip,
-                info.internal_port
+                info.external_ip, info.external_port, info.internal_ip, info.internal_port
             );
             Some((hole, info))
         }
         Err(e) => {
-            eprintln!(
-                "[p2p] UPnP unavailable, falling back to LAN-only: {}",
-                e
-            );
+            eprintln!("[p2p] UPnP unavailable, falling back to LAN-only: {}", e);
             None
         }
     };
@@ -1585,11 +1819,8 @@ async fn receive_v3_with_fallback(
         eprintln!("[p2p] v3: external blocked, localhost reachable, using it");
         (u, "localhost")
     } else {
-        eprintln!(
-            "[p2p] v3: external + localhost unreachable, falling back to mDNS"
-        );
-        let (ip, port) =
-            resolve_direct_service(&v3.service_hash, timeout_secs).await?;
+        eprintln!("[p2p] v3: external + localhost unreachable, falling back to mDNS");
+        let (ip, port) = resolve_direct_service(&v3.service_hash, timeout_secs).await?;
         let u = match ip {
             std::net::IpAddr::V6(_) => format!("http://[{}]:{}", ip, port),
             std::net::IpAddr::V4(_) => format!("http://{}:{}", ip, port),
@@ -1597,17 +1828,16 @@ async fn receive_v3_with_fallback(
         (u, "lan")
     };
     let result = fetch_meta_and_receive(url, v3.code, output_path).await?;
-    eprintln!("[p2p] v3 transfer complete (used {} endpoint)", used_endpoint);
+    eprintln!(
+        "[p2p] v3 transfer complete (used {} endpoint)",
+        used_endpoint
+    );
     Ok(result)
 }
 
 /// Quick TCP probe. Returns true if the connect succeeds within
 /// the timeout, false on timeout or refused.
-async fn probe_tcp(
-    ip: std::net::Ipv4Addr,
-    port: u16,
-    timeout: Duration,
-) -> bool {
+async fn probe_tcp(ip: std::net::Ipv4Addr, port: u16, timeout: Duration) -> bool {
     let connect_fut = tokio::net::TcpStream::connect((ip, port));
     match tokio::time::timeout(timeout, connect_fut).await {
         Ok(Ok(_stream)) => {
@@ -1730,8 +1960,7 @@ pub async fn peek_filename(
             // on localhost too (it binds 0.0.0.0).
             format!("http://127.0.0.1:{}", v3.external_port)
         } else {
-            let (ip, port) =
-                resolve_direct_service(&v3.service_hash, timeout_secs).await?;
+            let (ip, port) = resolve_direct_service(&v3.service_hash, timeout_secs).await?;
             // Wrap IPv6 in brackets; IPv4 prints as-is.
             match ip {
                 std::net::IpAddr::V6(_) => format!("http://[{}]:{}", ip, port),
@@ -1740,8 +1969,7 @@ pub async fn peek_filename(
         }
     } else if token_compact.starts_with(p2p_config::TOKEN_PREFIX_V2) {
         let v2 = p2p_config::parse_v2_token(token_compact)?;
-        let (ip, port) =
-            resolve_direct_service(&v2.service_hash, timeout_secs).await?;
+        let (ip, port) = resolve_direct_service(&v2.service_hash, timeout_secs).await?;
         match ip {
             std::net::IpAddr::V6(_) => format!("http://[{}]:{}", ip, port),
             std::net::IpAddr::V4(_) => format!("http://{}:{}", ip, port),
@@ -1799,9 +2027,7 @@ pub async fn start_sender(
     //    the config), for Direct tunnels we error out
     //    (Sprint 5.5.2).
     let tunnel = match cfg.mode {
-        p2p_config::TransportMode::Quick => {
-            start_quick_tunnel(&bin, local_port).await?
-        }
+        p2p_config::TransportMode::Quick => start_quick_tunnel(&bin, local_port).await?,
         p2p_config::TransportMode::Named => {
             let store = p2p_config::default_token_store();
             // `get_token` is a method of the `TokenStore`
@@ -1809,14 +2035,12 @@ pub async fn start_sender(
             // for the method to resolve on the concrete
             // `KeyringTokenStore` type.
             use p2p_config::TokenStore;
-            let token = store
-                .get_token()?
-                .ok_or_else(|| {
-                    "Named tunnel selected but no token in keyring. \
+            let token = store.get_token()?.ok_or_else(|| {
+                "Named tunnel selected but no token in keyring. \
                      Save your Cloudflare tunnel token in the \
                      Config panel first."
-                        .to_string()
-                })?;
+                    .to_string()
+            })?;
             let hostname = cfg
                 .hostname
                 .as_ref()
@@ -1835,12 +2059,7 @@ pub async fn start_sender(
             // mDNS advertise, build state, spawn server, build
             // v2 token) and returns a StartedSend — so we
             // short-circuit the rest of start_sender.
-            return start_direct_sender(
-                file_path,
-                code,
-                app_data_dir,
-            )
-            .await;
+            return start_direct_sender(file_path, code, app_data_dir).await;
         }
     };
 
@@ -1924,8 +2143,7 @@ pub async fn start_sender(
 
     // 5. Begin SPAKE2 (sender = side B = responder).
     let kek = derive_kek(code.as_bytes(), &salt);
-    let (spake, t_b) =
-        SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")?;
+    let (spake, t_b) = SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")?;
 
     // 6. Build the shared state. Use `effective_path` — for
     //    directories this is the temp .tar; for files it's
@@ -2058,12 +2276,8 @@ struct SpakeResponse {
 /// forever, blocking new sends with "a p2p send is already
 /// in progress".
 async fn handle_done(State(state): State<SenderState>) -> &'static str {
-    eprintln!(
-        "[p2p] /done received — transfer complete, flagging slot for cleanup"
-    );
-    state
-        .done
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    eprintln!("[p2p] /done received — transfer complete, flagging slot for cleanup");
+    state.done.store(true, std::sync::atomic::Ordering::SeqCst);
     "ok"
 }
 
@@ -2093,18 +2307,13 @@ async fn handle_spake(
         // works against the new t_b.
         eprintln!("[p2p] spake state empty, regenerating for retry");
         let kek = derive_kek(state.code.as_bytes(), &state.meta.salt);
-        let (spake, t_b) = SpakeHandshake::start(
-            &*kek,
-            SpakeSide::B,
-            "receiver",
-            "sender",
-        )
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("spake restart: {}", e),
-            )
-        })?;
+        let (spake, t_b) = SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("spake restart: {}", e),
+                )
+            })?;
         *guard = Some((spake, t_b));
     }
     let (spake, t_b) = guard.take().ok_or_else(|| {
@@ -2122,7 +2331,10 @@ async fn handle_spake(
     // will need session_key to encrypt chunks, and the HMAC
     // challenge needs mac_key.
     let (session_key, mac_key) = derive_session_keys(&*shared, &fhash);
-    *state.keys.lock().await = Some(SenderKeys { session_key, mac_key });
+    *state.keys.lock().await = Some(SenderKeys {
+        session_key,
+        mac_key,
+    });
     Ok(Json(SpakeResponse {
         t_b: URL_SAFE_NO_PAD.encode(t_b),
     }))
@@ -2204,10 +2416,7 @@ fn encrypted_file_stream(
                         opened = true;
                     }
                     Err(e) => {
-                        return Some((
-                            Err(e),
-                            (cipher, file_opt, buf, opened, path),
-                        ));
+                        return Some((Err(e), (cipher, file_opt, buf, opened, path)));
                     }
                 }
             }
@@ -2265,8 +2474,7 @@ pub async fn receive_send_file(
     // gets a uniform 401. We derive the same key the sender
     // computes in start_direct_sender / start_sender.
     let pre_key = auth::derive_pre_auth_key(&kek);
-    let (spake, t_a_out) =
-        SpakeHandshake::start(&*kek, SpakeSide::A, "receiver", "sender")?;
+    let (spake, t_a_out) = SpakeHandshake::start(&*kek, SpakeSide::A, "receiver", "sender")?;
 
     // 2. POST /spake.
     let client = reqwest::Client::builder()
@@ -2275,12 +2483,7 @@ pub async fn receive_send_file(
         .map_err(|e| format!("reqwest: {}", e))?;
     let base = token.url.trim_end_matches('/');
     let spake_url = format!("{}/spake", base);
-    let spake_auth = auth::build_auth_header(
-        &*pre_key,
-        auth::now_unix(),
-        "POST",
-        "/spake",
-    );
+    let spake_auth = auth::build_auth_header(&*pre_key, auth::now_unix(), "POST", "/spake");
     let resp = client
         .post(&spake_url)
         .header(auth::HEADER_NAME, spake_auth)
@@ -2313,14 +2516,9 @@ pub async fn receive_send_file(
     //    — no timestamp because SPAKE2 already established
     //    a fresh session key).
     let file_url = format!("{}/file", base);
-    let pre_auth_header = auth::build_auth_header(
-        &*pre_key,
-        auth::now_unix(),
-        "GET",
-        "/file",
-    );
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(&*mac_key)
-        .map_err(|e| format!("hmac: {}", e))?;
+    let pre_auth_header = auth::build_auth_header(&*pre_key, auth::now_unix(), "GET", "/file");
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(&*mac_key).map_err(|e| format!("hmac: {}", e))?;
     mac.update(b"GET/file");
     let session_auth = hex::encode(mac.finalize().into_bytes());
     let resp = client
@@ -2367,8 +2565,8 @@ pub async fn receive_send_file(
             if leftover.len() < 4 {
                 break;
             }
-            let len = u32::from_le_bytes([leftover[0], leftover[1], leftover[2], leftover[3]])
-                as usize;
+            let len =
+                u32::from_le_bytes([leftover[0], leftover[1], leftover[2], leftover[3]]) as usize;
             if leftover.len() < 4 + len {
                 // Need more bytes
                 break;
@@ -2416,12 +2614,7 @@ pub async fn receive_send_file(
     // timeout fallback for abandoned sessions).
     let base = token.url.trim_end_matches('/');
     let done_url = format!("{}/done", base);
-    let done_auth = auth::build_auth_header(
-        &*pre_key,
-        auth::now_unix(),
-        "POST",
-        "/done",
-    );
+    let done_auth = auth::build_auth_header(&*pre_key, auth::now_unix(), "POST", "/done");
     let done_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -2500,10 +2693,10 @@ mod tests {
         let password = b"alpha-bear-cosmic-delta";
         let salt = random_salt();
         let kek = derive_kek(password, &salt);
-        let (alice, t_a) = SpakeHandshake::start(&*kek, SpakeSide::A, "receiver", "sender")
-            .expect("alice start");
-        let (bob, t_b) = SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")
-            .expect("bob start");
+        let (alice, t_a) =
+            SpakeHandshake::start(&*kek, SpakeSide::A, "receiver", "sender").expect("alice start");
+        let (bob, t_b) =
+            SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender").expect("bob start");
         let alice_secret = alice.finish(&t_b).expect("alice finish");
         let bob_secret = bob.finish(&t_a).expect("bob finish");
         assert_eq!(&*alice_secret, &*bob_secret, "shared secrets must match");
@@ -2519,8 +2712,8 @@ mod tests {
         let kek_b = derive_kek(b"wrong-password", &salt);
         let (alice, t_a) = SpakeHandshake::start(&*kek_a, SpakeSide::A, "receiver", "sender")
             .expect("alice start");
-        let (bob, t_b) = SpakeHandshake::start(&*kek_b, SpakeSide::B, "receiver", "sender")
-            .expect("bob start");
+        let (bob, t_b) =
+            SpakeHandshake::start(&*kek_b, SpakeSide::B, "receiver", "sender").expect("bob start");
         let alice_res = alice.finish(&t_b);
         let bob_res = bob.finish(&t_a);
         match (alice_res, bob_res) {
@@ -2611,10 +2804,10 @@ mod tests {
         // 1. Both sides derive the same KEK.
         let kek = derive_kem_both(password, &salt);
         // 2. Both sides do SPAKE2, get the same shared secret.
-        let (alice, t_a) = SpakeHandshake::start(&*kek, SpakeSide::A, "receiver", "sender")
-            .expect("alice start");
-        let (bob, t_b) = SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")
-            .expect("bob start");
+        let (alice, t_a) =
+            SpakeHandshake::start(&*kek, SpakeSide::A, "receiver", "sender").expect("alice start");
+        let (bob, t_b) =
+            SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender").expect("bob start");
         let alice_shared = alice.finish(&t_b).expect("alice finish");
         let bob_shared = bob.finish(&t_a).expect("bob finish");
         // 3. Both sides derive the same session + mac keys.
@@ -2654,9 +2847,7 @@ mod tests {
         hex::decode_to_slice(expected_sha256_hex.as_bytes(), &mut expected_sha256)
             .expect("decode sha256");
         // 3. Bind a localhost listener on a random port.
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let local_port = listener.local_addr().expect("addr").port();
         // 4. Set up a fake "cloudflared URL" that points at our
         //    local listener. The receiver will hit it.
@@ -2697,9 +2888,7 @@ mod tests {
             .with_state(state);
         // 7. Spawn the server in a background task.
         let server_task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve");
+            axum::serve(listener, app).await.expect("serve");
         });
         // 8. Give the server a moment to start.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -2715,10 +2904,8 @@ mod tests {
             filename: Some("test.bin".to_string()),
         };
         // 10. Run the receiver.
-        let out_path = std::env::temp_dir().join(format!(
-            "p2p-test-out-{}.bin",
-            std::process::id()
-        ));
+        let out_path =
+            std::env::temp_dir().join(format!("p2p-test-out-{}.bin", std::process::id()));
         let result = receive_send_file(token, out_path.clone())
             .await
             .expect("receive");
@@ -2816,10 +3003,7 @@ mod tests {
     async fn direct_mode_localhost_roundtrip() {
         use std::io::Write;
         // 1. Create a small test file.
-        let tmp = std::env::temp_dir().join(format!(
-            "p2p-direct-test-{}.bin",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("p2p-direct-test-{}.bin", std::process::id()));
         let original: Vec<u8> = (0..1024 * 16).map(|i| (i % 251) as u8).collect();
         {
             let mut f = std::fs::File::create(&tmp).expect("create");
@@ -2832,9 +3016,7 @@ mod tests {
             .expect("decode sha256");
         // 3. Bind on 0.0.0.0 (Direct style) but in this test
         //    we know only 127.0.0.1 will hit it.
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let local_port = listener.local_addr().expect("addr").port();
         // 4. Same crypto setup as start_sender.
         let code = "alpha-bear-cosmic-delta".to_string();
@@ -2844,8 +3026,7 @@ mod tests {
         hex::decode_to_slice(fhash_hex.as_bytes(), &mut fhash).unwrap();
         let kek = derive_kek(code.as_bytes(), &salt);
         let (spake, t_b) =
-            SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender")
-                .expect("spake B");
+            SpakeHandshake::start(&*kek, SpakeSide::B, "receiver", "sender").expect("spake B");
         let meta = FileMeta {
             file_path: tmp.clone(),
             plaintext_size: original.len() as u64,
@@ -2887,10 +3068,8 @@ mod tests {
             filename: Some("direct-test.bin".to_string()),
         };
         // 6. Receive.
-        let out_path = std::env::temp_dir().join(format!(
-            "p2p-direct-out-{}.bin",
-            std::process::id()
-        ));
+        let out_path =
+            std::env::temp_dir().join(format!("p2p-direct-out-{}.bin", std::process::id()));
         let result = receive_send_file(token, out_path.clone())
             .await
             .expect("receive");
@@ -2914,19 +3093,13 @@ mod tests {
             .strip_prefix("nx-")
             .unwrap()
             .to_string();
-        let token_compact =
-            p2p_config::format_v2_token(&service_hash, code);
-        let parsed = p2p_config::parse_v2_token(&token_compact)
-            .expect("parse");
+        let token_compact = p2p_config::format_v2_token(&service_hash, code);
+        let parsed = p2p_config::parse_v2_token(&token_compact).expect("parse");
         assert_eq!(parsed.service_hash, service_hash);
         assert_eq!(parsed.code, code);
         // And the mDNS service name the receiver would browse
         // for matches what the sender would advertise.
-        let expected_mdns = format!(
-            "nx-{}.{}",
-            service_hash,
-            p2p_config::SERVICE_TYPE
-        );
+        let expected_mdns = format!("nx-{}.{}", service_hash, p2p_config::SERVICE_TYPE);
         assert_eq!(
             p2p_config::derive_mdns_service_name(&parsed.code),
             expected_mdns
@@ -2940,8 +3113,7 @@ mod tests {
     async fn resolve_direct_service_times_out_when_no_sender() {
         // Use a hash that no one is advertising.
         let start = std::time::Instant::now();
-        let result =
-            resolve_direct_service("nonexistent_hash_to_find", 1).await;
+        let result = resolve_direct_service("nonexistent_hash_to_find", 1).await;
         let elapsed = start.elapsed();
         assert!(result.is_err(), "must error when no sender");
         // We allow up to 2s (1s configured + 1s slack for the
@@ -3004,7 +3176,12 @@ mod tests {
             "..double_dotfile",
             "résumé.docx",
         ] {
-            assert_eq!(safe_basename(ok).as_deref(), Some(*ok), "should accept: {}", ok);
+            assert_eq!(
+                safe_basename(ok).as_deref(),
+                Some(*ok),
+                "should accept: {}",
+                ok
+            );
         }
     }
 
@@ -3053,12 +3230,15 @@ mod tests {
     #[test]
     fn safe_basename_rejects_windows_reserved_names() {
         for bad in &[
-            "CON", "PRN", "AUX", "NUL",
-            "COM1", "COM9", "LPT1", "LPT9",
-            "con.txt", "CON.txt", "Prn.pdf",
-            "COM1.log",
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9", "con.txt", "CON.txt",
+            "Prn.pdf", "COM1.log",
         ] {
-            assert_eq!(safe_basename(bad), None, "should reject Windows reserved: {}", bad);
+            assert_eq!(
+                safe_basename(bad),
+                None,
+                "should reject Windows reserved: {}",
+                bad
+            );
         }
     }
 
@@ -3089,15 +3269,20 @@ mod tests {
         for bad in &[
             "....//....//etc/passwd",
             "..%2f..%2fetc%2fpasswd", // URL-encoded — but %2f is just a literal char here, fine
-            "file\u{202E}txt.exe", // RTL override (Unicode) — Path::file_name may keep it
-            // (We don't reject RTL because some real filenames use it,
-            // but path traversal with separators is the real attack.)
+            "file\u{202E}txt.exe",    // RTL override (Unicode) — Path::file_name may keep it
+                                      // (We don't reject RTL because some real filenames use it,
+                                      // but path traversal with separators is the real attack.)
         ] {
             // The third one (RTL override) may or may not be rejected
             // depending on Path semantics. We just check that the
             // path-traversal patterns are rejected:
             if bad.contains('/') || bad.contains('\\') {
-                assert_eq!(safe_basename(bad), None, "must reject path separator: {:?}", bad);
+                assert_eq!(
+                    safe_basename(bad),
+                    None,
+                    "must reject path separator: {:?}",
+                    bad
+                );
             }
         }
     }

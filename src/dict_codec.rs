@@ -442,8 +442,10 @@ pub fn encode_v45_multistream(data: &[u8]) -> Option<Vec<u8>> {
     //    ~1027 bytes to ~50-200 bytes per stream.
     let (lit_table_section, lit_stream) = crate::rans_v4::sparse_rans_encode_u8(&literals, 12);
     let (len_table_section, len_stream) = crate::rans_v4::sparse_rans_encode_u8(&lengths, 12);
-    let (dist_lo_table_section, dist_lo_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_lows, 12);
-    let (dist_hi_table_section, dist_hi_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_highs, 12);
+    let (dist_lo_table_section, dist_lo_stream) =
+        crate::rans_v4::sparse_rans_encode_u8(&dist_lows, 12);
+    let (dist_hi_table_section, dist_hi_stream) =
+        crate::rans_v4::sparse_rans_encode_u8(&dist_highs, 12);
     // Sparse dict-ids table (v4.6): the alphabet is collapsed from
     // 256 to just the set bits in the bitmask. For most blocks this
     // shrinks the table from ~1027 bytes to ~50-200 bytes.
@@ -569,8 +571,10 @@ pub fn encode_v45_multistream_local(data: &[u8]) -> Option<Vec<u8>> {
     // 4. Sparse encoding for the 4 base streams (32-byte bitmask each).
     let (lit_table_section, lit_stream) = crate::rans_v4::sparse_rans_encode_u8(&literals, 12);
     let (len_table_section, len_stream) = crate::rans_v4::sparse_rans_encode_u8(&lengths, 12);
-    let (dist_lo_table_section, dist_lo_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_lows, 12);
-    let (dist_hi_table_section, dist_hi_stream) = crate::rans_v4::sparse_rans_encode_u8(&dist_highs, 12);
+    let (dist_lo_table_section, dist_lo_stream) =
+        crate::rans_v4::sparse_rans_encode_u8(&dist_lows, 12);
+    let (dist_hi_table_section, dist_hi_stream) =
+        crate::rans_v4::sparse_rans_encode_u8(&dist_highs, 12);
 
     // 5. Build the 5348-bit bitmask from the K chosen original ids.
     let mut local_bitmask = [0u8; LOCAL_BITMASK_BYTES];
@@ -766,8 +770,10 @@ pub fn decode_v45_multistream(payload: &[u8]) -> Vec<u8> {
     // Decode the 4 base streams via sparse_rans_decode_u8.
     let lit_values = crate::rans_v4::sparse_rans_decode_u8(lit_table_bytes, lit_stream, n_lits);
     let len_values = crate::rans_v4::sparse_rans_decode_u8(len_table_bytes, len_stream, n_matches);
-    let dist_lo_values = crate::rans_v4::sparse_rans_decode_u8(dist_lo_table_bytes, dist_lo_stream, n_matches);
-    let dist_hi_values = crate::rans_v4::sparse_rans_decode_u8(dist_hi_table_bytes, dist_hi_stream, n_matches);
+    let dist_lo_values =
+        crate::rans_v4::sparse_rans_decode_u8(dist_lo_table_bytes, dist_lo_stream, n_matches);
+    let dist_hi_values =
+        crate::rans_v4::sparse_rans_decode_u8(dist_hi_table_bytes, dist_hi_stream, n_matches);
     // The dict stream encodes dense indices (0..N-1). For FIXED sub-dicts
     // (Trained/Code/JSON) the dense id needs to be remapped to the
     // sub-dict's id (0..255). For the LOCAL sub-dict, the dense id
@@ -785,7 +791,11 @@ pub fn decode_v45_multistream(payload: &[u8]) -> Vec<u8> {
                 if (d as usize) < dict_remap.len() {
                     dict_remap[d as usize] as u32
                 } else {
-                    panic!("dense dict idx {} out of range (remap size {})", d, dict_remap.len())
+                    panic!(
+                        "dense dict idx {} out of range (remap size {})",
+                        d,
+                        dict_remap.len()
+                    )
                 }
             })
             .collect()
@@ -861,19 +871,16 @@ pub fn pack_op_flags(ops: &[Op]) -> Vec<u8> {
 /// Iterator over the op-flag values, unpacking 2-bit fields from a
 /// packed byte stream.
 pub fn iter_op_flags(bytes: &[u8]) -> impl Iterator<Item = u8> + '_ {
-    bytes
-        .iter()
-        .enumerate()
-        .flat_map(|(i, b)| {
-            let n_valid = if i == bytes.len() - 1 {
-                // Last byte: 1-4 valid ops (we don't know exactly how
-                // many; the caller has the op count separately).
-                4
-            } else {
-                4
-            };
-            (0..n_valid).map(move |k| (b >> (6 - 2 * k)) & 0b11)
-        })
+    bytes.iter().enumerate().flat_map(|(i, b)| {
+        let n_valid = if i == bytes.len() - 1 {
+            // Last byte: 1-4 valid ops (we don't know exactly how
+            // many; the caller has the op count separately).
+            4
+        } else {
+            4
+        };
+        (0..n_valid).map(move |k| (b >> (6 - 2 * k)) & 0b11)
+    })
 }
 
 /// Count the number of ops of each type in a packed op_flags stream,
@@ -987,10 +994,7 @@ pub fn sparse_dict_encode(ids: &[u32]) -> ([u8; DICT_BITMASK_BYTES], Vec<u16>, V
     for (dense_idx, &orig) in remap.iter().enumerate() {
         reverse[orig as usize] = dense_idx as u16;
     }
-    let dense_ids: Vec<u32> = ids
-        .iter()
-        .map(|&id| reverse[id as usize] as u32)
-        .collect();
+    let dense_ids: Vec<u32> = ids.iter().map(|&id| reverse[id as usize] as u32).collect();
     (bitmask, remap, dense_ids)
 }
 
@@ -1111,20 +1115,29 @@ mod tests {
         // 1, 2, 3, 5, 6, 7 ops (not multiples of 4) — make sure the
         // last byte's extra bits don't break anything.
         for n in &[1, 2, 3, 5, 6, 7, 9, 10, 13] {
-            let ops: Vec<Op> = (0..*n).map(|i| {
-                match i % 3 {
+            let ops: Vec<Op> = (0..*n)
+                .map(|i| match i % 3 {
                     0 => Op::Lit(i as u8),
-                    1 => Op::Match { dist: i as u32, len: 3 },
-                    _ => Op::DictRef { id: i as u16, len: 4 },
-                }
-            }).collect();
+                    1 => Op::Match {
+                        dist: i as u32,
+                        len: 3,
+                    },
+                    _ => Op::DictRef {
+                        id: i as u16,
+                        len: 4,
+                    },
+                })
+                .collect();
             let packed = pack_op_flags(&ops);
             let unpacked: Vec<u8> = iter_op_flags(&packed).take(*n).collect();
-            let expected: Vec<u8> = ops.iter().map(|op| match op {
-                Op::Lit(_) => flag::LIT,
-                Op::Match { .. } => flag::MATCH,
-                Op::DictRef { .. } => flag::DICTREF,
-            }).collect();
+            let expected: Vec<u8> = ops
+                .iter()
+                .map(|op| match op {
+                    Op::Lit(_) => flag::LIT,
+                    Op::Match { .. } => flag::MATCH,
+                    Op::DictRef { .. } => flag::DICTREF,
+                })
+                .collect();
             assert_eq!(unpacked, expected, "roundtrip failed for n={}", n);
         }
     }
@@ -1155,7 +1168,8 @@ mod tests {
         for _ in 0..2000 {
             data.extend_from_slice(phrase);
         }
-        let payload = encode_v45_multistream(&data).expect("v4.5 encode should succeed on large data");
+        let payload =
+            encode_v45_multistream(&data).expect("v4.5 encode should succeed on large data");
         let decoded = decode_v45_multistream(&payload);
         assert_eq!(decoded, data, "v4.5 roundtrip failed");
     }
@@ -1167,8 +1181,11 @@ mod tests {
         let mut data = Vec::new();
         for i in 0..2000 {
             data.extend_from_slice(
-                format!("{{\"id\": {}, \"name\": \"user_{}\", \"tags\": [\"admin\", \"user\"]}},\n", i, i)
-                    .as_bytes(),
+                format!(
+                    "{{\"id\": {}, \"name\": \"user_{}\", \"tags\": [\"admin\", \"user\"]}},\n",
+                    i, i
+                )
+                .as_bytes(),
             );
         }
         let payload = encode_v45_multistream(&data).expect("v4.5 encode should succeed on JSON");
@@ -1181,9 +1198,7 @@ mod tests {
         // Larger Rust snippet so v4.5's 5-stream overhead pays off.
         let mut data = Vec::new();
         for i in 0..2000 {
-            data.extend_from_slice(
-                format!("    let x_{} = {};\n", i, i).as_bytes(),
-            );
+            data.extend_from_slice(format!("    let x_{} = {};\n", i, i).as_bytes());
         }
         data.extend_from_slice(b"fn main() {\n");
         data.extend_from_slice(format!("    let total = {};\n", 2000).as_bytes());
@@ -1205,7 +1220,10 @@ mod tests {
             data.push(s as u8);
         }
         let result = encode_v45_multistream(&data);
-        assert!(result.is_none(), "random data should fall back to v3 (None)");
+        assert!(
+            result.is_none(),
+            "random data should fall back to v3 (None)"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1325,7 +1343,11 @@ mod tests {
         let full = trained_dict();
         let ids = select_local_dict_ids(&data, &full, 100, 3);
         // Should be empty or near-empty.
-        assert!(ids.len() < 5, "expected few or no matches, got {}", ids.len());
+        assert!(
+            ids.len() < 5,
+            "expected few or no matches, got {}",
+            ids.len()
+        );
     }
 
     #[test]
@@ -1393,8 +1415,14 @@ mod tests {
             s ^= s << 5;
             *b = s as u8;
         }
-        assert!(!quick_entropy_gate(&data), "random block should be rejected");
-        assert!(!should_try_v45(&data), "should_try_v45 should reject random");
+        assert!(
+            !quick_entropy_gate(&data),
+            "random block should be rejected"
+        );
+        assert!(
+            !should_try_v45(&data),
+            "should_try_v45 should reject random"
+        );
     }
 
     #[test]
@@ -1418,11 +1446,17 @@ mod tests {
             hh
         };
         assert!(h < ENTROPY_GATE_LO, "test setup: h={} should be < 3.0", h);
-        assert!(!quick_entropy_gate(&data), "repetitive block should be rejected");
+        assert!(
+            !quick_entropy_gate(&data),
+            "repetitive block should be rejected"
+        );
         // should_try_v45 first runs quick_entropy_gate (now scanning the
         // full block). For 4KB of 4 unique chars the full-block entropy
         // is log2(4) = 2.0, firmly below the 3.0 lower bound.
-        assert!(!should_try_v45(&data), "should_try_v45 should reject repetitive");
+        assert!(
+            !should_try_v45(&data),
+            "should_try_v45 should reject repetitive"
+        );
     }
 
     #[test]
@@ -1434,8 +1468,14 @@ mod tests {
             .take(4096)
             .cloned()
             .collect();
-        assert!(quick_entropy_gate(&data), "natural text should be in the active zone");
-        assert!(should_try_v45(&data), "should_try_v45 should accept natural text");
+        assert!(
+            quick_entropy_gate(&data),
+            "natural text should be in the active zone"
+        );
+        assert!(
+            should_try_v45(&data),
+            "should_try_v45 should accept natural text"
+        );
     }
 
     #[test]

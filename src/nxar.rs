@@ -356,9 +356,8 @@ pub fn decompress_directory(archive: &[u8], output_dir: &Path) -> Result<Directo
             continue;
         }
         let t0 = Instant::now();
-        let bytes = decompress(payload).map_err(|e| {
-            format!("decompress {} failed: {}", entry.path, e)
-        })?;
+        let bytes =
+            decompress(payload).map_err(|e| format!("decompress {} failed: {}", entry.path, e))?;
         let dt = t0.elapsed().as_secs_f64() * 1000.0;
         // Sanity: recovered length matches what we recorded.
         if bytes.len() as u64 != entry.original_size {
@@ -372,9 +371,8 @@ pub fn decompress_directory(archive: &[u8], output_dir: &Path) -> Result<Directo
         // Write to disk, creating parent dirs as needed.
         let out_path = output_dir.join(&entry.path);
         if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!("create parent for {}: {}", entry.path, e)
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("create parent for {}: {}", entry.path, e))?;
         }
         fs::write(&out_path, &bytes).map_err(|e| format!("write {}: {}", entry.path, e))?;
         total_original += entry.original_size;
@@ -446,11 +444,7 @@ pub fn peek_archive(archive: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
     if archive[4] != NXAR_VERSION {
         return Err(format!("unsupported NXAR version: {}", archive[4]));
     }
-    let n_files = u32::from_le_bytes(
-        archive[8..12]
-            .try_into()
-            .map_err(|_| "bad header")?,
-    ) as usize;
+    let n_files = u32::from_le_bytes(archive[8..12].try_into().map_err(|_| "bad header")?) as usize;
     let mut entries = Vec::with_capacity(n_files);
     let mut cursor = 12usize;
     for _ in 0..n_files {
@@ -535,11 +529,7 @@ pub fn deserialize_nxar(archive: &[u8]) -> Result<(Vec<ArchiveEntry>, Vec<Vec<u8
     if archive[4] != NXAR_VERSION {
         return Err(format!("unsupported NXAR version: {}", archive[4]));
     }
-    let n_files = u32::from_le_bytes(
-        archive[8..12]
-            .try_into()
-            .map_err(|_| "bad header")?,
-    ) as usize;
+    let n_files = u32::from_le_bytes(archive[8..12].try_into().map_err(|_| "bad header")?) as usize;
     let mut entries = Vec::with_capacity(n_files);
     let mut payloads = Vec::with_capacity(n_files);
     let mut cursor = 12usize;
@@ -599,7 +589,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Small file
         let mut f = std::fs::File::create(dir.path().join("a.txt")).unwrap();
-        f.write_all(b"the quick brown fox jumps over the lazy dog. ").unwrap();
+        f.write_all(b"the quick brown fox jumps over the lazy dog. ")
+            .unwrap();
         // Medium file
         let mut f = std::fs::File::create(dir.path().join("b.txt")).unwrap();
         for _ in 0..200 {
@@ -712,15 +703,40 @@ mod tests {
         // The first tempdir is something like /tmp/.tmpABC; the
         // leaf name is randomly generated. We check that the
         // paths start with the leaf names of the two tempdirs.
-        let leaf1 = dir1.path().file_name().unwrap().to_string_lossy().into_owned();
-        let leaf2 = dir2.path().file_name().unwrap().to_string_lossy().into_owned();
+        let leaf1 = dir1
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let leaf2 = dir2
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let paths: Vec<&str> = result.entries.iter().map(|e| e.path.as_str()).collect();
-        assert!(paths.iter().any(|p| p.starts_with(&leaf1) && p.ends_with("a.txt")),
-            "missing leaf1/a.txt in {:?}", paths);
-        assert!(paths.iter().any(|p| p.starts_with(&leaf1) && p.ends_with("sub/b.txt")),
-            "missing leaf1/sub/b.txt in {:?}", paths);
-        assert!(paths.iter().any(|p| p.starts_with(&leaf2) && p.ends_with("c.txt")),
-            "missing leaf2/c.txt in {:?}", paths);
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.starts_with(&leaf1) && p.ends_with("a.txt")),
+            "missing leaf1/a.txt in {:?}",
+            paths
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.starts_with(&leaf1) && p.ends_with("sub/b.txt")),
+            "missing leaf1/sub/b.txt in {:?}",
+            paths
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.starts_with(&leaf2) && p.ends_with("c.txt")),
+            "missing leaf2/c.txt in {:?}",
+            paths
+        );
         assert_eq!(result.n_files, 3);
 
         // Extract and verify content matches.
@@ -733,9 +749,13 @@ mod tests {
             // We re-derive the source path from the archive path.
             let (leaf, rel) = e.path.split_once('/').unwrap();
             let src = if leaf == leaf1 {
-                if rel == "a.txt" { p1_a.clone() }
-                else if rel == "sub/b.txt" { p1_b.clone() }
-                else { panic!("unexpected rel {}", rel); }
+                if rel == "a.txt" {
+                    p1_a.clone()
+                } else if rel == "sub/b.txt" {
+                    p1_b.clone()
+                } else {
+                    panic!("unexpected rel {}", rel);
+                }
             } else if leaf == leaf2 {
                 assert_eq!(rel, "c.txt");
                 p2_a.clone()
@@ -763,9 +783,19 @@ mod tests {
 
         let (result, _archive) = compress_directories([a.as_path(), b.as_path()]).unwrap();
         let paths: Vec<&str> = result.entries.iter().map(|e| e.path.as_str()).collect();
-        assert!(paths.iter().any(|p| p.starts_with("data/") && p.ends_with("a.txt")),
-            "missing data/a.txt in {:?}", paths);
-        assert!(paths.iter().any(|p| p.starts_with("data__1/") && p.ends_with("b.txt")),
-            "missing data__1/b.txt in {:?}", paths);
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.starts_with("data/") && p.ends_with("a.txt")),
+            "missing data/a.txt in {:?}",
+            paths
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.starts_with("data__1/") && p.ends_with("b.txt")),
+            "missing data__1/b.txt in {:?}",
+            paths
+        );
     }
 }
