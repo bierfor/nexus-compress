@@ -1,9 +1,30 @@
+[workspace]
+# Sprint 5.6.28: root Cargo.toml was a single-package crate
+# (engine only) before. The Tauri GUI lives in src-tauri/ as
+# a separate crate that depends on this one by `path = "."`.
+# `tauri-action`'s build step runs `cargo tauri build` from
+# the repo root and expects to find the Tauri crate as a
+# workspace member. Without this, you get:
+#
+#   failed to find main binary, make sure you have a
+#   `package > default-run` in the Cargo.toml file
+#
+# Solution: declare src-tauri/ as the workspace's Tauri member
+# while keeping the engine crate (this file) as the workspace
+# root for cargo CLI ergonomics.
+members = ["src-tauri"]
+resolver = "2"
+
 [package]
 name = "nexus-compress"
 version = "0.1.1"
 edition = "2021"
 description = "NexusCompress - hybrid compressor (LZ77 + rANS + dict codec)"
-license = "MIT"
+# SPRINT 5.6.28: changed from `MIT` to `AGPL-3.0 + Commercial`.
+# The project's dual-license model lives in LICENSE and
+# COMMERCIAL-LICENSE.md at the repo root; this is the SPDX
+# identifier that GitHub + cargo metadata pick up.
+license = "AGPL-3.0-or-later"
 
 [lib]
 name = "nexus_compress"
