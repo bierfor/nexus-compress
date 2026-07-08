@@ -41,13 +41,26 @@ serde = { version = "1", features = ["derive"] }
 sysinfo = "0.32"
 # Sprint 5.7.1: cross-platform FS trait in src/fs.rs.
 # - filetime: portable mtime setter (no std equivalent)
-# - xattr: Unix extended-attribute read/write (optional feature
-#   gate; skipping on macOS where the API differs slightly is
-#   acceptable in v0.1.2)
+# - xattr: Unix extended-attribute read/write. Sprint 5.7.1
+#   hotfix #21: moved to a [target.'cfg(unix)'.dependencies]
+#   table below because the xattr 1.6 crate fails to compile
+#   on `x86_64-pc-windows-msvc` with `error[E0433]: cannot find
+#   'unix' in 'os'` from xattr's own `src/sys/unsupported.rs`
+#   (it uses `use std::os::unix::io::BorrowedFd;` even in the
+#   `unsupported` cfg path, which is broken on newer Rust
+#   toolchains — Windows CI on Rust 1.83+ hits this). The
+#   `fs-xattr` feature is still exposed for opt-in testing on
+#   Unix, but no longer included in the `default` feature set
+#   (Unix-only by being declared in the target-cfg block).
 # - fs2: Windows disk-free-space query (optional feature gate;
 #   defaults to "unknown" if not enabled)
 filetime = "0.2"
-xattr = { version = "1", optional = true }
+# NOTE: `xattr` is declared ONLY in the [target.'cfg(unix)'.dependencies]
+# block at the bottom of this file. It used to be here as
+# `xattr = { version = "1", optional = true }` but that caused
+# Windows CI to fail with `cannot find 'unix' in 'os'`. The
+# `fs-xattr` feature still works via `dep:xattr` even with
+# the Unix-only declaration.
 fs2 = { version = "0.4", optional = true }
 # Sprint 5.7.1: libc for the statvfs + chown FFI in UnixFs.
 # Already a transitive dep via sysinfo; pinning 0.2 explicitly so
@@ -75,14 +88,33 @@ serde_json = "1"
 # clean. Adding it back is a no-op for the runtime (dev-dep only).
 tempfile = "3"
 
-# Sprint 5.7.1: optional cross-platform FS support. Defaults
-# match the production runtime (xattr on Unix, fs2 on Windows).
+# Sprint 5.7.1 hotfix #21: pull `xattr` ONLY on Unix targets.
+# Declared as `optional = true` here so the `fs-xattr` feature
+# in the [features] block above (via `dep:xattr`) still works
+# for opt-in testing on Unix. Windows / WASM targets won't
+# pull in the xattr crate at all because this block is gated
+# by `cfg(unix)`. Without this, `cargo build --target
+# x86_64-pc-windows-msvc` fails with `cannot find 'unix' in 'os'`
+# from xattr's own `src/sys/unsupported.rs` (the crate's Windows
+# stub still references `std::os::unix::io::BorrowedFd`, which
+# is broken on newer Rust toolchains).
+[target.'cfg(unix)'.dependencies]
+xattr = { version = "1", optional = true }
+
+# Sprint 5.7.1: optional cross-platform FS support. The
+# `fs-xattr` feature is Unix-only by being declared in the
+# `[target.'cfg(unix)'.dependencies]` block above; it's NOT in
+# the `default` feature set so Windows users won't try to
+# compile the xattr crate (which fails on
+# x86_64-pc-windows-msvc with `cannot find 'unix' in 'os'`).
 # CI can disable these individually via `--no-default-features`
 # to test the `StdFs` fallback path.
 [features]
-default = ["fs-xattr", "fs-disk-free"]
+default = ["fs-disk-free"]
 # Linux + macOS extended attributes (preserves quarantine / SELinux
-# labels on archive round-trip).
+# labels on archive round-trip). Unix-only because the underlying
+# xattr crate doesn't compile on Windows; pulled in via the
+# `[target.'cfg(unix)'.dependencies]` table above.
 fs-xattr = ["dep:xattr"]
 # Windows disk-free-space query (faster than statvfs equivalent).
 fs-disk-free = ["dep:fs2"]

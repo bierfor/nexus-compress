@@ -349,6 +349,16 @@ jobs:
         shell: pwsh
         run: |
           $suffix = "${{ matrix.target }}"
+          # Sprint 5.7.1 hotfix #21: `nexus.exe` is correct.
+          # The actual Windows build failure was a xattr crate
+          # compile error (`cannot find 'unix' in 'os'`) that
+          # made cargo never produce `nexus.exe` in the first
+          # place; the packaging step's "not found" was a
+          # downstream symptom. The xattr fix is in Cargo.toml:
+          # the dep is now gated to `cfg(unix)` so it doesn't
+          # get pulled in on Windows. NOTE: `nexus-rar.exe`
+          # is the Tauri GUI binary (built in the separate
+          # `build` job, not here) — never confuse them.
           $binary = 'nexus.exe'
           $smoke  = 'p2p_smoke.exe'
           $dir = "engine-${{ matrix.target }}"

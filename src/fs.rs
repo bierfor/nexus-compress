@@ -253,10 +253,16 @@ impl NativeFileSystem for UnixFs {
         // not present on source).
         // We use the `xattr` crate here — it's the standard
         // bindings crate for Linux/macOS xattr, no_std-compatible.
-        #[cfg(feature = "xattr")]
+        //
+        // Sprint 5.7.1 hotfix #21: xattr 1.x changed the API from
+        // `attr_list(path) -> Vec<OsString>` to `list(path) ->
+        // XAttrs` (an iterator over `OsString`). The cfg gate was
+        // also wrong (`feature = "xattr"` should be `feature =
+        // "fs-xattr"` — the actual feature name in Cargo.toml).
+        #[cfg(feature = "fs-xattr")]
         {
-            use xattr::attr_list;
-            if let Ok(attrs) = attr_list(source) {
+            use xattr::list;
+            if let Ok(attrs) = list(source) {
                 for name in attrs {
                     if let Ok(val) = xattr::get(source, &name) {
                         if let Some(bytes) = val {
