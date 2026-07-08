@@ -18,7 +18,7 @@ import { useEffect, useState } from "react";
 import { useLocale } from "@/components/LocaleProvider";
 import { useTheme } from "@/components/ThemeProvider";
 import { type View } from "./NeoTopBar";
-import { type RecentOp } from "@/app/page";
+import { type RecentOp } from "@/components/RecentView";
 import {
   Archive,
   FolderOpen,
