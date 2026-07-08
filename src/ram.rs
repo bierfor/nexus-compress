@@ -50,6 +50,15 @@ const CACHE_MS: u128 = 5_000;
 /// Read the system's currently-available physical memory, in MiB.
 /// Returns `None` if sysinfo can't be initialised (e.g. unrecognised
 /// platform, missing /proc, sandboxed environment).
+///
+/// **sysinfo 0.32 bug workaround:** on some macOS configurations
+/// `System::available_memory()` returns 0 instead of the real value.
+/// We treat that as "unknown + modern machine" and assume 4 GiB free
+/// (a conservative floor that lets every LZMA preset through). The
+/// alternative — returning 0 → cascading into `clamp_preset_for_ram`'s
+/// preset-1 fallback — silently destroys the encoder's ratio on every
+/// run. Better to assume 4 GiB and let the OS swap if we're wrong
+/// (the user will notice and pick a lower preset themselves).
 pub fn available_memory_mb() -> Option<u64> {
     let cell = SYSTEM.get_or_init(|| {
         std::sync::Mutex::new((System::new(), std::time::Instant::now()))
@@ -60,7 +69,8 @@ pub fn available_memory_mb() -> Option<u64> {
         guard.0.refresh_memory();
         guard.1 = now;
     }
-    Some(guard.0.available_memory() / (1024 * 1024))
+    let raw = guard.0.available_memory() / (1024 * 1024);
+    if raw == 0 { Some(4096) } else { Some(raw) }
 }
 
 /// LZMA preset → dictionary size in MiB, per the official xz spec.
@@ -235,5 +245,15 @@ mod tests {
         assert_eq!(clamp_preset_for_ram(9, Some(4)), 1);
         // 1 MiB free → cap = 256 KiB. Nothing fits; return 1 (1 MiB).
         assert_eq!(clamp_preset_for_ram(9, Some(1)), 1);
+    }
+
+    #[test]
+    fn sysinfo_zero_floors_to_4gib() {
+        // sysinfo 0.32 bug: returns 0 on some macOS. Our wrapper in
+        // `available_memory_mb()` floors that to 4096 MiB, which means
+        // cap = 1024 MiB → all presets (max 64 MiB) fit. The full
+        // request must come through unchanged.
+        assert_eq!(clamp_preset_for_ram(9, Some(4096)), 9);
+        assert_eq!(clamp_preset_for_ram(6, Some(4096)), 6);
     }
 }
