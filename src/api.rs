@@ -41,6 +41,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Instant;
 
+use crate::engine;
+
 // Re-export so the Tauri commands and the UI both see the same
 // `DirectoryResult` shape (defined in `src/nxar.rs`).
 pub use crate::nxar::{ArchiveEntry, DirectoryResult};
@@ -515,7 +517,10 @@ where
                 files_total: 1,
                 bytes_done: 0,
                 bytes_total: meta.len(),
-            });
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start));
             let bytes = std::fs::read(input_path)
                 .map_err(|e| ApiError::new("target.read_failed", format!("read failed: {}", e)))?;
             let file_name = input_path
@@ -530,7 +535,10 @@ where
                 files_total: 1,
                 bytes_done: meta.len(),
                 bytes_total: meta.len(),
-            });
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start));
             let compressed = r.compressed;
             progress(ProgressEvent {
                 phase: "done".to_string(),
@@ -539,7 +547,10 @@ where
                 files_total: 1,
                 bytes_done: meta.len(),
                 bytes_total: meta.len(),
-            });
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start));
             (compressed, meta.len(), 1u64, false)
         } else if meta.is_dir() {
             // Walk into the directory and use the directory backend.
@@ -559,7 +570,10 @@ where
                 files_total: dir_result.n_files,
                 bytes_done: total_size,
                 bytes_total: total_size,
-            });
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start));
             (
                 archive,
                 dir_result.total_original_size,
@@ -673,6 +687,27 @@ where
 {
     use std::io::Read;
     let start = Instant::now();
+    // **Sprint 5.7.2 hotfix #23:** if the user passed a DIRECTORY
+    // (e.g. they double-clicked an extracted folder, or the file
+    // picker returned a folder path), bail with a clear error
+    // BEFORE trying to read the magic bytes. The old code would
+    // `File::open` the directory (which on macOS/Linux returns a
+    // valid fd), then fail at `read` with a confusing
+    // `Is a directory (os error 21)` because directories don't
+    // support `read()`. The user sees a cryptic error pointing at
+    // the wrong line; this fix surfaces the real cause.
+    if let Ok(meta) = std::fs::metadata(input_path) {
+        if meta.is_dir() {
+            return Err(ApiError::new(
+                "decompress.is_directory",
+                format!(
+                    "{} is a directory, not an archive. \
+                     Pick a .nxs / .nxs6 / .lz / .nxar file.",
+                    input_path.display()
+                ),
+            ));
+        }
+    }
     // Read the first 8 bytes to dispatch on magic.
     let mut file = std::fs::File::open(input_path).map_err(|e| {
         ApiError::new(
@@ -727,12 +762,21 @@ where
                 files_total: n,
                 bytes_done: 0,
                 bytes_total: total,
-            });
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start));
             let mut restored: u64 = 0;
-            for (i, e) in entries.iter().enumerate() {
-                let start = e.solid_offset as usize;
-                let end = start + e.pre_size as usize;
-                let file_bytes = &solid[start..end];
+                for (i, e) in entries.iter().enumerate() {
+                    // Note: rename the inner `start` to `solid_offset`
+                    // so it doesn't shadow the outer `start: Instant`
+                    // used by `ProgressEvent::with_estimates`. The
+                    // outer `start` is the wall-clock start of
+                    // `decompress_target_with_progress`; the inner
+                    // one was the byte offset into the SOLID blob.
+                    let solid_offset = e.solid_offset as usize;
+                    let end = solid_offset + e.pre_size as usize;
+                    let file_bytes = &solid[solid_offset..end];
                 let target = out_dir.join(&e.name);
                 if let Some(p) = target.parent() {
                     std::fs::create_dir_all(p).map_err(|err| {
@@ -756,7 +800,10 @@ where
                     files_total: n,
                     bytes_done: restored,
                     bytes_total: total,
-                });
+                    elapsed_ms: 0,
+                    bytes_per_sec: 0.0,
+                    eta_ms: 0,
+                }.with_estimates(start));
             }
             (
                 "nxs6",
@@ -791,7 +838,10 @@ where
                 files_total: result.n_files,
                 bytes_done: result.total_original_size,
                 bytes_total: result.total_original_size,
-            });
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start));
             (
                 "nxar",
                 out_dir.to_string_lossy().into_owned(),
@@ -821,7 +871,10 @@ where
                 files_total: 1,
                 bytes_done: out.data.len() as u64,
                 bytes_total: out.data.len() as u64,
-            });
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start));
             (
                 "v4",
                 out_path.to_string_lossy().into_owned(),
@@ -830,15 +883,29 @@ where
                 false,
             )
         } else if head[0] == 0x05 {
-            // Single-file v5/v6 LZMA stream.
+            // Single-file v5/v6 LZMA stream. (Format byte 0x05
+            // followed by the LZMA2 stream inside the .lzma
+            // framing that `engine::compress_v5` / `compress_v6`
+            // produce.)
+            //
+            // **Sprint 5.7.2 hotfix #22:** the previous code
+            // called `decompress_bytes` here, which only knows
+            // the V3 NXS format and would reject any LZMA byte
+            // with the confusing `decompress.invalid_header:
+            // not a .nexus file (bad magic)` error. Use
+            // `engine::decompress_any` instead — it dispatches
+            // on the first byte (0x05 → LZMA) and decodes
+            // correctly.
             let bytes = std::fs::read(input_path)
                 .map_err(|e| ApiError::new("decompress.read_failed", format!("read: {}", e)))?;
-            let out = decompress_bytes(&bytes)?;
+            let out = engine::decompress_any(&bytes).map_err(|e| {
+                ApiError::new("decompress.lzma_failed", format!("lzma decode: {}", e))
+            })?;
             let out_path = match output_dir {
                 Some(d) => d.join(format!("{}.out", stem)),
                 None => parent.join(format!("{}.out", stem)),
             };
-            std::fs::write(&out_path, &out.data).map_err(|e| {
+            std::fs::write(&out_path, &out).map_err(|e| {
                 ApiError::new(
                     "decompress.write_failed",
                     format!("write {}: {}", out_path.display(), e),
@@ -849,13 +916,16 @@ where
                 current_file: stem.clone(),
                 files_done: 1,
                 files_total: 1,
-                bytes_done: out.data.len() as u64,
-                bytes_total: out.data.len() as u64,
-            });
+                bytes_done: out.len() as u64,
+                bytes_total: out.len() as u64,
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start));
             (
                 "v5-v6-single",
                 out_path.to_string_lossy().into_owned(),
-                out.data.len() as u64,
+                out.len() as u64,
                 1,
                 false,
             )
@@ -876,7 +946,10 @@ where
         files_total: n_files,
         bytes_done: restored_size,
         bytes_total: restored_size,
-    });
+        elapsed_ms: 0,
+        bytes_per_sec: 0.0,
+        eta_ms: 0,
+    }.with_estimates(start));
 
     let decompress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
     Ok(DecompressTargetResult {
@@ -1069,6 +1142,55 @@ pub struct ProgressEvent {
     pub files_total: u64,
     pub bytes_done: u64,
     pub bytes_total: u64,
+    /// Milliseconds elapsed since `compress_target` (or
+    /// `decompress_target_with_progress`) started. The frontend
+    /// uses this to render the elapsed time. Reset to 0 between
+    /// calls; within a single call, monotonically increasing.
+    pub elapsed_ms: u64,
+    /// Throughput, in bytes/second, computed as
+    /// `bytes_done / (elapsed_ms / 1000)`. Smoothed via the
+    /// instantaneous value at each emit (no EMA — the codec
+    /// emits at most a few hundred events per file so a single
+    /// sample per emit is fine). 0 during the first 100 ms
+    /// when we don't have a reliable throughput yet.
+    pub bytes_per_sec: f64,
+    /// Estimated milliseconds remaining until `bytes_done ==
+    /// bytes_total`. 0 when done, and 0 during the warm-up
+    /// window (<100 ms) when we can't estimate yet.
+    pub eta_ms: u64,
+}
+
+impl ProgressEvent {
+    /// Populate `elapsed_ms`, `bytes_per_sec`, and `eta_ms` from
+    /// a start time. Use this at every emit site so the frontend
+    /// has real data for the progress bar's time / ETA / throughput
+    /// display.
+    ///
+    /// Warm-up window: if `elapsed_ms < 100`, we set
+    /// `bytes_per_sec = 0.0` and `eta_ms = 0` (no estimate
+    /// possible yet). After 100 ms we have at least one codec
+    /// chunk's worth of data and the estimates become meaningful.
+    pub fn with_estimates(mut self, start: std::time::Instant) -> Self {
+        self.elapsed_ms = start.elapsed().as_millis() as u64;
+        if self.elapsed_ms < 100 {
+            self.bytes_per_sec = 0.0;
+            self.eta_ms = 0;
+            return self;
+        }
+        let elapsed_s = self.elapsed_ms as f64 / 1000.0;
+        self.bytes_per_sec = self.bytes_done as f64 / elapsed_s;
+        if self.bytes_total > self.bytes_done {
+            let remaining = self.bytes_total - self.bytes_done;
+            self.eta_ms = if self.bytes_per_sec > 0.0 {
+                (remaining as f64 / self.bytes_per_sec * 1000.0) as u64
+            } else {
+                0
+            };
+        } else {
+            self.eta_ms = 0;
+        }
+        self
+    }
 }
 
 /// Walk a directory and sum the byte sizes of every regular file.

@@ -154,16 +154,30 @@ fn drain_loop(pending: Arc<Mutex<Option<Pending>>>, app: AppHandle) {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            // If no event is pending, continue (don't return —
+            // the previous version's `return None` bug here
+            // would kill the drainer thread on the first
+            // empty tick, leaving any future events in the
+            // buffer with no one to flush them).
             let pending = match guard.as_mut() {
                 Some(p) => p,
-                None => return,
+                None => continue,
             };
             let now = Instant::now();
             let since_input = now.duration_since(pending.last_input_at).as_millis() as u64;
-            // Only emit if the buffer has been "quiet" long enough
-            // to be considered the latest view of the world.
+            // If the buffer has been touched recently, skip
+            // this tick — the synchronous flush in `feed()`
+            // handles the "events arriving faster than
+            // THROTTLE_MS" case. We just need the drainer
+            // to be alive for the "trailing edge" case
+            // (the last event of a compress arrived less
+            // than THROTTLE_MS ago and no more are coming).
+            // Use `continue` here, NOT `return` — the
+            // previous `return` bug would kill the drainer
+            // thread the first time we hit this branch,
+            // and then the trailing edge would never flush.
             if since_input < THROTTLE_MS {
-                return;
+                continue;
             }
             pending.emitted_at = Some(now);
             Some((pending.name, pending.value.clone()))
