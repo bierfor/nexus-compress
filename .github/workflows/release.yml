@@ -35,9 +35,18 @@ jobs:
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             label: Linux · x86_64
-          - platform: ubuntu-22.04
-            target: aarch64-unknown-linux-gnu
-            label: Linux · arm64
+          # Sprint 5.6.28 hotfix #6: aarch64-unknown-linux-gnu
+          # (Linux ARM64) temporarily disabled. Cross-compiling
+          # from the x86_64 runner needs a sysroot + pkg-config
+          # configured for cross compilation, which isn't
+          # installed by default and would add 5+ minutes to
+          # every release build. GH Actions ships native arm64
+          # runners (ubuntu-22.04-arm) but those were in beta
+          # at the time of v0.1.1. Linux/arm64 users can build
+          # from source or wait for v0.1.2.
+          # - platform: ubuntu-22.04
+          #   target: aarch64-unknown-linux-gnu
+          #   label: Linux · arm64 (disabled per hotfix #6)
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             label: Windows · x86_64
@@ -163,9 +172,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Sprint 5.6.28 hotfix #6: aarch64-unknown-linux-gnu
+        # disabled pending native arm64 runner support on
+        # GH Actions.
         target:
           - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
           - x86_64-apple-darwin
           - aarch64-apple-darwin
           - x86_64-pc-windows-msvc
