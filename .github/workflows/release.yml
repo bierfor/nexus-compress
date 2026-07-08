@@ -22,6 +22,11 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   build-gui:
     name: build ${{ matrix.platform }}
+    # tauri-action needs write access to create the GitHub Release
+    # and upload the bundled assets. Without this the upload step
+    # aborts with `Error: GITHUB_TOKEN is required`.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -142,6 +147,10 @@ jobs:
       - name: Tauri · bundle via tauri-action
         uses: tauri-apps/tauri-action@v0
         env:
+          # tauri-action needs GITHUB_TOKEN to create the draft release
+          # and upload bundled assets. Auto-provided by GitHub Actions
+          # when the job has `permissions: contents: write`.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Signing secrets (configured in repo Settings → Secrets).
           # If unset, the action produces an unsigned build (still OK
           # for CI sanity checks, but won't ship to end users).
