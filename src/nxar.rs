@@ -119,6 +119,27 @@ pub fn read_file(path: &Path) -> io::Result<Vec<u8>> {
 /// the standard single-folder behavior; `compress_directories`
 /// uses leaf-name prefixes for multi-folder archives.
 pub fn compress_directory(root: &Path) -> Result<(DirectoryResult, Vec<u8>), String> {
+    compress_directory_with_progress(root, |_| {})
+}
+
+/// Sprint 5.7.2 hotfix #23.1 — directory compression with a
+/// per-file + per-codec-chunk progress callback. The callback is
+/// invoked multiple times per file (once per CDC chunk via
+/// `crate::codec::compress_with_progress`) AND once at every file
+/// boundary (so the UI can show "file N of M: name.ext" as the
+/// current_file label).
+///
+/// `bytes_done` reported to the callback is the cumulative INPUT
+/// bytes processed across all files so far — i.e. user-visible work
+/// (what the bar should count), not compressed output size.
+pub fn compress_directory_with_progress<P>(
+    root: &Path,
+    mut progress: P,
+) -> Result<(DirectoryResult, Vec<u8>), String>
+where
+    P: FnMut(crate::api::ProgressEvent),
+{
+    use crate::api::ProgressEvent;
     let files = walk(root).map_err(|e| format!("walk failed: {}", e))?;
     if files.is_empty() {
         return Err("directory is empty (no regular files)".into());
@@ -129,8 +150,12 @@ pub fn compress_directory(root: &Path) -> Result<(DirectoryResult, Vec<u8>), Str
     let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(files.len());
     let mut total_original: u64 = 0;
     let mut total_compressed: u64 = 0;
+    let total_input_bytes: u64 = files
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+        .sum();
 
-    for abs in &files {
+    for (idx, abs) in files.iter().enumerate() {
         let rel = abs
             .strip_prefix(root)
             .unwrap_or(abs)
@@ -142,7 +167,7 @@ pub fn compress_directory(root: &Path) -> Result<(DirectoryResult, Vec<u8>), Str
             Ok(b) => b,
             Err(_e) => {
                 entries.push(ArchiveEntry {
-                    path: rel,
+                    path: rel.clone(),
                     original_size: 0,
                     compressed_size: 0,
                     compress_time_ms: 0.0,
@@ -153,7 +178,37 @@ pub fn compress_directory(root: &Path) -> Result<(DirectoryResult, Vec<u8>), Str
         };
         let original_size = bytes.len() as u64;
         let t0 = Instant::now();
-        let compressed = compress(&bytes);
+        // Per-file pre-event so the UI shows current_file label.
+        progress(ProgressEvent {
+            phase: "compressing".to_string(),
+            current_file: rel.clone(),
+            files_done: idx as u64,
+            files_total: files.len() as u64,
+            bytes_done: total_original,
+            bytes_total: total_input_bytes,
+            elapsed_ms: 0,
+            bytes_per_sec: 0.0,
+            eta_ms: 0,
+        }.with_estimates(total_start));
+        // Use the codec's per-chunk progress variant — same
+        // pattern as hotfix #23 for the single-file path.
+        let compressed = crate::codec::compress_with_progress(&bytes, |cumulative| {
+            // Throttle in-process at 4 KiB granularity to avoid
+            // flooding the IPC channel with hundreds of events
+            // per file. The Tauri-side throttle (100 ms) further
+            // dedupes, so this is mostly defensive.
+            progress(ProgressEvent {
+                phase: "compressing".to_string(),
+                current_file: rel.clone(),
+                files_done: idx as u64,
+                files_total: files.len() as u64,
+                bytes_done: total_original + cumulative,
+                bytes_total: total_input_bytes,
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(total_start));
+        });
         let dt = t0.elapsed().as_secs_f64() * 1000.0;
         let compressed_size = compressed.len() as u64;
         total_original += original_size;

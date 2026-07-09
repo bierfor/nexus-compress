@@ -596,11 +596,34 @@ where
             // stream) we get per-file progress via the
             // `solid_archive::compress_with_progress` hook. For other
             // backends the directory backend dispatches per-file
-            // archiving (less interesting to show progress on, but we
-            // still emit a coarse-grain event so the UI gets something).
+            // archiving with per-chunk progress via the
+            // nxar::compress_directory_with_progress hook (hotfix #23.1).
+            //
+            // The wrapping `with_progress` variant forwards every
+            // per-file + per-chunk event through the same `progress`
+            // closure so the UI bar advances smoothly. We also emit
+            // a pre-event at 0% with a real bytes_total before the
+            // work starts, so the user sees the bar at 0% with
+            // a non-zero denominator from the first paint.
             let total_size = walk_dir_total_bytes(input_path);
+            progress(ProgressEvent {
+                phase: "compressing".to_string(),
+                current_file: String::new(),
+                files_done: 0,
+                files_total: 1, // updated below once we know n_files
+                bytes_done: 0,
+                bytes_total: total_size,
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start));
             let (dir_result, archive) =
-                compress_directory_with_backend(input_path, backend, lzma_level)?;
+                compress_directory_with_backend_with_progress(
+                    input_path,
+                    backend,
+                    lzma_level,
+                    |ev| progress(ev),
+                )?;
             progress(ProgressEvent {
                 phase: "done".to_string(),
                 current_file: String::new(),
@@ -1924,9 +1947,30 @@ pub fn compress_directory_with_backend(
     backend: CompressionBackend,
     lzma_level: u32,
 ) -> ApiResult<(DirectoryResult, Vec<u8>)> {
+    compress_directory_with_backend_with_progress(input_dir, backend, lzma_level, |_| {})
+}
+
+/// Sprint 5.7.2 hotfix #23.1 — same as
+/// `compress_directory_with_backend` but pipes a
+/// `ProgressEvent` callback through both code paths:
+///   - V6Solid: per-file `solid_archive::compress_with_progress`
+///   - per-file nxar: per-file + per-codec-chunk via
+///     `nxar::compress_directory_with_progress`
+///
+/// Without this, the directory compress path emits ONLY the
+/// final "done" event, so the UI bar sits at 0% until the
+/// very end and jumps to 100%.
+pub fn compress_directory_with_backend_with_progress<P>(
+    input_dir: &Path,
+    backend: CompressionBackend,
+    lzma_level: u32,
+    mut progress: P,
+) -> ApiResult<(DirectoryResult, Vec<u8>)>
+where
+    P: FnMut(ProgressEvent),
+{
     match backend {
         CompressionBackend::V6Solid => {
-            // Walk the directory, build the solid archive.
             let files = walk_dir_for_solid(input_dir)?;
             if files.is_empty() {
                 return Err(ApiError::new(
@@ -1934,18 +1978,54 @@ pub fn compress_directory_with_backend(
                     format!("no files in {}", input_dir.display()),
                 ));
             }
-            let archive = crate::solid_archive::compress(&files, lzma_level)
-                .map_err(|e| ApiError::new("solid.compress", e))?;
-            // Build a synthetic DirectoryResult (the solid format
-            // doesn't have the same per-file metadata as nxar, so
-            // we report the aggregate only).
             let total_original: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+            // Pre-walk event so the bar starts at 0% with a real
+            // bytes_total rather than waiting for the first
+            // mid-file event.
+            progress(ProgressEvent {
+                phase: "compressing".to_string(),
+                current_file: String::new(),
+                files_done: 0,
+                files_total: files.len() as u64,
+                bytes_done: 0,
+                bytes_total: total_original,
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            });
+            // Per-file progress hook from solid_archive. The
+            // callback signature is (file_idx, total, name);
+            // we map it to ProgressEvent with bytes_done =
+            // cumulative original bytes processed.
+            let archive = crate::solid_archive::compress_with_progress(
+                &files,
+                lzma_level,
+                |file_idx, total, name| {
+                    let bytes_done: u64 = files
+                        .iter()
+                        .take(file_idx)
+                        .map(|(_, b)| b.len() as u64)
+                        .sum();
+                    progress(ProgressEvent {
+                        phase: "compressing".to_string(),
+                        current_file: name.to_string(),
+                        files_done: file_idx as u64,
+                        files_total: total as u64,
+                        bytes_done,
+                        bytes_total: total_original,
+                        elapsed_ms: 0,
+                        bytes_per_sec: 0.0,
+                        eta_ms: 0,
+                    });
+                },
+            )
+            .map_err(|e| ApiError::new("solid.compress", e))?;
             let entries: Vec<ArchiveEntry> = files
                 .iter()
                 .map(|(name, bytes)| ArchiveEntry {
                     path: name.clone(),
                     original_size: bytes.len() as u64,
-                    compressed_size: 0, // solid doesn't track per-file
+                    compressed_size: 0,
                     compress_time_ms: 0.0,
                 })
                 .collect();
@@ -1960,9 +2040,22 @@ pub fn compress_directory_with_backend(
             };
             Ok((result, archive))
         }
-        // The other backends fall through to the existing
-        // per-file nxar (lossless v4 codec).
-        _ => compress_directory(input_dir, CompressionLevel::Fast),
+        // The other backends fall through to the per-file nxar
+        // (lossless v4 codec) — now with the new progress variant
+        // that emits per-file + per-chunk events.
+        _ => {
+            // The nxar::compress_directory_with_progress is in
+            // the lib crate (not the api wrapper), so wrap its
+            // callback type. Both signatures use FnMut, the only
+            // difference is the event struct type — they're the
+            // same type here (ProgressEvent lives in api.rs and
+            // is re-exported).
+            crate::nxar::compress_directory_with_progress(
+                input_dir,
+                |ev| progress(ev),
+            )
+            .map_err(|e| ApiError::new("nxar.compress_failed", e))
+        }
     }
 }
 
