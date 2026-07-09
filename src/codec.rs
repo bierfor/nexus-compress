@@ -99,6 +99,26 @@ pub fn compress_premium(input: &[u8]) -> Vec<u8> {
 }
 
 pub fn compress(input: &[u8]) -> Vec<u8> {
+    compress_with_progress(input, |_| {})
+}
+
+/// Sprint 5.7.2 hotfix #23 — compress with a per-chunk progress
+/// callback. The callback receives the cumulative input bytes
+/// processed so far (CDC chunk boundaries). Pass `|_| {}` if you
+/// don't need progress reporting (semantically identical to the
+/// no-callback `compress` above).
+///
+/// **Why this matters:** the previous `compress` exposed no
+/// progress hook, so the Tauri UI saw the bar jump from 0 % to
+/// 100 % the moment the codec returned. Now the API layer wraps
+/// this callback into a `ProgressEvent` with `bytes_done` and the
+/// UI shows a real-time progress bar + elapsed time + throughput +
+/// ETA during compression. Same hook as `solid_archive::compress_
+/// with_progress` for the directory backend.
+pub fn compress_with_progress<P>(input: &[u8], mut progress: P) -> Vec<u8>
+where
+    P: FnMut(u64),
+{
     let total_uncompressed = input.len() as u64;
 
     // Content-defined chunking: variable-size blocks aligned to content
@@ -203,6 +223,21 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
             unique_counter += 1;
         }
         out.extend_from_slice(&payload);
+        // Sprint 5.7.2 hotfix #23: report progress after each
+        // chunk completes. The caller (api.rs) wraps this into
+        // a ProgressEvent for the Tauri UI. We only fire when
+        // `total_uncompressed > 0` so the bar doesn't divide by
+        // zero on empty inputs.
+        //
+        // We use the chunk's END offset (= start + length from
+        // `chunk_specs[block_id]`) as the cumulative bytes
+        // processed, NOT `block.len()` accumulated, because
+        // duplicate chunks dedupe to a 5-byte reference but the
+        // user-visible "work done" is the original chunk size.
+        if total_uncompressed > 0 {
+            let (off, len) = chunk_specs[block_id];
+            progress((off + len) as u64);
+        }
     }
     out
 }
@@ -479,6 +514,21 @@ fn read_u32(buf: &[u8], off: &mut usize) -> u32 {
 }
 
 pub fn decompress(input: &[u8]) -> Result<Vec<u8>, String> {
+    decompress_with_progress(input, |_| {})
+}
+
+/// Sprint 5.7.2 hotfix #23 — symmetric with `compress_with_progress`.
+/// The callback receives the cumulative input bytes consumed so
+/// far (sum of the block sizes from the header). Pass `|_| {}` to
+/// ignore progress (semantically identical to the no-callback
+/// `decompress` above).
+pub fn decompress_with_progress<P>(
+    input: &[u8],
+    mut progress: P,
+) -> Result<Vec<u8>, String>
+where
+    P: FnMut(u64),
+{
     let mut cursor = Cursor::new(input);
     let header =
         NexusHeader::read(&mut cursor).map_err(|e| format!("invalid .nexus header: {:?}", e))?;
@@ -489,6 +539,7 @@ pub fn decompress(input: &[u8]) -> Result<Vec<u8>, String> {
             header.version, VERSION_V0, VERSION_V2, VERSION_V3
         ));
     }
+    progress(header.uncompressed_total_size); // sentinel: header parsed, total known
     let mut out = Vec::with_capacity(header.uncompressed_total_size as usize);
 
     // Cache of decoded blocks for Duplicate lookup
@@ -516,6 +567,12 @@ pub fn decompress(input: &[u8]) -> Result<Vec<u8>, String> {
             block.len()
         );
         out.extend_from_slice(&block);
+        // Sprint 5.7.2 hotfix #23: report cumulative bytes done
+        // per block. We use `bh.uncompressed_size` (the original
+        // input size) rather than `block.len()` so the bar
+        // measures user-visible restored bytes.
+        let bytes_done: u64 = out.len() as u64;
+        progress(bytes_done);
     }
     Ok(out)
 }

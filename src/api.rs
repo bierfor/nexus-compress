@@ -529,18 +529,55 @@ where
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let r = compress_bytes_with_backend(&bytes, &file_name, backend, lzma_level);
-            progress(ProgressEvent {
-                phase: "compressing".to_string(),
-                current_file: file_name.clone(),
-                files_done: 0,
-                files_total: 1,
-                bytes_done: meta.len(),
-                bytes_total: meta.len(),
-                elapsed_ms: 0,
-                bytes_per_sec: 0.0,
-                eta_ms: 0,
-            }.with_estimates(start));
-            let compressed = r.compressed;
+            // Sprint 5.7.2 hotfix #23: re-emit a "compressing" event
+            // before the codec actually runs so the UI sees the bar
+            // at 0% with a real `start` timestamp. Then call the
+            // codec via the progress-aware variant (`codec::compress_
+            // with_progress`) and pipe per-chunk `bytes_done` into
+            // the same ProgressEvent callback. The codec finishes,
+            // then we emit one final "compressing" event with
+            // bytes_done=bytes_total so the bar hits 100% before
+            // transitioning to "done".
+            let compressed = {
+                let total = meta.len();
+                // Pre-event: 0% with real elapsed_ms / bytes_per_sec.
+                progress(ProgressEvent {
+                    phase: "compressing".to_string(),
+                    current_file: file_name.clone(),
+                    files_done: 0,
+                    files_total: 1,
+                    bytes_done: 0,
+                    bytes_total: total,
+                    elapsed_ms: 0,
+                    bytes_per_sec: 0.0,
+                    eta_ms: 0,
+                }.with_estimates(start));
+                // Codec with per-chunk progress. The throttle on
+                // the Tauri side (100 ms window) will dedupe bursts;
+                // we still get a smooth bar.
+                let bytes_done = std::cell::Cell::new(0u64);
+                crate::codec::compress_with_progress(&bytes, |cumulative| {
+                    // Throttle in-process to avoid emitting one event
+                    // per CDC chunk (could be hundreds for large
+                    // files). 4 KiB granularity is plenty for the
+                    // 100 ms IPC throttle downstream.
+                    let prev = bytes_done.get();
+                    if cumulative - prev >= 4096 || cumulative == total {
+                        bytes_done.set(cumulative);
+                        progress(ProgressEvent {
+                            phase: "compressing".to_string(),
+                            current_file: file_name.clone(),
+                            files_done: 0,
+                            files_total: 1,
+                            bytes_done: cumulative,
+                            bytes_total: total,
+                            elapsed_ms: 0,
+                            bytes_per_sec: 0.0,
+                            eta_ms: 0,
+                        }.with_estimates(start));
+                    }
+                })
+            };
             progress(ProgressEvent {
                 phase: "done".to_string(),
                 current_file: file_name.clone(),
@@ -854,7 +891,36 @@ where
             // Single-file v4 stream.
             let bytes = std::fs::read(input_path)
                 .map_err(|e| ApiError::new("decompress.read_failed", format!("read: {}", e)))?;
-            let out = decompress_bytes(&bytes)?;
+            // Sprint 5.7.2 hotfix #23: decompress with per-block
+            // progress. The callback updates bytes_done incrementally
+            // as the codec streams blocks. We emit a "decrypting"
+            // event (alias for compressing during single-file
+            // decompress) for the UI bar.
+            let total_size = bytes.len() as u64;
+            progress(ProgressEvent {
+                phase: "decrypting".to_string(),
+                current_file: stem.clone(),
+                files_done: 0,
+                files_total: 1,
+                bytes_done: 0,
+                bytes_total: total_size,
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start));
+            let out = decompress_bytes_with_progress(&bytes, |cumulative| {
+                progress(ProgressEvent {
+                    phase: "decrypting".to_string(),
+                    current_file: stem.clone(),
+                    files_done: 0,
+                    files_total: 1,
+                    bytes_done: cumulative,
+                    bytes_total: total_size,
+                    elapsed_ms: 0,
+                    bytes_per_sec: 0.0,
+                    eta_ms: 0,
+                }.with_estimates(start));
+            })?;
             let out_path = match output_dir {
                 Some(d) => d.join(format!("{}.out", stem)),
                 None => parent.join(format!("{}.out", stem)),
@@ -1958,7 +2024,66 @@ pub fn decompress_bytes(input: &[u8]) -> ApiResult<DecompressResult> {
     // Sprint 5.6.4: codec::decompress now returns Result
     // directly. Still wrap with catch_unwind as a safety net for
     // any other panics deeper in the decode path.
-    let data = match std::panic::catch_unwind(|| crate::decompress(input)) {
+    let data = match std::panic::catch_unwind(|| {
+        crate::codec::decompress_with_progress(input, |_cumulative| {
+            // No-op: per-block progress isn't surfaced for the
+            // single-file CLI / API path here. The Tauri
+            // command wraps decompress_bytes in a thread that
+            // gets called per-block; see `decompress_target_
+            // with_progress` for the rich ProgressEvent emission.
+            // The codec-level hook is here so the next iteration
+            // can pipe it without re-plumbing the codec signature.
+        })
+    }) {
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => {
+            return Err(ApiError::new("decompress.invalid_header", e));
+        }
+        Err(_) => {
+            return Err(ApiError::new(
+                "decompress.corrupted",
+                "input is not a valid NexusCompress stream or is corrupted",
+            ));
+        }
+    };
+    let decompress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(DecompressResult {
+        size: data.len() as u64,
+        decompress_time_ms,
+        data,
+    })
+}
+
+/// Sprint 5.7.2 hotfix #23: decompress with a per-block
+/// progress callback. The callback receives the cumulative
+/// output bytes restored so far (sum of restored block sizes
+/// from the codec). Pass `|_| {}` to ignore progress
+/// (semantically identical to the no-callback `decompress_
+/// bytes` above).
+pub fn decompress_bytes_with_progress<P>(
+    input: &[u8],
+    mut progress: P,
+) -> ApiResult<DecompressResult>
+where
+    P: FnMut(u64),
+{
+    if input.is_empty() {
+        return Err(ApiError::new(
+            "decompress.empty",
+            "input is empty; nothing to decompress",
+        ));
+    }
+
+    let start = Instant::now();
+    // The progress closure isn't UnwindSafe by default (RefCell
+    // is not), so we AssertUnwindSafe to bypass the check. The
+    // actual safety story is: if the codec panics, the progress
+    // callback may or may not have been called — that's fine,
+    // because we're about to return Err anyway.
+    let data = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::codec::decompress_with_progress(input, |cumulative| progress(cumulative))
+    })) {
         Ok(Ok(d)) => d,
         Ok(Err(e)) => {
             return Err(ApiError::new("decompress.invalid_header", e));

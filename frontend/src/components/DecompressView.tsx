@@ -109,6 +109,21 @@ export function DecompressView({
   const [destInitialized, setDestInitialized] = useState(false);
   const [busy, setBusy] = useState(false);
   const [peeking, setPeeking] = useState(false);
+  // Sprint 5.7.2 hotfix #23: progress state mirrors CompressView's
+  // — populated by the 'compress-progress' event listener above
+  // and rendered in the progress card so the user sees elapsed
+  // time, throughput, and ETA during extraction.
+  const [progress, setProgress] = useState<{
+    phase: string;
+    current_file: string;
+    files_done: number;
+    files_total: number;
+    bytes_done: number;
+    bytes_total: number;
+    elapsed_ms: number;
+    bytes_per_sec: number;
+    eta_ms: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   // Sprint 5.7.2: password state for encrypted archives (NXE\0 /
@@ -211,6 +226,53 @@ export function DecompressView({
       }
     })();
   }, [destInitialized]);
+
+  // Subscribe to the 'compress-progress' event from the Rust backend.
+  // Sprint 5.7.2 hotfix #23: DecompressView was missing this listener
+  // entirely (only CompressView had it), so the progress bar / elapsed
+  // time / throughput / ETA never updated during extraction. The
+  // backend's throttled emitter pushes a ProgressEvent every 100ms;
+  // we re-derive `busy` from `phase !== "done"` so the progress
+  // card shows during any extract operation.
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const eventMod = (window as any).__TAURI__?.event;
+        if (!eventMod?.listen) return;
+        unlisten = await eventMod.listen("compress-progress", (e: any) => {
+          const p = e?.payload;
+          if (!p) return;
+          const phase = String(p.phase ?? "");
+          // Skip if we're not extracting (the peek path also emits
+          // events with very small bytes_total — we don't want the
+          // bar flashing during peek).
+          if (phase === "reading" && !busy) return;
+          setProgress({
+            phase,
+            current_file: String(p.current_file ?? ""),
+            files_done: Number(p.files_done ?? 0),
+            files_total: Number(p.files_total ?? 1),
+            bytes_done: Number(p.bytes_done ?? 0),
+            bytes_total: Number(p.bytes_total ?? 0),
+            elapsed_ms: Number(p.elapsed_ms ?? 0),
+            bytes_per_sec: Number(p.bytes_per_sec ?? 0),
+            eta_ms: Number(p.eta_ms ?? 0),
+          });
+          // Auto-dismiss the bar once extraction is complete.
+          if (phase === "done") {
+            // Keep the "done" event visible for ~1.2s so the user
+            // can read "Listo" / 100%, then clear.
+            setTimeout(() => setProgress(null), 1200);
+          }
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+    return () => unlisten?.();
+  }, [busy]);
 
   // Peek archive on path change
   useEffect(() => {
@@ -438,6 +500,10 @@ export function DecompressView({
     if (!archivePath) return;
     setBusy(true);
     setError(null);
+    // Sprint 5.7.2 hotfix #23: clear stale progress so the new
+    // extraction starts from 0% / 0:00 instead of showing the
+    // previous run's last frame.
+    setProgress(null);
     const startTime = Date.now();
     // Sprint 5.7.2: if the archive is encrypted but the user
     // hasn't unlocked yet, we don't have a password to pass
@@ -849,6 +915,88 @@ export function DecompressView({
                 : t("decompress.btn")}
         </button>
 
+        {/* Sprint 5.7.2 hotfix #23: progress card — mirrors the
+            CompressView render. Shows phase label, percentage,
+            bar, current file, bytes done/total, elapsed time,
+            throughput, and ETA. Hidden when no progress is
+            active (e.g. when the user is just looking at the
+            archive preview before clicking Extract). */}
+        {progress && (
+          <div
+            className={
+              progress.phase === "recovering"
+                ? "mt-4 p-6 rounded-2xl bg-amber-500/[0.08] border border-amber-500/30"
+                : "mt-4 p-6 rounded-2xl bg-cyan-500/[0.06] border border-cyan-500/20"
+            }
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div
+                className={
+                  progress.phase === "recovering"
+                    ? "text-amber-300 text-[11px] tracking-[0.2em] uppercase font-semibold"
+                    : "text-cyan-300 text-[11px] tracking-[0.2em] uppercase"
+                }
+              >
+                {progress.phase === "reading"
+                  ? t("compress.phase.reading")
+                  : progress.phase === "decrypting"
+                  ? "Descifrando"
+                  : progress.phase === "reassembling"
+                  ? "Reensamblando"
+                  : progress.phase === "recovering"
+                  ? "🚨 " + t("compress.phase.recovering")
+                  : progress.phase === "done"
+                  ? t("compress.phase.done")
+                  : t("compress.phase.processing")}
+              </div>
+              <div className="text-white text-[20px] font-semibold tabular-nums">
+                {progress.bytes_total > 0
+                  ? `${((progress.bytes_done / progress.bytes_total) * 100).toFixed(1)}%`
+                  : "—"}
+              </div>
+            </div>
+            <div className="h-2 bg-white/[0.04] rounded-full overflow-hidden mb-2">
+              <div
+                className={
+                  progress.phase === "recovering"
+                    ? "h-full bg-gradient-to-r from-amber-400 to-amber-500 rounded-full transition-all duration-200"
+                    : "h-full bg-gradient-to-r from-cyan-400 to-cyan-500 rounded-full transition-all duration-200"
+                }
+                style={{
+                  width: `${
+                    progress.bytes_total > 0
+                      ? Math.min(
+                          100,
+                          (progress.bytes_done / progress.bytes_total) * 100
+                        )
+                      : 0
+                  }%`,
+                }}
+              />
+            </div>
+            <div className="flex items-center justify-between text-[11.5px] text-zinc-400 tabular-nums">
+              <span className="truncate max-w-md">
+                {progress.current_file || "—"}
+              </span>
+              <span>
+                {prettyBytes(progress.bytes_done)} / {prettyBytes(progress.bytes_total)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-[10.5px] text-zinc-500 tabular-nums mt-1">
+              <span>
+                {progress.elapsed_ms > 0 ? formatMs(progress.elapsed_ms) : "—"}
+                <span className="text-zinc-700 mx-1.5">·</span>
+                {progress.bytes_per_sec > 0 ? formatRate(progress.bytes_per_sec) : "—"}
+              </span>
+              <span>
+                {progress.eta_ms > 0
+                  ? `ETA ${formatMs(progress.eta_ms)}`
+                  : "ETA —"}
+              </span>
+            </div>
+          </div>
+        )}
+
         {error && (
           <div className="mt-4 p-4 rounded-xl bg-red-500/[0.08] border border-red-500/20 text-red-400 text-[13px]">
             {error}
@@ -868,6 +1016,21 @@ function DetailStat({ label, value }: { label: string; value: string }) {
       <div className="text-white text-[18px] font-medium tabular-nums">{value}</div>
     </div>
   );
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m === 0) return `${s} s`;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function formatRate(bps: number): string {
+  if (bps >= 1024 * 1024) return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
+  if (bps >= 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+  return `${bps.toFixed(0)} B/s`;
 }
 
 function prettyBytes(n: number): string {
