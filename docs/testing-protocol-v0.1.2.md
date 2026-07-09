@@ -140,7 +140,8 @@ RAR adds it but charges). NexusRAR v0.1.2 does it out of the box.
 1. Compress a 5 MiB test file with **High recovery (25%)**:
    - In the GUI: tick encryption, set recovery to `Alta (25%)`, password anything.
    - The output will be `.nxr` (encryption + recovery).
-   - For a 5 MiB input → roughly **5.2 MiB** output (extra 25% parity shards).
+   - For a 5 MiB input → roughly **6.6 MiB** output (compression ratio 0.79× on
+     incompressible random data, plus 25% parity shards).
 
 2. **Make a backup copy** — the next step is destructive:
    ```bash
@@ -151,21 +152,61 @@ RAR adds it but charges). NexusRAR v0.1.2 does it out of the box.
 
 4. Locate a data-shard region. The first 64 bytes are the **V3 header**
    (you can identify it by the `NXR\0` magic at offset 0). The actual data
-   shards start at byte 64 and are contiguous from there. Each shard is
-   **64 KiB + 16 bytes GCM tag** = **65,552 bytes** (`0x10018`).
+   shards start at byte 64 and are contiguous from there.
+
+   **Shard frame layout** (per shard):
+   ```
+   [u32 frame_len (4 bytes, LE)] [ciphertext (≈64 KiB)] [GCM tag (16 bytes)]
+   ```
+
+   For a 5 MiB random input with HIGH recovery (81 data shards + 21 parity),
+   `frame_len` is **64,762 bytes** (ciphertext = 64,746 bytes + 16-byte tag).
+   Each frame is therefore **64,766 bytes** total.
 
 5. Pick a shard to "lose" — say **shard #5** (the 6th shard, zero-indexed).
    Its byte offset in the file is:
 
    ```
-   64 (header) + 5 × 65552 = 328,324 → 0x50064 + 0x40 = 0x500A4
+   frame_start = 64 (header) + 5 × 64,766 = 323,894 (0x4F136)
    ```
+
+   Inside the frame, the layout is:
+   ```
+   [0..4]      : u32 frame_len (LE) — DO NOT corrupt this; see "Critical
+                  warning" below
+   [4..64750]  : ciphertext body — safe to corrupt anywhere here
+   [64750..64766]: 16-byte GCM tag — DO NOT corrupt this; it's how the
+                   decoder detects tampering
+   ```
+
+   **Recommended corruption zone for shard #5:**
+   - Offset `324,398` to `388,640` (hex `0x4F3FE` to `0x5EDF0`)
+   - Pick a starting offset like `324,400` (≈500 bytes into the ct body,
+     well clear of both the frame_len at the start and the GCM tag at the end).
 
 6. In the hex editor, select **4096 bytes** starting at that offset and
    overwrite them with **all zeros** (`00 00 00 00 ...`). This simulates
-   4 KiB of physical disk corruption inside shard #5.
+   4 KiB of physical disk corruption inside shard #5's ciphertext body.
 
 7. Save the file.
+
+> ⚠️ **CRITICAL WARNING — do NOT corrupt the `frame_len` or the GCM tag.**
+> The frame layout has two unprotected-as-in-non-authenticated fields:
+> the 4-byte `frame_len` at the start of each frame, and the 16-byte GCM
+> tag at the end. **Neither is authenticated** in the V3 wire format
+> (intentional — the tag authenticates the *content* of the next frame,
+> not the frame_len of the current one).
+>
+> If you zero out a `frame_len` field, the decoder will read the next
+> frame from the wrong offset, cascade into all subsequent frames, and
+> you'll end up with 100+ "empty" shards instead of 1 corrupt one. The
+> recovery will then legitimately fail because the corruption appears to
+> exceed the parity budget — but it's YOUR test setup, not the code.
+>
+> Always corrupt **inside the ciphertext body**, away from both ends.
+> Anywhere from `frame_start + 4 + 500` to `frame_start + frame_len - 500`
+> is safe (the 500-byte margin protects against accidentally hitting the
+> tag at the end).
 
 8. Switch to the **Descomprimir** pane in NexusRAR.
 9. Drag the **corrupted** `.nxr` (NOT the backup) into the drop zone.
@@ -209,16 +250,33 @@ cmp ~/Desktop/test.bin ~/Desktop/test_restored/test.bin
 head -c 5242880 /dev/urandom > /tmp/big.bin
 nexus c --password 'demo' --recovery high /tmp/big.bin /tmp/big.nxr
 
-# 2. Corrupt 4 KiB inside shard #5 (offset = 64 + 5*65552 = 328324)
-printf '\x00%.0s' $(seq 1 4096) | dd of=/tmp/big.nxr \
-    bs=1 seek=328324 count=4096 conv=notrunc
+# 2. Read the actual frame_len from the file (so the offset math is
+#    correct for ANY file size / recovery level). The first shard's
+#    frame_len field tells us the stride.
+FRAME_LEN=$(xxd -s 64 -l 4 -p /tmp/big.nxr | python3 -c 'import sys; print(int(sys.stdin.read(), 16))')
+STRIDE=$((FRAME_LEN + 4))
+echo "frame_len=$FRAME_LEN, stride=$STRIDE"
 
-# 3. Decrypt + recover
+# 3. Corrupt 4 KiB inside shard #5's ciphertext body. The frame_start
+#    for shard 5 is 64 + 5*STRIDE; we add another 4 to skip the frame_len
+#    header and another 500 to land safely inside the ct body (well
+#    clear of the 16-byte GCM tag at the end).
+CORRUPT_OFFSET=$((64 + 5 * STRIDE + 4 + 500))
+echo "Corrupting at offset $CORRUPT_OFFSET"
+printf '\x00%.0s' $(seq 1 4096) | dd of=/tmp/big.nxr \
+    bs=1 seek=$CORRUPT_OFFSET count=4096 conv=notrunc
+
+# 4. Decrypt + recover
 nexus d --password 'demo' /tmp/big.nxr /tmp/big_restored.bin
 
-# 4. Verify exact match
+# 5. Verify exact match
 cmp /tmp/big.bin /tmp/big_restored.bin && echo "✓ Recovery OK"
 ```
+
+> The earlier draft of this doc had a hardcoded offset (`328324`) that
+> assumed `shard_size = 65536`. That's wrong for v0.1.2 — actual shard
+> size depends on the compressed buffer's length. Use the dynamic
+> `STRIDE` calculation above and you can't get the offset wrong.
 
 ---
 
