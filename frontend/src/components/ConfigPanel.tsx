@@ -539,7 +539,7 @@ export function AboutPanel() {
       title={t("settings.section.about")}
       hint="Información técnica y enlaces."
     >
-      <InfoRow label={t("settings.about.version")} value="0.1.1" mono />
+      <InfoRow label={t("settings.about.version")} value="0.1.2" mono />
       <InfoRow label={t("settings.about.engine")} value="NexusCompress v6 Solid-AST" mono />
       <InfoRow
         label="GitHub"

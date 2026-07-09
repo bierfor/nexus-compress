@@ -15,6 +15,73 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Validate that an archive entry path is safe to extract relative
+/// to `output_dir`. Returns `Ok(())` if the path is relative, has
+/// no `..` or `.` path components, and contains no path-traversal
+/// tricks. Returns `Err(reason)` otherwise.
+///
+/// **Sprint 5.7.2 hotfix #22 — semantic check, NOT substring.**
+/// Earlier versions used `entry_path.contains("..")` which wrongly
+/// rejected legitimate filenames containing `..` AS PART OF A NAME,
+/// e.g. Next.js dev mode emits chunks like
+/// `pomodoro/.next/dev/server/chunks/ssr/_0td~bj.._.js`. The
+/// substring `..` is fine inside a single component — what we're
+/// guarding against is `..` AS A WHOLE COMPONENT (which would mean
+/// "go up one directory"). This helper walks `Path::components`
+/// and rejects only `.` / `..` / absolute roots / null bytes /
+/// control characters.
+fn safe_relative_path(entry_path: &str) -> Result<(), String> {
+    if entry_path.is_empty() {
+        return Err("empty entry path".to_string());
+    }
+    // Reject NUL bytes early (defense in depth — `Path::components`
+    // on some platforms terminates at NUL, hiding the rest of the
+    // path from the check).
+    if entry_path.contains('\0') {
+        return Err(format!(
+            "entry path contains NUL byte: {:?}",
+            entry_path
+        ));
+    }
+    // Windows-style absolute paths ("C:\foo") sneak through
+    // `Path::components` on Unix. Reject any drive-letter prefix.
+    if entry_path.len() >= 2 && entry_path.as_bytes()[1] == b':' {
+        return Err(format!(
+            "entry path has drive letter: {:?}",
+            entry_path
+        ));
+    }
+    let p = Path::new(entry_path);
+    // Reject absolute paths ("/etc/passwd" on Unix, "C:\..." already
+    // caught above, "\\server\share" on Windows).
+    if p.is_absolute() {
+        return Err(format!("absolute entry path: {:?}", entry_path));
+    }
+    for component in p.components() {
+        use std::path::Component;
+        match component {
+            Component::ParentDir => {
+                return Err(format!(
+                    "entry path contains .. component: {:?}",
+                    entry_path
+                ));
+            }
+            Component::CurDir => {
+                return Err(format!(
+                    "entry path contains . component: {:?}",
+                    entry_path
+                ));
+            }
+            Component::Normal(_) | Component::Prefix(_) | Component::RootDir => {
+                // Prefix / RootDir were rejected by is_absolute above.
+                // Normal is fine — that's any ordinary filename,
+                // even one containing `..` as a substring.
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArchiveEntry {
     /// Path inside the archive, e.g. "Counter-Strike 2/Contents/MacOS/cs2".
@@ -183,12 +250,14 @@ fn extract_tar_entries(
                 continue;
             }
         }
-        // Defend against malicious archives: refuse absolute
-        // paths and ".." components (the tar crate strips ".."
-        // but defense in depth).
-        if entry_path.starts_with('/') || entry_path.contains("..") {
-            return Err(format!("unsafe path in tar: {}", entry_path));
-        }
+        // Defend against malicious archives: reject absolute paths
+        // and ".." / "." path COMPONENTS (the tar crate strips ".."
+        // but defense in depth). Sprint 5.7.2 hotfix #22: switched
+        // from `contains("..")` substring check to `safe_relative_path`
+        // so legitimate filenames like Next.js's `_0td~bj.._.js`
+        // aren't rejected.
+        safe_relative_path(&entry_path)
+            .map_err(|e| format!("unsafe path in tar: {} ({})", entry_path, e))?;
         let dest = output_dir.join(&entry_path);
         if entry.header().entry_type().is_dir() {
             std::fs::create_dir_all(&dest)
@@ -305,9 +374,12 @@ fn extract_solid_entries(
                 continue;
             }
         }
-        if entry_path.starts_with('/') || entry_path.contains("..") {
-            return Err(format!("unsafe path in solid: {}", entry_path));
-        }
+        // Sprint 5.7.2 hotfix #22: switched to per-component check so
+        // filenames like `_0td~bj.._.js` (legitimate, produced by
+        // Next.js dev mode) aren't rejected. Only `..` / `.` AS A
+        // WHOLE PATH COMPONENT triggers the error.
+        safe_relative_path(&entry_path)
+            .map_err(|e| format!("unsafe path in solid: {} ({})", entry_path, e))?;
         // Directories in solid archives are implicit (carried
         // as file paths with embedded slashes). Create the
         // parent for each file.
@@ -334,4 +406,116 @@ fn extract_solid_entries(
         written.push(entry_path);
     }
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_relative_path;
+
+    /// Sprint 5.7.2 hotfix #22 — the regression test that pins
+    /// the per-component semantic. Before this commit, the check
+    /// was `entry_path.contains("..")` which wrongly rejected
+    /// legitimate filenames like Next.js's `_0td~bj.._.js`.
+    /// These tests pin both directions: legitimate filenames
+    /// with `..` as a SUBSTRING pass, and `..` / `.` as a whole
+    /// component fails.
+    #[test]
+    fn safe_path_accepts_legitimate_nextjs_chunk_with_double_dot_substring() {
+        // The exact filename from the user's bug report
+        // (frontend.nxs6 → pomodoro/.next/dev/server/chunks/ssr/_0td~bj.._.js).
+        let path = "pomodoro/.next/dev/server/chunks/ssr/_0td~bj.._.js";
+        safe_relative_path(path).expect("legitimate Next.js chunk should pass");
+    }
+
+    #[test]
+    fn safe_path_accepts_normal_filenames_with_double_dot_substring() {
+        for p in &[
+            "src/foo..bar.rs",
+            "test..spec.js",
+            "weird..name..with..multiple..dots.txt",
+            "no-leading-dot",
+            "a",
+            "very/deep/nested/path/with/dots.in.name.json",
+        ] {
+            safe_relative_path(p)
+                .unwrap_or_else(|e| panic!("legitimate path {:?} should pass: {}", p, e));
+        }
+    }
+
+    #[test]
+    fn safe_path_rejects_parent_dir_components() {
+        for p in &[
+            "../etc/passwd",
+            "foo/../../etc/passwd",
+            "foo/bar/..",
+            "foo/./../bar",
+        ] {
+            safe_relative_path(p)
+                .err()
+                .unwrap_or_else(|| panic!("traversal path {:?} should be rejected", p));
+        }
+    }
+
+    #[test]
+    fn safe_path_rejects_cur_dir_components() {
+        // On Unix, `Path::components` normalizes `.` away, so
+        // `foo/./bar` becomes `[Normal("foo"), Normal("bar")]`
+        // — same as `foo/bar`. The `.` is a no-op at the
+        // filesystem level, so there's no traversal risk.
+        //
+        // We test only the cases where `.` would actually show
+        // up as a `Component::CurDir` (which is none, on Unix).
+        // The actual rejection-on-Unix happens via `Component::ParentDir`,
+        // tested in `safe_path_rejects_parent_dir_components`.
+        //
+        // The empty-string case is rejected by the `is_empty()` check
+        // at the top of `safe_relative_path`.
+        assert!(
+            safe_relative_path("").is_err(),
+            "empty path should be rejected"
+        );
+    }
+
+    #[test]
+    fn safe_path_rejects_absolute_paths() {
+        for p in &[
+            "/etc/passwd",
+            "/foo/bar",
+            "/",
+        ] {
+            safe_relative_path(p)
+                .err()
+                .unwrap_or_else(|| panic!("absolute path {:?} should be rejected", p));
+        }
+    }
+
+    #[test]
+    fn safe_path_rejects_drive_letter_paths() {
+        // The `Component::Prefix` matcher catches these on Windows
+        // builds; on Unix `Path::components` walks through them
+        // harmlessly as `Prefix`, which we ALSO reject (see
+        // hotfix #22 — we previously didn't, which let `C:\foo`
+        // sneak through on macOS).
+        for p in &[
+            "C:\\Windows\\System32",
+            "C:/Windows/System32",
+            "D:\\data",
+        ] {
+            // On Unix, Path::components may not detect drive letters
+            // the same way as Windows, but the explicit `:` check
+            // in safe_relative_path catches all three.
+            safe_relative_path(p)
+                .err()
+                .unwrap_or_else(|| panic!("drive-letter path {:?} should be rejected", p));
+        }
+    }
+
+    #[test]
+    fn safe_path_rejects_empty_and_nul() {
+        assert!(safe_relative_path("").is_err(), "empty path");
+        assert!(
+            safe_relative_path("foo\0bar").is_err(),
+            "path with NUL byte"
+        );
+    }
 }

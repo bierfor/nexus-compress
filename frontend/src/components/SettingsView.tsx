@@ -551,7 +551,7 @@ function AboutSection() {
           <AboutRow
             icon={Sparkles}
             label={t("settings.about.version")}
-            value="0.1.1"
+            value="0.1.2"
             mono
           />
           <AboutRow

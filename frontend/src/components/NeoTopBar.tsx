@@ -86,7 +86,7 @@ export function NeoTopBar({
       {/* Version + theme toggle */}
       <div className="w-[120px] flex justify-end items-center gap-2">
         <span className="text-zinc-500 text-[11px] font-mono tracking-wide tabular-nums px-2 py-0.5 rounded-md border border-white/[0.06]">
-          v0.1.1
+          v0.1.2
         </span>
         <button
           onClick={toggle}
