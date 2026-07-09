@@ -230,10 +230,17 @@ export function DecompressView({
   // Subscribe to the 'compress-progress' event from the Rust backend.
   // Sprint 5.7.2 hotfix #23: DecompressView was missing this listener
   // entirely (only CompressView had it), so the progress bar / elapsed
-  // time / throughput / ETA never updated during extraction. The
-  // backend's throttled emitter pushes a ProgressEvent every 100ms;
-  // we re-derive `busy` from `phase !== "done"` so the progress
-  // card shows during any extract operation.
+  // time / throughput / ETA never updated during extraction.
+  //
+  // Implementation note: registered ONCE on mount with empty dep
+  // array — re-registering on every `busy` toggle caused events to
+  // slip through the unlisten/listen race window. We accept ALL
+  // events here; the progress card only renders when `progress` is
+  // non-null, and the only events we get when not extracting come
+  // from the peek path (small bytes_total, set by setProgress
+  // briefly then cleared on the next user action). The peek bar
+  // flicker is acceptable; the alternative was a window of lost
+  // events during the busy=false→true transition.
   useEffect(() => {
     if (!isTauri) return;
     let unlisten: (() => void) | undefined;
@@ -245,10 +252,6 @@ export function DecompressView({
           const p = e?.payload;
           if (!p) return;
           const phase = String(p.phase ?? "");
-          // Skip if we're not extracting (the peek path also emits
-          // events with very small bytes_total — we don't want the
-          // bar flashing during peek).
-          if (phase === "reading" && !busy) return;
           setProgress({
             phase,
             current_file: String(p.current_file ?? ""),
@@ -272,7 +275,8 @@ export function DecompressView({
       }
     })();
     return () => unlisten?.();
-  }, [busy]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Peek archive on path change
   useEffect(() => {
