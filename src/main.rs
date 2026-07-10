@@ -534,28 +534,67 @@ fn walk_dir(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
 /// like FlowNow (164k files, mostly inside `.claude`/`.next`/cache
 /// dirs) it took 10+ minutes just to walk the filesystem. Now we
 /// short-circuit at the skip-list directories.
+///
+/// Sprint 5.7.7 hotfix #55: the skip-list now respects the
+/// `NEXUS_CORPUS_MODE` env var. `Everything` mode (the 5.7.7
+/// default) skips NOTHING — the user explicitly chose to
+/// include the full directory. The previous hardcoded
+/// skip-list was inconsistent with the GUI: the GUI's
+/// "Everything" mode was passing the env var to
+/// `walk_dir_for_solid` in api.rs (which then used the
+/// CorpusMode-aware skip list), but the CLI was using this
+/// separate, mode-blind skip list. Result: the GUI and
+/// the CLI behaved differently on the same directory. Now
+/// they both honour the env var.
 fn walk_dir_with_skip(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+    let mode_str = std::env::var("NEXUS_CORPUS_MODE").unwrap_or_default();
+    let mode = CorpusModeLike::from(&mode_str);
     let mut out = Vec::new();
-    walk_with_skip_recursive(root, root, &mut out)?;
+    walk_with_skip_recursive(root, root, &mut out, mode)?;
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
-
-const SKIP_DIRS: &[&str] = &[
-    ".next", ".turbo", ".swc", ".claude", ".nexus", "node_modules",
-    "target", ".venv", "venv", "__pycache__", ".git", ".DS_Store",
-    "dist", "build", ".cache", ".tmp", "coverage", ".nyc_output",
-    "logs", "log", ".run",
-];
-
-fn should_skip(name: &str) -> bool {
+/// Per-mode skip lists. Source mode (the 5.7.6 default)
+/// skipped dev caches / lock files. Minimal mode adds
+/// assets/docs. Everything mode skips nothing.
+fn should_skip_dir(name: &str, mode: CorpusModeLike) -> bool {
+    if matches!(mode, CorpusModeLike::Everything) {
+        return false;
+    }
+    const SKIP_DIRS: &[&str] = &[
+        ".next", ".turbo", ".swc", ".claude", ".nexus", "node_modules",
+        "target", ".venv", "venv", "__pycache__", ".git", ".DS_Store",
+        "dist", "build", ".cache", ".tmp", "coverage", ".nyc_output",
+        "logs", "log", ".run",
+    ];
     SKIP_DIRS.iter().any(|s| *s == name)
+}
+
+/// Local enum that mirrors `nexus_compress::api::CorpusMode`
+/// so the CLI can decide skip rules without depending on
+/// the full api module. Kept in sync with api.rs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CorpusModeLike {
+    Everything,
+    Source,
+    Minimal,
+}
+impl CorpusModeLike {
+    fn from(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "everything" | "all" | "full" => Self::Everything,
+            "source" | "src" | "code" => Self::Source,
+            "minimal" | "min" => Self::Minimal,
+            _ => Self::Everything, // default 5.7.7
+        }
+    }
 }
 
 fn walk_with_skip_recursive(
     root: &Path,
     dir: &Path,
     out: &mut Vec<(String, Vec<u8>)>,
+    mode: CorpusModeLike,
 ) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -566,19 +605,21 @@ fn walk_with_skip_recursive(
         };
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            if should_skip(name) {
+            if should_skip_dir(name, mode) {
                 eprintln!("[WALK-SKIP] {}/", path.display());
                 continue;
             }
-            walk_with_skip_recursive(root, &path, out)?;
+            walk_with_skip_recursive(root, &path, out, mode)?;
         } else if file_type.is_file() {
-            // Skip lock files of lock-file managers' caches.
-            if name == "package-lock.json"
-                || name == "pnpm-lock.yaml"
-                || name == "yarn.lock"
-                || name == "bun.lockb"
-                || name.ends_with(".tsbuildinfo")
-                || name.ends_with(".pid")
+            // Skip lock files of lock-file managers' caches (only in
+            // Source / Minimal mode, not Everything).
+            if !matches!(mode, CorpusModeLike::Everything)
+                && (name == "package-lock.json"
+                    || name == "pnpm-lock.yaml"
+                    || name == "yarn.lock"
+                    || name == "bun.lockb"
+                    || name.ends_with(".tsbuildinfo")
+                    || name.ends_with(".pid"))
             {
                 continue;
             }
