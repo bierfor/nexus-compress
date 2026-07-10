@@ -22,6 +22,18 @@
 //!    (preserves indentation as a single tab/space, removes column
 //!    alignment noise).
 //!
+//! ## String-aware comment stripping (Sprint 5.7.3 hotfix #48)
+//!
+//! Steps 5 and 6 only fire OUTSIDE string literals. Inside a
+//! double-quoted string (`"..."`), single-quoted string
+//! (`'...'`, used by Python/shell/JSON-ish), or backtick
+//! template literal (`` `...` ``, JS/TS) we treat the content
+//! as opaque: `//` and `/*` inside the string are NEVER taken
+//! for comment markers. Escaped quotes (`\"`, `\'`, `` \` ``)
+//! inside a string do not end it. This fixes the regression
+//! where `https://example.com` got truncated to `https:`
+//! because the lexer mistook the `//` for a comment start.
+//!
 //! This is conservative — it doesn't rename identifiers (that would
 //! require a real AST parser) but it's safe for any text and ~2x
 //! the ratio on code without risk of corruption.
@@ -47,6 +59,11 @@
 /// Returns the input unchanged if it doesn't look like text (e.g.
 /// a binary file or a `.zip`). The check is: more than 90% of
 /// bytes are printable ASCII or whitespace, AND no NUL bytes.
+///
+/// Sprint 5.7.3 hotfix #48: the stripper is now string-aware.
+/// Comments (`//`, `/* */`) and string contents are tracked
+/// through a small state machine so the two never collide —
+/// `https://example.com` stays whole, `"a // b"` stays whole.
 pub fn minify(input: &[u8]) -> Vec<u8> {
     if !looks_textual(input) {
         return input.to_vec();
@@ -64,29 +81,83 @@ pub fn minify(input: &[u8]) -> Vec<u8> {
         chars.next();
     }
 
-    let mut in_block_comment = false;
-    let mut last_was_newline = true; // we are at "line start"
-                                     // Whitespace inside a line: track that we need to emit a single
-                                     // space at the next non-whitespace char, but never more than one
-                                     // (collapse runs).
+    // Sprint 5.7.3 hotfix #48: string-aware state machine.
+    //
+    // The previous version had a single `in_block_comment` bool
+    // and treated any `//` (line 86) as a comment start, even
+    // when the `//` was inside a string literal. That truncated
+    // every `https://` URL in the corpus to `https:`, mangled
+    // URLs in package.json, broke comment-as-string in JSON
+    // configs, etc.
+    //
+    // The new design uses an explicit three-state lexer:
+    //   * `Normal`     — looking for comments or string opens
+    //   * `InString`   — opaque content; only the matching
+    //                    delimiter or its escape sequence ends
+    //                    the string
+    //   * `InBlock`    — opaque content; only `*/` ends the
+    //                    block comment
+    //
+    // String delimiters we honour: `"`, `'`, `` ` ``. The escape
+    // rule is a single backslash: `\"` inside a `"` string does
+    // not close the string. This is enough for the corpus we
+    // see (JSON, JS/TS, Python, shell, Markdown) without pulling
+    // in a real parser.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Lex {
+        Normal,
+        InString(char),
+        InBlock,
+    }
+    let mut lex = Lex::Normal;
+    let mut last_was_newline = true;
     let mut pending_space = false;
 
     while let Some(c) = chars.next() {
-        // Inside a block comment: look for `*/`.
-        if in_block_comment {
+        // ── Inside a block comment: look only for `*/`.
+        if lex == Lex::InBlock {
             if c == '*' && chars.peek() == Some(&'/') {
                 chars.next();
-                in_block_comment = false;
+                lex = Lex::Normal;
             }
-            // else: drop the char
             continue;
         }
 
+        // ── Inside a string: copy verbatim, only the
+        //    matching delimiter (or its escape) ends it.
+        if let Lex::InString(delim) = lex {
+            out.push(c);
+            // Backslash escapes the next char. Honour it so a
+            // `\"` inside a `"` string does not end the
+            // string. We do NOT validate the escaped char
+            // (e.g. \u inside JSON) — we just preserve it.
+            if c == '\\' {
+                if let Some(&next) = chars.peek() {
+                    chars.next();
+                    out.push(next);
+                }
+                continue;
+            }
+            if c == delim {
+                lex = Lex::Normal;
+            }
+            // Track newlines inside strings so the blank-line
+            // collapse pass below doesn't drop them.
+            if c == '\n' {
+                last_was_newline = true;
+            } else {
+                last_was_newline = false;
+            }
+            continue;
+        }
+
+        // ── Normal mode: comments + string opens + whitespace
+        //    + real chars. Order matters — comment checks
+        //    first, then string opens, then whitespace.
+
         // Line comment: `//` to EOL.
         if c == '/' && chars.peek() == Some(&'/') {
-            // Consume until newline. The pending space (if any) is
-            // discarded because it would be trailing whitespace on
-            // this line.
+            chars.next();
             pending_space = false;
             for nc in chars.by_ref() {
                 if nc == '\n' {
@@ -101,15 +172,29 @@ pub fn minify(input: &[u8]) -> Vec<u8> {
         // Block comment start: `/* ... */`.
         if c == '/' && chars.peek() == Some(&'*') {
             chars.next();
-            in_block_comment = true;
+            lex = Lex::InBlock;
             pending_space = false;
+            continue;
+        }
+
+        // String open. Three delimiters we care about:
+        //   `"` — JSON, JS/TS, C, Rust, most config files
+        //   `'` — Python, shell, .ini, .env, JSX-ish
+        //   `` ` `` — JS/TS template literals
+        if c == '"' || c == '\'' || c == '`' {
+            // Flush any pending space, then enter the string.
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(c);
+            lex = Lex::InString(c);
+            last_was_newline = false;
             continue;
         }
 
         // Newline handling: collapse blank-line runs.
         if c == '\n' {
-            // Drop the pending space (would be trailing whitespace
-            // before the newline).
             pending_space = false;
             if !last_was_newline {
                 out.push('\n');
@@ -124,18 +209,15 @@ pub fn minify(input: &[u8]) -> Vec<u8> {
                 out.push('\n');
                 last_was_newline = true;
             }
-            // Drop a trailing \n if the next char is also \n.
             if chars.peek() == Some(&'\n') {
                 chars.next();
             }
             continue;
         }
 
-        // Whitespace inside a line: collapse to a single pending space.
+        // Whitespace inside a line: collapse to a single pending
+        // space.
         if c.is_whitespace() {
-            // Don't queue a space at the start of a line (it would
-            // be leading indentation, which the trailing-strip pass
-            // would drop anyway).
             if !last_was_newline {
                 pending_space = true;
             }
@@ -298,5 +380,113 @@ mod tests {
             original.len(),
             minified.len()
         );
+    }
+
+    // Sprint 5.7.3 hotfix #48: regression tests for the
+    // string-aware stripper. Each test reproduces a concrete
+    // failure that the old `//` regex produced on the user's
+    // corpus (vercel.json, package.json, etc.) and asserts the
+    // post-fix output is what we expect.
+
+    #[test]
+    fn minify_preserves_https_url_in_string() {
+        // The original bug: `https://openapi.vercel.sh/vercel.json`
+        // got truncated to `https:` because the lexer mistook
+        // the `//` inside the string for a comment start.
+        let s = b"\"$schema\": \"https://openapi.vercel.sh/vercel.json\"";
+        let out = String::from_utf8(minify(s)).unwrap();
+        assert!(
+            out.contains("https://openapi.vercel.sh/vercel.json"),
+            "https:// URL must stay whole, got: {:?}",
+            out
+        );
+        // The truncation signature was a `//` EOL strip inside
+        // the string, which would have produced output ending
+        // with `"https:` (no second slash, no domain). We assert
+        // the *full* URL survives, which is the actual invariant.
+    }
+
+    #[test]
+    fn minify_preserves_http_url_in_string() {
+        let s = b"\"cdn\": \"http://cdn.example.com/v1\"";
+        let out = String::from_utf8(minify(s)).unwrap();
+        assert!(out.contains("http://cdn.example.com/v1"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn minify_preserves_slash_inside_json_string() {
+        // The classic JSON trap: a `//` inside a string is
+        // data, not a comment.
+        let s = b"{\"comment\": \"// this is not a comment\"}";
+        let out = String::from_utf8(minify(s)).unwrap();
+        assert!(out.contains("// this is not a comment"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn minify_strips_real_json_comment_after_value() {
+        // Outside any string, a real `//` IS a comment and
+        // must be stripped. This guards against the obvious
+        // over-fix: making the stripper so cautious it stops
+        // working on actual comments.
+        let s = b"{\n  \"k\": \"v\" // real comment\n}\n";
+        let out = String::from_utf8(minify(s)).unwrap();
+        assert!(out.contains("\"k\": \"v\""), "got: {:?}", out);
+        assert!(!out.contains("real comment"), "real comment should be stripped, got: {:?}", out);
+    }
+
+    #[test]
+    fn minify_handles_escaped_quote_in_string() {
+        // JSON allows `\"` inside a string. The stripper must
+        // not interpret the `\"` as "end of string" — the
+        // backslash escapes the quote.
+        let s = b"{\"q\": \"he said \\\"// hi\\\" ok\"}";
+        let out = String::from_utf8(minify(s)).unwrap();
+        assert!(out.contains("\\\"// hi\\\""), "escaped quotes and // inside must stay whole, got: {:?}", out);
+    }
+
+    #[test]
+    fn minify_handles_single_quoted_strings() {
+        // Python / shell / .env use single quotes.
+        let s = b"url = 'https://example.com/path'";
+        let out = String::from_utf8(minify(s)).unwrap();
+        assert!(out.contains("https://example.com/path"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn minify_handles_backtick_template_literals() {
+        // JS/TS template literals.
+        let s = b"const url = `https://api.example.com/v1/users`;";
+        let out = String::from_utf8(minify(s)).unwrap();
+        assert!(out.contains("https://api.example.com/v1/users"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn minify_strips_url_outside_string() {
+        // A `//` followed by stuff to EOL is a comment even
+        // when the rest of the line looks URL-ish. This is
+        // correct behaviour — outside a string, `//` is a
+        // comment.
+        let s = b"// https://example.com\nlet x = 1;\n";
+        let out = String::from_utf8(minify(s)).unwrap();
+        assert!(!out.contains("https://"), "comment-line URL should be stripped, got: {:?}", out);
+        assert!(out.contains("let x = 1;"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn minify_preserves_path_with_double_slash() {
+        // Unix paths with `//` (e.g. SMB shares, empty path
+        // components) appear in config files.
+        let s = b"\"mount\": \"//nas.local/share/data\"";
+        let out = String::from_utf8(minify(s)).unwrap();
+        assert!(out.contains("//nas.local/share/data"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn minify_does_not_break_on_unterminated_string() {
+        // A file that ends mid-string must not panic. The
+        // stripper should just copy what's there.
+        let s = b"{\"k\": \"https://example.com";
+        let out = String::from_utf8(minify(s)).unwrap();
+        assert!(out.contains("https://example.com"), "got: {:?}", out);
     }
 }
