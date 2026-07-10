@@ -177,6 +177,58 @@ pub async fn compress_target_cmd(
         .get("output_dir")
         .and_then(|v| v.as_str())
         .map(PathBuf::from);
+    // Sprint 5.7.2 hotfix #47: GUI codec toggle. When the
+    // frontend sends a `codec` field (one of "auto" | "lzma" |
+    // "zstd"), we honour the choice by routing to the V6Solid
+    // pipeline with a pinned CompressionLevel instead of the
+    // legacy Auto (entropy flip) behaviour. Missing / "auto"
+    // keeps the existing path.
+    let codec_override: Option<nexus_compress::solid_archive::Codec> = req
+        .get("codec")
+        .and_then(|v| v.as_str())
+        .and_then(|s| match s.to_ascii_lowercase().as_str() {
+            "lzma" | "lzma2" => Some(nexus_compress::solid_archive::Codec::Lzma),
+            "zstd" => Some(nexus_compress::solid_archive::Codec::Zstd),
+            _ => None,
+        });
+    // Sprint 5.7.3 hotfix #49: GUI lossless toggle. When the
+    // frontend sends `lossless: true` (or `no_minify: true`),
+    // we route to the dedicated lossless entry point. The
+    // archive is bit-exact reversible (no Conservative minify,
+    // no swc AST, no entropy flip) at the cost of a worse
+    // ratio on text corpora.
+    let lossless: bool = req
+        .get("lossless")
+        .and_then(|v| v.as_bool())
+        .or_else(|| req.get("no_minify").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    // Sprint 5.7.4 hotfix #50: per-extension override lists
+    // surfaced by the GUI's Advanced panel and the CLI's
+    // `--raw-ext` / `--minify-ext` flags. Empty by default,
+    // which preserves the legacy behaviour (the encoder
+    // uses its built-in per-extension table).
+    let raw_extensions: Vec<String> = req
+        .get("raw_extensions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let minify_extensions: Vec<String> = req
+        .get("minify_extensions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let overrides = nexus_compress::solid_archive::PreprocessorOverrides::new(
+        raw_extensions,
+        minify_extensions,
+    );
     // Sprint 5.7.2 PR #4: optional encryption. When the frontend
     // includes `password` in the req, we route to the encrypted
     // pipeline (v4 codec + AES-256-GCM + optional Reed-Solomon).
@@ -226,11 +278,19 @@ pub async fn compress_target_cmd(
             };
             api::compress_target_with_password(&p, &opts, cb)
         } else {
-            api::compress_target(
+            // Sprint 5.7.3 hotfix #49: route to the lossless
+            // entry point when the GUI toggled `--lossless`.
+            // The function internally splits the lossless vs
+            // lossy paths so the call site stays a single
+            // line.
+            api::compress_target_with_codec_lossless_overrides(
                 &p,
                 backend,
                 lzma_level,
                 output_dir.as_deref(),
+                codec_override,
+                lossless,
+                &overrides,
                 cb,
             )
         }

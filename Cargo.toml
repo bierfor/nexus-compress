@@ -89,6 +89,11 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # xz-sys), battle-tested by every Linux distro and used by `xz`.
 # Pure-Rust alternative would be `xz = "0.4"`.
 xz2 = "0.1"
+# Sprint 5.7.2 hotfix #32: zstd for fast V6Solid encoding.
+# zstd ~300-500 MB/s on Apple Silicon vs LZMA9 ~20-50 MB/s.
+# Streaming API supports concatenated frames (multi-chunk = no problem).
+# `zdict_builder` feature enables dictionary training (from_samples, etc.).
+zstd = { version = "0.13", features = ["zdict_builder"] }
 # v6 AST minifier. swc_core is the meta-crate that unifies the
 # swc_ecma_parser / swc_ecma_codegen / swc_ecma_ast sub-crates
 # under a single versioned release family. Using the meta-crate
@@ -106,6 +111,12 @@ serde_json = "1"
 # test target fails to compile even though the lib target builds
 # clean. Adding it back is a no-op for the runtime (dev-dep only).
 tempfile = "3"
+# Sprint 5.7.5: zip-format-coverage tests in src/solid_archive.rs
+# use the `zip` crate to build minimal but real OOXML/ODF/iWork
+# files (docx, xlsx, pptx, epub, pages, etc.) so the format
+# roundtrip tests exercise the actual zip central directory
+# instead of stub bytes. The `zip` crate is dev-only.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Sprint 5.7.1 hotfix #21: pull `xattr` ONLY on Unix targets.
 # Declared as `optional = true` here so the `fs-xattr` feature

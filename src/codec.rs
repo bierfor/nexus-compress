@@ -181,6 +181,22 @@ where
                     };
                     bh.write(&mut out).unwrap();
                     out.extend_from_slice(&payload);
+                    // Sprint 5.7.2 hotfix #24: progress() MUST be
+                    // called for duplicates too. The previous code
+                    // skipped it (`continue` before the progress
+                    // call below), which made the bar reach 100%
+                    // on the last UNIQUE chunk and then freeze
+                    // for tens of seconds while the rest of the
+                    // duplicate chunks were processed. For
+                    // highly repetitive input (e.g. Next.js
+                    // tsconfig.tsbuildinfo caches), most chunks
+                    // are duplicates — without this fix the UI
+                    // showed "100% compressing…" for ~85s on a
+                    // 428 MB file, which looked like a hang.
+                    if total_uncompressed > 0 {
+                        let (off, len) = chunk_specs[block_id];
+                        progress((off + len) as u64);
+                    }
                     continue;
                 }
                 DedupResult::Unique { .. } => {

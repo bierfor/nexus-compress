@@ -47,33 +47,44 @@ struct Pending {
 pub struct ThrottledEmitter {
     pending: Arc<Mutex<Option<Pending>>>,
     app: AppHandle,
+    /// Sprint 5.7.2 hotfix #37: shutdown signal for the drain thread.
+    /// The drain loop checks this between sleeps; when the
+    /// ThrottledEmitter is dropped we flip it to true so the worker
+    /// exits cleanly instead of being leaked.
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ThrottledEmitter {
     pub fn new(app: AppHandle) -> Self {
         let pending = Arc::new(Mutex::new(None::<Pending>));
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         // Spawn a worker that drains the buffer every MAX_BUFFER_MS.
-        // The worker runs until the app handle is dropped (which is
-        // for the entire process lifetime in practice, since
-        // ThrottledEmitter is created per command invocation but the
-        // worker holds a clone of `pending`, not `app`).
-        //
-        // We leak a Thread on purpose — leaking a std::thread is
-        // cheaper than coordinating a shutdown channel and the
-        // thread only wakes up every MAX_BUFFER_MS.
+        // The worker now exits cleanly when `shutdown` is flipped to
+        // true (see Drop impl) — no more zombie threads after every
+        // compress/decompress call.
         let pending_for_thread = pending.clone();
         let app_for_thread = app.clone();
+        let shutdown_for_thread = shutdown.clone();
         std::thread::Builder::new()
             .name("throttle-emitter".into())
-            .spawn(move || drain_loop(pending_for_thread, app_for_thread))
+            .spawn(move || drain_loop(pending_for_thread, app_for_thread, shutdown_for_thread))
             .expect("failed to spawn throttle-emitter thread");
-        Self { pending, app }
+        Self { pending, app, shutdown }
     }
 
     /// Push a new event. If the throttle window has elapsed since
     /// the last emit, this event is flushed immediately; otherwise
     /// it overwrites the buffer (latest-wins for monotonic counters).
+    ///
+    /// Sprint 5.7.2 hotfix #37c: once shutdown is signaled (Drop),
+    /// feed() becomes a no-op. Without this, a slow codec still
+    /// running its last chunks would keep refilling `pending` and
+    /// the drain thread would emit the same stale "bytes_done=N"
+    /// event forever, making the UI appear stuck.
     pub fn feed<T: Serialize>(&self, name: &'static str, value: &T) {
+        if self.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let json = match serde_json::to_value(value) {
             Ok(v) => v,
             Err(_) => return, // serialization failure: silently skip
@@ -127,6 +138,13 @@ impl ThrottledEmitter {
             Err(p) => p.into_inner(),
         };
         if let Some(mut p) = guard.take() {
+            // TEMP DEBUG: dump the buffered event so we can see
+            // whether elapsed_ms is actually populated correctly
+            // when it reaches the IPC channel.
+            eprintln!("[THROTTLE:FLUSH] name={} elapsed_ms={} phase={}",
+                p.name,
+                p.value.get("elapsed_ms").map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+                p.value.get("phase").map(|v| v.to_string()).unwrap_or_else(|| "?".into()));
             let _ = self.app.emit(p.name, p.value);
             p.emitted_at = Some(Instant::now());
         }
@@ -135,6 +153,12 @@ impl ThrottledEmitter {
 
 impl Drop for ThrottledEmitter {
     fn drop(&mut self) {
+        // Sprint 5.7.2 hotfix #37: signal the drain thread to exit
+        // BEFORE flushing, so the worker doesn't race the flush()
+        // for the pending mutex. Without this, the worker would
+        // emit stale events to the GUI even after the codec
+        // finished, making the UI appear to "stuck at 100%".
+        self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
         // On drop, make sure we don't leave buffered events behind.
         self.flush();
     }
@@ -142,48 +166,62 @@ impl Drop for ThrottledEmitter {
 
 /// Background drainer. Wakes every MAX_BUFFER_MS milliseconds and
 /// emits whatever's in the buffer (if its last_input_at is older
-/// than THROTTLE_MS). Idles out cleanly when the app shuts down.
-fn drain_loop(pending: Arc<Mutex<Option<Pending>>>, app: AppHandle) {
+/// than THROTTLE_MS). Exits cleanly when the parent ThrottledEmitter
+/// is dropped (shutdown flag set to true).
+fn drain_loop(
+    pending: Arc<Mutex<Option<Pending>>>,
+    app: AppHandle,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) {
     let interval = Duration::from_millis(MAX_BUFFER_MS);
     loop {
+        // Check shutdown BEFORE sleeping so the Drop path is fast.
+        if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         std::thread::sleep(interval);
-        // Snapshot under lock, then release before emit so the
-        // IPC call doesn't block future feeds.
-        let to_emit: Option<(&'static str, serde_json::Value)> = {
+        // Check shutdown AGAIN after waking up — the Drop path may
+        // have signaled shutdown while we were sleeping. Without
+        // this second check, we'd run one more iteration and emit
+        // a stale event. Sprint 5.7.2 hotfix #37b.
+        if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        // Atomically take the pending event IF it has been
+        // sitting in the buffer longer than THROTTLE_MS.
+        // Taking it (instead of cloning) ensures we don't
+        // re-emit the same stale JSON on every tick — the
+        // next tick sees None and `continue`s. This matches
+        // what `flush()` does, so trailing-edge behavior is
+        // consistent regardless of which one wins the race.
+        let to_emit: Option<(String, serde_json::Value)> = {
             let mut guard = match pending.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            // If no event is pending, continue (don't return —
-            // the previous version's `return None` bug here
-            // would kill the drainer thread on the first
-            // empty tick, leaving any future events in the
-            // buffer with no one to flush them).
-            let pending = match guard.as_mut() {
+            let p = match guard.as_mut() {
                 Some(p) => p,
                 None => continue,
             };
             let now = Instant::now();
-            let since_input = now.duration_since(pending.last_input_at).as_millis() as u64;
-            // If the buffer has been touched recently, skip
-            // this tick — the synchronous flush in `feed()`
-            // handles the "events arriving faster than
-            // THROTTLE_MS" case. We just need the drainer
-            // to be alive for the "trailing edge" case
-            // (the last event of a compress arrived less
-            // than THROTTLE_MS ago and no more are coming).
-            // Use `continue` here, NOT `return` — the
-            // previous `return` bug would kill the drainer
-            // thread the first time we hit this branch,
-            // and then the trailing edge would never flush.
+            let since_input = now.duration_since(p.last_input_at).as_millis() as u64;
             if since_input < THROTTLE_MS {
                 continue;
             }
-            pending.emitted_at = Some(now);
-            Some((pending.name, pending.value.clone()))
+            // Atomically take ownership of the event out of
+            // the slot. The slot becomes None — any subsequent
+            // feed() will write a fresh Pending struct.
+            let owned = guard.take();
+            owned.map(|p| (p.name.to_string(), p.value))
         };
         if let Some((name, value)) = to_emit {
-            let _ = app.emit(name, value);
+            // TEMP DEBUG: log elapsed_ms of emitted event
+            eprintln!("[THROTTLE:DRAIN-EMIT] name={} elapsed_ms={} phase={} bytes_done={}",
+                name,
+                value.get("elapsed_ms").map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+                value.get("phase").map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+                value.get("bytes_done").map(|v| v.to_string()).unwrap_or_else(|| "?".into()));
+            let _ = app.emit(&name, value);
         }
     }
 }

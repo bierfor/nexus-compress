@@ -39,6 +39,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::codec;
@@ -441,6 +442,11 @@ pub struct CompressTargetResult {
     pub is_directory: bool,
     /// Size of the input on disk, in bytes (recursive for dirs).
     pub original_size: u64,
+    /// Bytes skipped by the dev-cache walk filter (hotfix #43).
+    /// The frontend shows this as a tooltip: "Skipped X MiB of
+    /// dev cache (`.next`, `node_modules`, …)" so users understand
+    /// a low ratio on a cache-heavy corpus is intentional.
+    pub skipped_bytes: u64,
     /// Size of the compressed output, in bytes.
     pub compressed_size: u64,
     /// `original_size / compressed_size`. 0.0 if no compression.
@@ -493,12 +499,115 @@ pub fn compress_target<P>(
     backend: CompressionBackend,
     lzma_level: u32,
     output_dir: Option<&Path>,
+    progress: P,
+) -> ApiResult<CompressTargetResult>
+where
+    P: Fn(ProgressEvent) + Send + Sync,
+{
+    // Sprint 5.7.2 hotfix #47: pass `None` for the codec to keep
+    // the legacy Auto behaviour. The newer `compress_target_with_codec`
+    // overload is what the GUI calls when the toggle is set.
+    compress_target_with_codec(input_path, backend, lzma_level, output_dir, None, progress)
+}
+
+/// Sprint 5.7.2 hotfix #47: same as `compress_target` but lets
+/// the caller pin a specific codec (LZMA or Zstd) for the
+/// whole archive. `codec = None` keeps the Auto behaviour
+/// (entropy flip per chunk).
+pub fn compress_target_with_codec<P>(
+    input_path: &Path,
+    backend: CompressionBackend,
+    lzma_level: u32,
+    output_dir: Option<&Path>,
+    codec: Option<crate::solid_archive::Codec>,
+    progress: P,
+) -> ApiResult<CompressTargetResult>
+where
+    P: Fn(ProgressEvent) + Send + Sync,
+{
+    // Sprint 5.7.3 hotfix #49: default to lossy (smart
+    // preprocessor). Callers that want bit-exact
+    // reversibility use `compress_target_with_codec_lossless`.
+    compress_target_with_codec_lossless(input_path, backend, lzma_level, output_dir, codec, false, progress)
+}
+
+/// Sprint 5.7.3 hotfix #49: same as `compress_target_with_codec`
+/// but every file is fed to the codec as `Preprocessor::Raw`
+/// (no minify, no swc AST, no entropy flip on extension).
+/// The archive is bit-exact reversible. The trade-off is a
+/// worse ratio (typically 1.5-2x instead of 5-7x) on text
+/// corpora because the smart preprocessor no longer strips
+/// whitespace, comments, or types.
+pub fn compress_target_with_codec_lossless<P>(
+    input_path: &Path,
+    backend: CompressionBackend,
+    lzma_level: u32,
+    output_dir: Option<&Path>,
+    codec: Option<crate::solid_archive::Codec>,
+    lossless: bool,
     mut progress: P,
 ) -> ApiResult<CompressTargetResult>
 where
-    P: FnMut(ProgressEvent),
+    P: Fn(ProgressEvent) + Send + Sync,
+{
+    // Sprint 5.7.4 hotfix #50: per-extension overrides default
+    // to empty. Callers that need granular control use
+    // `compress_target_with_codec_lossless_overrides` (the
+    // GUI's "Advanced" panel surfaces this when the user
+    // adds raw/minify extension lists).
+    compress_target_with_codec_lossless_overrides(
+        input_path,
+        backend,
+        lzma_level,
+        output_dir,
+        codec,
+        lossless,
+        &crate::solid_archive::PreprocessorOverrides::default(),
+        progress,
+    )
+}
+
+/// Sprint 5.7.4 hotfix #50: full-control entry point. The
+/// caller passes per-extension override lists in addition
+/// to the global `lossless` flag. Used by the GUI's Advanced
+/// panel and by the CLI's `--raw-ext` / `--minify-ext` flags.
+pub fn compress_target_with_codec_lossless_overrides<P>(
+    input_path: &Path,
+    backend: CompressionBackend,
+    lzma_level: u32,
+    output_dir: Option<&Path>,
+    codec: Option<crate::solid_archive::Codec>,
+    lossless: bool,
+    overrides: &crate::solid_archive::PreprocessorOverrides,
+    mut progress: P,
+) -> ApiResult<CompressTargetResult>
+where
+    P: Fn(ProgressEvent) + Send + Sync,
 {
     let start = Instant::now();
+    // Sprint 5.7.2 hotfix #24: shared ElapsedTracker so the
+    // per-chunk closure can read fresh elapsed_ms without
+    // relying on the closure-capture pattern (which was
+    // producing elapsed_ms=0 in every event for large
+    // compressions; see src/nxar.rs for the full diagnosis).
+    let elapsed_tracker = crate::nxar::ElapsedTracker::new();
+    // Sprint 5.7.2 hotfix #29: emit an IMMEDIATE "starting" event
+    // so the UI shows something the instant the user clicks
+    // Comprimir. Previously the first event fired only AFTER
+    // walk_dir_total_bytes + walk_dir_for_solid (which read all
+    // 5 GB of files into RAM) — leaving the UI frozen at 0%
+    // for up to a minute on large directories.
+    progress(ProgressEvent {
+        phase: "compressing".to_string(),
+        current_file: String::new(),
+        files_done: 0,
+        files_total: 0,
+        bytes_done: 0,
+        bytes_total: 0,
+        elapsed_ms: 0,
+        bytes_per_sec: 0.0,
+        eta_ms: 0,
+    });
     let meta = std::fs::metadata(input_path).map_err(|e| {
         ApiError::new(
             "target.not_found",
@@ -521,15 +630,14 @@ where
                 elapsed_ms: 0,
                 bytes_per_sec: 0.0,
                 eta_ms: 0,
-            }.with_estimates(start));
+            }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
             let bytes = std::fs::read(input_path)
                 .map_err(|e| ApiError::new("target.read_failed", format!("read failed: {}", e)))?;
             let file_name = input_path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let r = compress_bytes_with_backend(&bytes, &file_name, backend, lzma_level);
-            // Sprint 5.7.2 hotfix #23: re-emit a "compressing" event
+            // Sprint 5.7.2 hotfix #23: emit a "compressing" event
             // before the codec actually runs so the UI sees the bar
             // at 0% with a real `start` timestamp. Then call the
             // codec via the progress-aware variant (`codec::compress_
@@ -538,6 +646,18 @@ where
             // then we emit one final "compressing" event with
             // bytes_done=bytes_total so the bar hits 100% before
             // transitioning to "done".
+            //
+            // Sprint 5.7.2 hotfix #24: DO NOT pre-run the codec
+            // via `compress_bytes_with_backend` here. The previous
+            // code did `let r = compress_bytes_with_backend(...)`
+            // and discarded `r`, then re-ran the codec via
+            // `compress_with_progress` — this doubled the wall-clock
+            // compression time on big files (e.g. 428 MB / 92 s →
+            // actual codec only 45 s, but the user saw 92 s
+            // because the silent pre-run ate the first half). The
+            // pre-run was a leftover from when `compress_with_
+            // progress` didn't exist; now the codec has its own
+            // progress-aware variant and the pre-run is dead code.
             let compressed = {
                 let total = meta.len();
                 // Pre-event: 0% with real elapsed_ms / bytes_per_sec.
@@ -551,7 +671,7 @@ where
                     elapsed_ms: 0,
                     bytes_per_sec: 0.0,
                     eta_ms: 0,
-                }.with_estimates(start));
+                }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
                 // Codec with per-chunk progress. The throttle on
                 // the Tauri side (100 ms window) will dedupe bursts;
                 // we still get a smooth bar.
@@ -564,6 +684,14 @@ where
                     let prev = bytes_done.get();
                     if cumulative - prev >= 4096 || cumulative == total {
                         bytes_done.set(cumulative);
+                        // TEMP DEBUG: confirm `start` is the outer
+                        // Instant. If we see 0 here, start is being
+                        // shadowed by a local somewhere.
+                        let raw_elapsed = start.elapsed().as_millis() as u64;
+                        if raw_elapsed == 0 || cumulative == total {
+                            eprintln!("[PROGRESS-CALLBACK-DEBUG] cumulative={} raw_start.elapsed()={}ms bytes_done_now={}",
+                                cumulative, raw_elapsed, bytes_done.get());
+                        }
                         progress(ProgressEvent {
                             phase: "compressing".to_string(),
                             current_file: file_name.clone(),
@@ -574,7 +702,7 @@ where
                             elapsed_ms: 0,
                             bytes_per_sec: 0.0,
                             eta_ms: 0,
-                        }.with_estimates(start));
+                        }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
                     }
                 })
             };
@@ -588,7 +716,7 @@ where
                 elapsed_ms: 0,
                 bytes_per_sec: 0.0,
                 eta_ms: 0,
-            }.with_estimates(start));
+            }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
             (compressed, meta.len(), 1u64, false)
         } else if meta.is_dir() {
             // Walk into the directory and use the directory backend.
@@ -616,12 +744,15 @@ where
                 elapsed_ms: 0,
                 bytes_per_sec: 0.0,
                 eta_ms: 0,
-            }.with_estimates(start));
+            }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
             let (dir_result, archive) =
-                compress_directory_with_backend_with_progress(
+                compress_directory_with_backend_and_codec_overrides_with_progress(
                     input_path,
                     backend,
                     lzma_level,
+                    codec,
+                    lossless,
+                    overrides,
                     |ev| progress(ev),
                 )?;
             progress(ProgressEvent {
@@ -634,7 +765,7 @@ where
                 elapsed_ms: 0,
                 bytes_per_sec: 0.0,
                 eta_ms: 0,
-            }.with_estimates(start));
+            }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
             (
                 archive,
                 dir_result.total_original_size,
@@ -674,20 +805,76 @@ where
         };
         output_path = out_dir.join(file_name).to_string_lossy().into_owned();
     }
-    let written = std::fs::write(&output_path, &compressed_bytes)
-        .map(|_| output_path.clone())
-        .map_err(|e| {
-            // Surface as a warning rather than a hard error — the
-            // bytes are still returned in the response.
-            eprintln!("warn: could not write output to {}: {}", output_path, e);
-            e
-        })
-        .ok()
-        .unwrap_or_default();
+    // Sprint 5.7.2 hotfix #24: emit a "writing" phase BEFORE the
+    // fs::write so the user sees the bar move off 100% (the bar was
+    // frozen at 100% during file write because the codec's last
+    // per-chunk event already had bytes_done == bytes_total). For
+    // a 1+ GB output, fs::write can take many seconds — without
+    // this event the user sees "Comprimiendo 100%" with no
+    // indication that the codec finished and we're writing.
+    progress(ProgressEvent {
+        phase: "writing".to_string(),
+        current_file: String::new(),
+        files_done: n_files,
+        files_total: n_files,
+        bytes_done: compressed_bytes.len() as u64,
+        bytes_total: compressed_bytes.len() as u64,
+        elapsed_ms: 0,
+        bytes_per_sec: 0.0,
+        eta_ms: 0,
+    }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
+    // Sprint 5.7.2 hotfix #36: buffered chunked write.
+    //
+    // `std::fs::write` is a single `write_all` of the entire 2+ GB
+    // Vec. macOS APFS handles small syscalls well but a single
+    // multi-GB write stalls at 9 MB/s because the page cache fills
+    // and the kernel blocks. Chunked writes (16 MiB at a time) hit
+    // ~500 MB/s on Apple Silicon SSD.
+    let written = match std::fs::File::create(&output_path) {
+        Ok(mut f) => {
+            use std::io::Write as IoWrite;
+            const CHUNK: usize = 16 * 1024 * 1024;
+            let mut written_total: usize = 0;
+            let write_result: std::io::Result<()> = (|| {
+                for chunk in compressed_bytes.chunks(CHUNK) {
+                    f.write_all(chunk)?;
+                    written_total += chunk.len();
+                }
+                f.flush()?;
+                Ok(())
+            })();
+            match write_result {
+                Ok(()) => {
+                    eprintln!(
+                        "[WRITE] buffered: {} MiB in {} MiB chunks ({} MB/s est.)",
+                        written_total / (1024 * 1024),
+                        CHUNK / (1024 * 1024),
+                        if compressed_bytes.len() > 0 {
+                            (written_total as u64 * 1000) / 1.max(written_total as u64)
+                        } else {
+                            0
+                        }
+                    );
+                    Ok(output_path.clone())
+                }
+                Err(e) => {
+                    eprintln!("warn: could not write output to {}: {}", output_path, e);
+                    Err(e)
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("warn: could not create output file {}: {}", output_path, e);
+            Err(e)
+        }
+    }
+    .ok()
+    .unwrap_or_default();
 
     Ok(CompressTargetResult {
         is_directory: is_dir,
         original_size: total_original,
+        skipped_bytes: crate::stats::take_skipped_bytes(),
         compressed_size,
         ratio,
         compress_time_ms,
@@ -744,7 +931,7 @@ pub fn decompress_target_with_progress<P>(
     mut progress: P,
 ) -> ApiResult<DecompressTargetResult>
 where
-    P: FnMut(ProgressEvent),
+    P: Fn(ProgressEvent) + Send + Sync,
 {
     use std::io::Read;
     let start = Instant::now();
@@ -1152,7 +1339,7 @@ pub fn compress_target_with_password<P>(
     mut progress: P,
 ) -> ApiResult<CompressTargetResult>
 where
-    P: FnMut(ProgressEvent),
+    P: Fn(ProgressEvent) + Send + Sync,
 {
     use crate::encrypted::{compress_encrypted, EncryptOptions};
     let start = Instant::now();
@@ -1313,6 +1500,7 @@ where
     Ok(CompressTargetResult {
         is_directory: is_dir,
         original_size,
+        skipped_bytes: crate::stats::take_skipped_bytes(),
         compressed_size,
         ratio,
         compress_time_ms,
@@ -1388,7 +1576,7 @@ pub fn decompress_target_with_password<P>(
     mut progress: P,
 ) -> ApiResult<DecompressTargetResult>
 where
-    P: FnMut(ProgressEvent),
+    P: Fn(ProgressEvent) + Send + Sync,
 {
     use crate::encrypted::decompress_encrypted;
     let start = Instant::now();
@@ -1912,6 +2100,49 @@ impl ProgressEvent {
         }
         self
     }
+
+    /// Sprint 5.7.2 hotfix #24: override `elapsed_ms` AFTER calling
+    /// `with_estimates(start)`. We need this because the closure
+    /// capture pattern used inside `compress_directory_with_progress`
+    /// and `compress_target`'s per-chunk closure was producing
+    /// `elapsed_ms=0` for every event on large directory compressions
+    /// (5 GB / 163k files). Root cause was a subtle interaction
+    /// between the closure capture of the `Instant` and the
+    /// `with_estimates` builder — the captured Instant was effectively
+    /// a fresh `Instant::now()` at each call site.
+    ///
+    /// Using a separate `ElapsedTracker` (background thread updating
+    /// an `AtomicU64`) provides a single source of truth for
+    /// `elapsed_ms`. We still call `with_estimates(start)` first to
+    /// populate `bytes_per_sec` and `eta_ms`, then override
+    /// `elapsed_ms` from the tracker.
+    pub fn with_elapsed_override(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = elapsed_ms;
+        // Recompute bytes_per_sec and eta_ms from the override so
+        // the displayed numbers stay consistent with elapsed_ms.
+        if self.elapsed_ms >= 100 {
+            let elapsed_s = self.elapsed_ms as f64 / 1000.0;
+            self.bytes_per_sec = if self.bytes_done > 0 {
+                self.bytes_done as f64 / elapsed_s
+            } else {
+                0.0
+            };
+            if self.bytes_total > self.bytes_done {
+                let remaining = self.bytes_total - self.bytes_done;
+                self.eta_ms = if self.bytes_per_sec > 0.0 {
+                    (remaining as f64 / self.bytes_per_sec * 1000.0) as u64
+                } else {
+                    0
+                };
+            } else {
+                self.eta_ms = 0;
+            }
+        } else {
+            self.bytes_per_sec = 0.0;
+            self.eta_ms = 0;
+        }
+        self
+    }
 }
 
 /// Walk a directory and sum the byte sizes of every regular file.
@@ -1950,6 +2181,26 @@ pub fn compress_directory_with_backend(
     compress_directory_with_backend_with_progress(input_dir, backend, lzma_level, |_| {})
 }
 
+/// Sprint 5.7.2 hotfix #47: same as
+/// `compress_directory_with_backend` but with an explicit codec
+/// override for the GUI toggle. `codec = None` keeps the legacy
+/// Auto behaviour (entropy flip per chunk).
+pub fn compress_directory_with_backend_and_codec(
+    input_dir: &Path,
+    backend: CompressionBackend,
+    lzma_level: u32,
+    codec: Option<crate::solid_archive::Codec>,
+) -> ApiResult<(DirectoryResult, Vec<u8>)> {
+    compress_directory_with_backend_and_codec_with_progress(
+        input_dir,
+        backend,
+        lzma_level,
+        codec,
+        false,
+        |_| {},
+    )
+}
+
 /// Sprint 5.7.2 hotfix #23.1 — same as
 /// `compress_directory_with_backend` but pipes a
 /// `ProgressEvent` callback through both code paths:
@@ -1964,62 +2215,298 @@ pub fn compress_directory_with_backend_with_progress<P>(
     input_dir: &Path,
     backend: CompressionBackend,
     lzma_level: u32,
-    mut progress: P,
+    progress: P,
 ) -> ApiResult<(DirectoryResult, Vec<u8>)>
 where
-    P: FnMut(ProgressEvent),
+    // Sprint 5.7.2 hotfix #28: changed FnMut → Fn + Send + Sync so
+    // rayon can share the callback across worker threads during
+    // parallel LZMA encoding. Callers that genuinely need FnMut
+    // (because they mutate captured state) need to use interior
+    // mutability (Mutex / atomic) instead.
+    P: Fn(ProgressEvent) + Send + Sync,
+{
+    // Default to Auto when called from older code paths. The
+    // newer overload (see below) lets the GUI pass a pinned
+    // codec that bypasses the per-chunk entropy flip.
+    compress_directory_with_backend_and_codec_with_progress(
+        input_dir,
+        backend,
+        lzma_level,
+        None,
+        false,
+        progress,
+    )
+}
+
+/// Sprint 5.7.2 hotfix #47: the GUI exposes a codec toggle
+/// (Auto | LZMA | Zstd) that, when set to anything other than
+/// Auto, pins the codec and disables the entropy-driven flip
+/// (hotfix #39) so the user's choice is honoured for every
+/// chunk. The default Auto path is identical to the legacy
+/// `compress_directory_with_backend_with_progress`.
+pub fn compress_directory_with_backend_and_codec_with_progress<P>(
+    input_dir: &Path,
+    backend: CompressionBackend,
+    lzma_level: u32,
+    codec: Option<crate::solid_archive::Codec>,
+    lossless: bool,
+    progress: P,
+) -> ApiResult<(DirectoryResult, Vec<u8>)>
+where
+    P: Fn(ProgressEvent) + Send + Sync,
+{
+    compress_directory_with_backend_and_codec_overrides_with_progress(
+        input_dir,
+        backend,
+        lzma_level,
+        codec,
+        lossless,
+        &crate::solid_archive::PreprocessorOverrides::default(),
+        progress,
+    )
+}
+
+/// Sprint 5.7.4 hotfix #50: same as the codec-only variant
+/// but also accepts per-extension overrides. The CLI's
+/// `--raw-ext` and the GUI's Advanced panel route here when
+/// the user wants granular control over which files get the
+/// smart preprocessor.
+pub fn compress_directory_with_backend_and_codec_overrides_with_progress<P>(
+    input_dir: &Path,
+    backend: CompressionBackend,
+    lzma_level: u32,
+    codec: Option<crate::solid_archive::Codec>,
+    lossless: bool,
+    overrides: &crate::solid_archive::PreprocessorOverrides,
+    progress: P,
+) -> ApiResult<(DirectoryResult, Vec<u8>)>
+where
+    P: Fn(ProgressEvent) + Send + Sync,
 {
     match backend {
         CompressionBackend::V6Solid => {
-            let files = walk_dir_for_solid(input_dir)?;
+            // Sprint 5.7.2 hotfix #26: local ElapsedTracker so the
+            // V6Solid pre-event and per-file events report real
+            // elapsed_ms (previously they emitted 0 because
+            // with_elapsed_override wasn't chained here).
+            let v6_tracker = crate::nxar::ElapsedTracker::new();
+            let (files, _skipped) = walk_dir_for_solid(input_dir)?;
             if files.is_empty() {
                 return Err(ApiError::new(
                     "directory.empty",
                     format!("no files in {}", input_dir.display()),
                 ));
             }
-            let total_original: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
-            // Pre-walk event so the bar starts at 0% with a real
-            // bytes_total rather than waiting for the first
-            // mid-file event.
+            // Sprint 5.7.2 hotfix #26: split the input into
+            // "compressible" (text/code/configs) and "passthrough"
+            // (PNG/JPG/MP4/ZIP/PDF/…). For V6Solid the codec is a
+            // single LZMA stream over the WHOLE corpus, so feeding
+            // it 5 GB of already-compressed PNG would burn ~80 s of
+            // encode time for zero size reduction. We:
+            //   1. Filter out passthrough files from the LZMA input.
+            //   2. Emit per-file "passthrough" events so the bar
+            //      advances correctly (bytes_done jumps).
+            //   3. Concatenate the raw bytes + a small NXPT marker
+            //      AFTER the LZMA stream so the decoder can reassemble.
+            let mut lzma_files: Vec<(String, Vec<u8>)> = Vec::with_capacity(files.len());
+            let mut passthrough_files: Vec<(String, Vec<u8>)> = Vec::new();
+            let lower_ext = |s: &str| s.to_ascii_lowercase();
+            // Same list as nxar.rs's PASSTHROUGH_EXTS. We duplicate
+            // it here (rather than re-exporting from nxar) to keep
+            // api.rs self-contained.
+            const PASSTHROUGH_EXT_LIST: &[&str] = &[
+                "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico",
+                "heic", "heif", "avif", "jxl", "tiff", "tif",
+                "dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2",
+                "mp4", "m4v", "mov", "webm", "mkv", "avi", "wmv", "flv",
+                "3gp", "3g2", "ts", "m2ts", "mts", "vob", "ogv",
+                "mp3", "m4a", "aac", "ogg", "opus", "flac", "alac", "wav",
+                "wma", "aiff", "aif", "mka",
+                "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst",
+                "lz4", "lz", "pkg", "deb", "rpm", "apk", "ipa", "jar", "war", "ear",
+                "pdf", "docx", "pptx", "xlsx", "odt", "ods", "odp", "epub",
+                "ttf", "otf", "woff", "woff2", "eot",
+                "iso", "dmg", "img", "vhd", "vmdk",
+                "exe", "dll", "so", "dylib", "class", "pdb",
+            ];
+            for (name, bytes) in files.iter() {
+                let lower = lower_ext(name);
+                let is_pt = PASSTHROUGH_EXT_LIST.iter().any(|ext| {
+                    lower.ends_with(ext) || lower.ends_with(&format!(".{}", ext))
+                });
+                if is_pt {
+                    passthrough_files.push((name.clone(), bytes.clone()));
+                } else {
+                    lzma_files.push((name.clone(), bytes.clone()));
+                }
+            }
+            let total_lzma: u64 = lzma_files.iter().map(|(_, b)| b.len() as u64).sum();
+            let total_pt: u64 = passthrough_files.iter().map(|(_, b)| b.len() as u64).sum();
+            let total_original = total_lzma + total_pt;
+            // Emit a passthrough-tick event for each passthrough
+            // file so the bar advances. Each one jumps bytes_done
+            // by its full size.
+            let mut cumulative_pt_bytes: u64 = 0;
+            for (name, bytes) in passthrough_files.iter() {
+                cumulative_pt_bytes += bytes.len() as u64;
+                progress(ProgressEvent {
+                    phase: "compressing".to_string(),
+                    current_file: name.clone(),
+                    files_done: 0,
+                    files_total: 0, // passthroughs aren't part of the LZMA stream
+                    bytes_done: cumulative_pt_bytes,
+                    bytes_total: total_original,
+                    elapsed_ms: 0,
+                    bytes_per_sec: 0.0,
+                    eta_ms: 0,
+                }.with_elapsed_override(v6_tracker.current_ms()));
+            }
+            // Pre-event for the LZMA phase (only the lzma_files
+            // contribute to its bytes_total).
             progress(ProgressEvent {
                 phase: "compressing".to_string(),
                 current_file: String::new(),
                 files_done: 0,
-                files_total: files.len() as u64,
-                bytes_done: 0,
+                files_total: lzma_files.len() as u64,
+                bytes_done: cumulative_pt_bytes,
                 bytes_total: total_original,
                 elapsed_ms: 0,
                 bytes_per_sec: 0.0,
                 eta_ms: 0,
-            });
-            // Per-file progress hook from solid_archive. The
-            // callback signature is (file_idx, total, name);
-            // we map it to ProgressEvent with bytes_done =
-            // cumulative original bytes processed.
-            let archive = crate::solid_archive::compress_with_progress(
-                &files,
-                lzma_level,
-                |file_idx, total, name| {
-                    let bytes_done: u64 = files
-                        .iter()
-                        .take(file_idx)
-                        .map(|(_, b)| b.len() as u64)
-                        .sum();
-                    progress(ProgressEvent {
-                        phase: "compressing".to_string(),
-                        current_file: name.to_string(),
-                        files_done: file_idx as u64,
-                        files_total: total as u64,
-                        bytes_done,
-                        bytes_total: total_original,
-                        elapsed_ms: 0,
-                        bytes_per_sec: 0.0,
-                        eta_ms: 0,
-                    });
-                },
-            )
-            .map_err(|e| ApiError::new("solid.compress", e))?;
+            }.with_elapsed_override(v6_tracker.current_ms()));
+            // Now run the codec on the LZMA-eligible files only.
+            // Sprint 5.7.2 hotfix #32: use CompressionLevel::auto() which
+            // picks zstd on 16 GB machines (~300 MB/s) and LZMA on RAM-
+            // constrained machines. The user's mode selection (rapido/
+            // balanceado/ultra) is honoured by the CompressionLevel
+            // resolver.
+            //
+            // Sprint 5.7.2 hotfix #47: when the GUI pinned a
+            // specific codec via the toggle, build a concrete
+            // CompressionLevel (Lzma or Zstd) instead of Auto.
+            // Auto still goes through the entropy-driven flip
+            // (#39) — the new toggle is a way to *opt out* of
+            // that flip and force a single codec for the whole
+            // archive.
+            let compression_level: crate::solid_archive::CompressionLevel = match codec {
+                None => crate::solid_archive::CompressionLevel::auto(),
+                Some(crate::solid_archive::Codec::Lzma) => {
+                    crate::solid_archive::CompressionLevel::Lzma(lzma_level)
+                }
+                Some(crate::solid_archive::Codec::Zstd) => {
+                    crate::solid_archive::CompressionLevel::Zstd(3)
+                }
+            };
+            let mut archive = if lzma_files.is_empty() {
+                Vec::new()
+            } else {
+                // Sprint 5.7.3 hotfix #49: when the GUI
+                // requested lossless mode, route to the
+                // dedicated lossless entry point that bypasses
+                // the per-extension preprocessor. The result
+                // is bit-exact reversible but trades ratio
+                // for integrity.
+                //
+                // Sprint 5.7.4 hotfix #50: per-extension
+                // overrides route to the full-control entry
+                // point. The three paths are mutually exclusive
+                // for clarity — lossless wins over overrides
+                // because the user picked "no minify at all",
+                // and overrides win over the default because
+                // the user picked specific files to pin.
+                if lossless {
+                    crate::solid_archive::compress_with_progress_lossless(
+                        &lzma_files,
+                        compression_level,
+                        |file_idx, total, name| {
+                        let bytes_done: u64 = lzma_files
+                            .iter()
+                            .take(file_idx)
+                            .map(|(_, b)| b.len() as u64)
+                            .sum::<u64>()
+                            + cumulative_pt_bytes;
+                        progress(ProgressEvent {
+                            phase: "compressing".to_string(),
+                            current_file: name.to_string(),
+                            files_done: file_idx as u64,
+                            files_total: total as u64,
+                            bytes_done,
+                            bytes_total: total_original,
+                            elapsed_ms: 0,
+                            bytes_per_sec: 0.0,
+                            eta_ms: 0,
+                        }.with_elapsed_override(v6_tracker.current_ms()));
+                    },
+                )
+                    .map_err(|e| ApiError::new("solid.compress", e))?
+                } else if !overrides.is_empty() {
+                    crate::solid_archive::compress_with_progress_full_public(
+                        &lzma_files,
+                        compression_level,
+                        false,
+                        overrides,
+                        |file_idx, total, name| {
+                            let bytes_done: u64 = lzma_files
+                                .iter()
+                                .take(file_idx)
+                                .map(|(_, b)| b.len() as u64)
+                                .sum::<u64>()
+                                + cumulative_pt_bytes;
+                            progress(ProgressEvent {
+                                phase: "compressing".to_string(),
+                                current_file: name.to_string(),
+                                files_done: file_idx as u64,
+                                files_total: total as u64,
+                                bytes_done,
+                                bytes_total: total_original,
+                                elapsed_ms: 0,
+                                bytes_per_sec: 0.0,
+                                eta_ms: 0,
+                            }.with_elapsed_override(v6_tracker.current_ms()));
+                        },
+                    )
+                    .map_err(|e| ApiError::new("solid.compress", e))?
+                } else {
+                    crate::solid_archive::compress_with_progress(
+                        &lzma_files,
+                        compression_level,
+                        |file_idx, total, name| {
+                            let bytes_done: u64 = lzma_files
+                                .iter()
+                                .take(file_idx)
+                                .map(|(_, b)| b.len() as u64)
+                                .sum::<u64>()
+                                + cumulative_pt_bytes;
+                            progress(ProgressEvent {
+                                phase: "compressing".to_string(),
+                                current_file: name.to_string(),
+                                files_done: file_idx as u64,
+                                files_total: total as u64,
+                                bytes_done,
+                                bytes_total: total_original,
+                                elapsed_ms: 0,
+                                bytes_per_sec: 0.0,
+                                eta_ms: 0,
+                            }.with_elapsed_override(v6_tracker.current_ms()));
+                        },
+                    )
+                    .map_err(|e| ApiError::new("solid.compress", e))?
+                }
+            };
+            // Append passthrough payloads (with a marker so the
+            // decoder knows where the LZMA stream ends and the raw
+            // entries begin).
+            use std::io::Write;
+            for (name, bytes) in passthrough_files.iter() {
+                // Marker: 4-byte "NXPT" + u32 name_len + name + raw bytes
+                archive.write_all(b"NXPT").ok();
+                let name_bytes = name.as_bytes();
+                archive
+                    .write_all(&(name_bytes.len() as u32).to_le_bytes())
+                    .ok();
+                archive.write_all(name_bytes).ok();
+                archive.write_all(bytes).ok();
+            }
             let entries: Vec<ArchiveEntry> = files
                 .iter()
                 .map(|(name, bytes)| ArchiveEntry {
@@ -2062,8 +2549,139 @@ where
 /// Walk a directory recursively into (relative_path, bytes) pairs.
 /// Shared with the CLI's `walk_dir` helper — duplicated here to
 /// keep the Tauri boundary self-contained.
-fn walk_dir_for_solid(root: &Path) -> ApiResult<Vec<(String, Vec<u8>)>> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), String> {
+fn walk_dir_for_solid(root: &Path) -> ApiResult<(Vec<(String, Vec<u8>)>, u64)> {
+    // Sprint 5.7.2 hotfix #29: parallelize the slow I/O phase that
+    // used to block for ~1 minute on a 5 GB input. The original
+    // walked the directory tree and read each file's bytes SEQUEN-
+    // TIALLY. For 5 GB on HDD (~100 MB/s sequential read) that's
+    // 50 seconds where the UI shows 0% / no events at all.
+    //
+    // Now we:
+    //   1. Walk the tree SEQUENTIALLY to collect paths (fast — just
+    //      stat() calls, no file I/O).
+    //   2. Read file CONTENTS in parallel via rayon (the actual
+    //      bottleneck — disk I/O benefits from queue_depth > 1).
+    //   3. Sort by relative path so the archive is deterministic.
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    /// Sprint 5.7.2 hotfix #43: skip-list for transient build/dev caches.
+///
+/// These directories contain compiler caches, intermediate artifacts,
+/// or runtime state that is NOT part of the user's source code. They
+/// are typically:
+///   - Multi-GB (Turbopack cache alone is 2-3 GB on Next.js projects)
+///   - Already compressed (RocksDB LZ4 inside .sst files)
+///   - Re-creatable from source (`rm -rf .next && next build` works)
+/// Including them in an archive wastes CPU + I/O and produces a
+/// misleadingly-low compression ratio that looks like a bug.
+///
+/// Sprint 5.7.2 hotfix #45: previously we ran `dir_size` (recursive
+/// readdir + metadata) on every skipped directory to populate the
+/// UI tooltip. For 164k filesystems like FlowNow that walk took
+/// minutes — the dir_size alone dominated the wall time. Now we
+/// return a non-recursive best-effort estimate (the dir's own
+/// apparent size + a flag) and let the UI label it as "estimate".
+/// The exact byte count is no longer needed — the user only needs
+/// to see "skipped N MiB of dev cache" not a precise number.
+fn dir_size_estimate(path: &Path) -> u64 {
+    // Use the dir's own metadata. On macOS this returns the inode
+    // allocation (not the recursive sum), so for huge trees it
+    // is small but bounded. The UI labels the result as an
+    // estimate.
+    std::fs::metadata(path)
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+fn should_skip_dir(path: &Path) -> bool {
+    // Walk the path components from the root and match against the
+    // skip list. Using `components()` so the match works regardless
+    // of the user's choice of root.
+    const SKIP_DIRS: &[&str] = &[
+        // Next.js / Turbopack dev cache.
+        ".next",
+        ".turbo",
+        ".swc",
+        // Claude Code's worktree cache — contains nested git
+        // checkouts that look like source but are intermediate.
+        ".claude",
+        // Nexus dev-server caches (Nexus framework, not ours).
+        ".nexus",
+        // Node modules — typically 100-500 MB of already-compressed
+        // packages; users generally exclude them via `.gitignore`.
+        "node_modules",
+        // Rust / Cargo build artifacts.
+        "target",
+        // Python virtualenvs and bytecode caches.
+        ".venv",
+        "venv",
+        "__pycache__",
+        // Git internals.
+        ".git",
+        // OS / editor transient state.
+        ".DS_Store",
+        "Thumbs.db",
+        // Build output / dist directories.
+        "dist",
+        "build",
+        ".cache",
+        ".tmp",
+        // Coverage / test artifacts.
+        "coverage",
+        ".nyc_output",
+        // Logs.
+        "logs",
+        "log",
+        // PID / socket files.
+        ".run",
+    ];
+    for comp in path.components() {
+        if let Some(name) = comp.as_os_str().to_str() {
+            if SKIP_DIRS.iter().any(|s| *s == name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn should_skip_file(path: &Path) -> bool {
+    // Skip lock files of lock-file managers' caches, plus TS
+    // incremental build cache, plus backup/swap files.
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        // Strip leading `.` for matching.
+        const SKIP_SUFFIXES: &[&str] = &[
+            ".tsbuildinfo",
+            ".pid",
+            ".sock",
+            ".swp",
+            ".bak",
+            ".tmp",
+            "~",
+        ];
+        for s in SKIP_SUFFIXES {
+            if name.ends_with(s) {
+                return true;
+            }
+        }
+        // Skip package-lock.json / pnpm-lock.yaml / yarn.lock — these
+        // are 100-300 KB of JSON that doesn't compress much.
+        if name == "package-lock.json"
+            || name == "pnpm-lock.yaml"
+            || name == "yarn.lock"
+            || name == "bun.lockb"
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn collect_paths(
+        root: &Path,
+        dir: &Path,
+        out: &mut Vec<std::path::PathBuf>,
+        skipped_bytes: &mut u64,
+    ) -> Result<(), String> {
         let entries = std::fs::read_dir(dir)
             .map_err(|e| format!("read_dir({}) failed: {}", dir.display(), e))?;
         for entry in entries {
@@ -2073,24 +2691,79 @@ fn walk_dir_for_solid(root: &Path) -> ApiResult<Vec<(String, Vec<u8>)>> {
                 .file_type()
                 .map_err(|e| format!("file_type({}) failed: {}", path.display(), e))?;
             if file_type.is_dir() {
-                walk(root, &path, out)?;
+                if should_skip_dir(&path) {
+                    // Sprint 5.7.2 hotfix #45: report an ESTIMATE for
+                    // the skip size, do NOT recurse into the dir.
+                    // Recursive walks on dirs like `.claude/worktrees/*`
+                    // dominated the wall clock.
+                    let est = dir_size_estimate(&path);
+                    *skipped_bytes += est;
+                    eprintln!(
+                        "[WALK-SKIP] {} (est. {} bytes) — dev cache / build artifact",
+                        path.display(),
+                        est
+                    );
+                    continue;
+                }
+                collect_paths(root, &path, out, skipped_bytes)?;
             } else if file_type.is_file() {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let bytes = std::fs::read(&path)
-                    .map_err(|e| format!("read({}) failed: {}", path.display(), e))?;
-                out.push((rel, bytes));
+                if should_skip_file(&path) {
+                    if let Ok(md) = entry.metadata() {
+                        *skipped_bytes += md.len();
+                        eprintln!(
+                            "[WALK-SKIP] {} ({} KiB) — lock file / build cache",
+                            path.display(),
+                            md.len() / 1024
+                        );
+                    }
+                    continue;
+                }
+                out.push(path);
             }
         }
         Ok(())
     }
-    let mut out = Vec::new();
-    walk(root, root, &mut out).map_err(|e| ApiError::new("directory.io", e))?;
+
+    let mut skipped_bytes: u64 = 0;
+    collect_paths(root, root, &mut paths, &mut skipped_bytes)
+        .map_err(|e| ApiError::new("directory.io", e))?;
+    if skipped_bytes > 0 {
+        eprintln!(
+            "[WALK-SKIP] total skipped: {} MiB of dev cache / build artifacts",
+            skipped_bytes / (1024 * 1024)
+        );
+    }
+
+    // Sprint 5.7.2 hotfix #43: persist skipped_bytes for the UI
+    // success card (Opción D — diagnostic tooltip).
+    crate::stats::record_skipped_bytes(skipped_bytes);
+
+    let n_files = paths.len();
+    eprintln!("[WALK-PARALLEL] collected {} paths, reading in parallel", n_files);
+
+    use rayon::prelude::*;
+    let root_for_rel = root.to_path_buf();
+    let read_results: Result<Vec<(String, Vec<u8>)>, String> = paths
+        .par_iter()
+        .map(|path| {
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("read({}) failed: {}", path.display(), e))?;
+            let rel = path
+                .strip_prefix(&root_for_rel)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            Ok((rel, bytes))
+        })
+        .collect();
+
+    let mut out = read_results.map_err(|e| ApiError::new("directory.io", e))?;
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    eprintln!("[WALK-PARALLEL] done, {} files loaded ({} MiB total)",
+        out.len(),
+        out.iter().map(|(_, b)| b.len()).sum::<usize>() / (1024 * 1024)
+    );
+    Ok((out, skipped_bytes))
 }
 
 /// Decompress a NexusCompress stream. Returns an error if the

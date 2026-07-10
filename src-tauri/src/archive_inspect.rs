@@ -295,8 +295,9 @@ fn extract_tar_entries(
 
 fn list_solid_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read solid archive: {}", e))?;
-    let entries = nexus_compress::solid_archive::parse_toc(&bytes)
+    let parsed = nexus_compress::solid_archive::parse_toc(&bytes)
         .map_err(|e| format!("parse solid toc: {}", e))?;
+    let entries = parsed.entries;
     Ok(entries
         .into_iter()
         .map(|e| {
@@ -321,8 +322,9 @@ fn list_solid_entries(path: &Path) -> Result<Vec<ArchiveEntry>, String> {
 /// We slice the result for the requested window.
 fn list_solid_paginated(path: &Path, offset: usize, limit: usize) -> Result<PageResult, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read solid archive: {}", e))?;
-    let entries = nexus_compress::solid_archive::parse_toc(&bytes)
+    let parsed = nexus_compress::solid_archive::parse_toc(&bytes)
         .map_err(|e| format!("parse solid toc: {}", e))?;
+    let entries = parsed.entries;
     let total = entries.len();
     let end = (offset + limit).min(total);
     let window: Vec<ArchiveEntry> = if offset < total {
@@ -355,8 +357,9 @@ fn extract_solid_entries(
     use nexus_compress::solid_archive::decompress as solid_decompress;
     let bytes = std::fs::read(path).map_err(|e| format!("read solid archive: {}", e))?;
     // Step 1: read the TOC (cheap — no LZMA).
-    let entries = nexus_compress::solid_archive::parse_toc(&bytes)
+    let parsed = nexus_compress::solid_archive::parse_toc(&bytes)
         .map_err(|e| format!("parse solid toc: {}", e))?;
+    let entries = parsed.entries;
     // Step 2: full LZMA decompression (one pass, mandatory for
     // solid archives — same as WinRAR/ZIP). After this we
     // have the preprocessed bytes of every entry concatenated

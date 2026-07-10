@@ -46,6 +46,10 @@ interface CompressResult {
   ratio: number;
   compress_time_ms: number;
   n_files: number;
+  /// Sprint 5.7.2 hotfix #44: bytes skipped by the dev-cache filter.
+  /// Surfaced as a tooltip on the success card so the user
+  /// understands a low ratio on a cache-heavy corpus is intentional.
+  skipped_bytes?: number;
 }
 
 interface ProgressEvent {
@@ -86,12 +90,47 @@ function formatRate(bps: number): string {
 
 type Mode = "rapido" | "balanceado" | "ultra";
 
+// Sprint 5.7.2 hotfix #47: codec toggle. "auto" keeps the
+// entropy-flip pipeline; "lzma" and "zstd" pin a single codec
+// and skip the flip. The string values match the CLI
+// `--codec` argument and the Tauri command's `codec` field.
+type CodecChoice = "auto" | "lzma" | "zstd";
+
+// Static data — titles and descriptions come from t()
+const CODECS: { id: CodecChoice; icon: string }[] = [
+  { id: "auto", icon: "🪄" },
+  { id: "lzma", icon: "💎" },
+  { id: "zstd", icon: "⚡" },
+];
+
+// Sprint 5.7.3 hotfix #49: fidelity toggle. The codec toggle
+// (Auto | LZMA | Zstd) decides WHICH entropy coder to use; the
+// fidelity toggle (Lossy | Lossless) decides WHETHER to feed
+// the smart preprocessor at all. Lossless is the "Safe Mode":
+// every file is treated as Preprocessor::Raw, the archive is
+// bit-exact reversible. The trade-off is a worse ratio on
+// text corpora (typically 1.5-2x instead of 5-7x).
+type FidelityChoice = "lossy" | "lossless";
+
+const FIDELITY: { id: FidelityChoice; icon: string }[] = [
+  { id: "lossy", icon: "✨" },
+  { id: "lossless", icon: "🔒" },
+];
+
 // Only backend/static data — titles and descriptions come from t()
+//
+// Sprint 5.7.5: each mode surfaces its backend version
+// (`version`) so the user can SEE which engine they're
+// picking. v4 = fast LZ77+rANS, v5 = balanced LZMA, v5-min
+// = LZMA + Conservative minify, v6 = LZMA + swc AST, v6-solid
+// = the SOLID pipeline we built in sprint 5.7.2 (the
+// per-chunk-codec hybrid with the Format Oracle).
 const MODES: {
   id: Mode;
   icon: string;
   stars: number;
   backend: string;
+  version: string; // Sprint 5.7.5: displayed as a badge in the pastille
   lzma: number;
 }[] = [
   {
@@ -99,6 +138,7 @@ const MODES: {
     icon: "⚡",
     stars: 4,
     backend: "v4",
+    version: "v4",
     lzma: 0,
   },
   {
@@ -106,6 +146,7 @@ const MODES: {
     icon: "⚖",
     stars: 5,
     backend: "v5-min",
+    version: "v5",
     lzma: 6,
   },
   {
@@ -113,6 +154,7 @@ const MODES: {
     icon: "💎",
     stars: 3,
     backend: "v6-solid",
+    version: "v6",
     lzma: 9,
   },
 ];
@@ -133,7 +175,41 @@ export function CompressView({
   const { t } = useLocale();
   const [files, setFiles] = useState<string[]>([]);
   const [mode, setMode] = useState<Mode>("balanceado");
+  // Sprint 5.7.2 hotfix #47: codec toggle (Auto | LZMA | Zstd).
+  // Default is "auto" so the entropy-driven per-chunk flip from
+  // #39 still runs by default — the toggle is the user's opt-out
+  // when they want a single, predictable codec for the whole
+  // archive.
+  const [codec, setCodec] = useState<CodecChoice>("auto");
+  // Sprint 5.7.3 hotfix #49: fidelity toggle (Lossy | Lossless).
+  // Default "lossy" so existing users keep the 5-7x ratio. The
+  // user opts in to bit-exact reversibility by picking
+  // "lossless".
+  const [fidelity, setFidelity] = useState<FidelityChoice>("lossy");
+  // Sprint 5.7.4 hotfix #50: per-extension override lists for
+  // the Advanced panel. Strings are stored as a single
+  // comma-separated list per the i18n placeholder convention
+  // (e.g. ".json, .env, .toml"). The user can type freely;
+  // we trim, lowercase, and dedup on the way out to the
+  // invoke. Defaults are empty so the legacy behaviour
+  // (built-in per-extension table) is preserved.
+  const [rawExtensions, setRawExtensions] = useState<string>("");
+  const [minifyExtensions, setMinifyExtensions] = useState<string>("");
   const [destDir, setDestDir] = useState<string>("");
+
+  // Sprint 5.7.4 hotfix #50: turn the comma-separated
+  // extension list the user typed in the Advanced panel
+  // into the array shape the backend expects. Trims each
+  // entry, lowercases it, drops empty strings, and
+  // strips the leading dot (so ".json" and "json" both
+  // match `json`). Returns [] when the input is blank.
+  const parseExtList = (raw: string): string[] => {
+    return raw
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter((s) => s.length > 0)
+      .map((s) => s.replace(/^\./, ""));
+  };
   const [destInitialized, setDestInitialized] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -152,6 +228,25 @@ export function CompressView({
   // are imported at the top of the file.
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+  // Sprint 5.7.2 hotfix #24: success card state. The previous
+  // behavior cleared `progress` and `files` the instant compress
+  // resolved, which left the user staring at the (empty) input
+  // area with no idea where the .nxs/.nxe file landed. Now we
+  // pin the last successful result to the screen until the user
+  // explicitly chooses to compress another file or reveal the
+  // output in Finder. Lives alongside `progress` so a fresh
+  // compress can replace it.
+  const [lastSuccess, setLastSuccess] = useState<{
+    inputFilename: string;
+    outputPath: string;
+    originalSize: number;
+    compressedSize: number;
+    durationMs: number;
+    encrypted: boolean;
+    /// Sprint 5.7.2 hotfix #44: bytes skipped by the dev-cache
+    /// filter. Surfaced as a tooltip on the success card.
+    skippedBytes?: number;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Initialize the destination to the real ~/Downloads path on mount.
@@ -352,6 +447,29 @@ export function CompressView({
           backend: m.backend,
           lzma_level: m.lzma,
           output_dir: destDir || null,
+          // Sprint 5.7.2 hotfix #47: codec toggle. "auto" is
+          // the legacy path (entropy flip per chunk). "lzma"
+          // and "zstd" pin a single codec for the whole
+          // archive and bypass the flip. The Rust command
+          // (commands.rs) maps this into a `CompressionLevel`
+          // passed to `solid_archive::compress_with_progress`.
+          codec: codec,
+          // Sprint 5.7.3 hotfix #49: fidelity toggle. "lossy"
+          // (default) keeps the smart preprocessor
+          // (Conservative / swc / Raw by extension). "lossless"
+          // forces every file to Preprocessor::Raw, the archive
+          // is bit-exact reversible. The Rust command
+          // (commands.rs) maps this into a `bool` passed to
+          // `compress_target_with_codec_lossless`.
+          lossless: fidelity === "lossless",
+          // Sprint 5.7.4 hotfix #50: per-extension overrides
+          // from the Advanced panel. Empty arrays mean "use
+          // the built-in per-extension table" (the legacy
+          // behaviour). The backend normalises (lowercases,
+          // dedups, drops the leading dot) so the GUI can
+          // pass either ".json" or "json" or "JSON".
+          raw_extensions: parseExtList(rawExtensions),
+          minify_extensions: parseExtList(minifyExtensions),
           // Sprint 5.7.2: optional encryption. When `password`
           // is set, the backend routes to the encrypted pipeline
           // (v4 + AES-256-GCM + optional Reed-Solomon). When
@@ -368,6 +486,44 @@ export function CompressView({
         kind: "ok",
         msg: `✓ ${lockEmoji}${inputFilename} → ${prettyBytes(lastResult.compressed_size)} (${savingsPct}% más pequeño) en ${(durationMs / 1000).toFixed(1)}s`,
       });
+      // Pin the success card so the user can see WHERE the
+      // .nxs/.nxe file was saved and reveal it in Finder
+      // before kicking off another compress.
+      //
+      // Sprint 5.7.2 hotfix #40: ALWAYS show the success card if
+      // compression produced any bytes — don't silently hide it
+      // when output_path is empty (which used to make users think
+      // the compression "got lost"). When output_path is missing
+      // we still show the card so the user sees compression_size,
+      // and we surface a warning that auto-save may have failed.
+      const outputPath = (lastResult as any).output_path || "";
+      const compressedBytes = lastResult.compressed_size || 0;
+      if (compressedBytes > 0) {
+        if (outputPath) {
+          setLastSuccess({
+            inputFilename,
+            outputPath,
+            originalSize: lastResult.original_size,
+            compressedSize: compressedBytes,
+            durationMs,
+            encrypted: encrypt,
+            // Sprint 5.7.2 hotfix #44: carry the dev-cache skip
+            // bytes into the success card so the UI can show the
+            // "skipped X MiB" diagnostic.
+            skippedBytes: (lastResult as any).skipped_bytes ?? 0,
+          });
+        } else {
+          // Compression succeeded but auto-save produced no path —
+          // likely a permission error. Show the card with a generic
+          // path so the user knows something happened, plus a
+          // warning toast.
+          setError("Compression completed but auto-save path was empty. Check console for details.");
+          setToast({
+            kind: "err",
+            msg: `✗ Saved empty (output_path missing) — compressed ${prettyBytes(compressedBytes)}`,
+          });
+        }
+      }
       onComplete({
         kind: "compress",
         filename: inputFilename,
@@ -454,6 +610,83 @@ export function CompressView({
             {t("compress.desc")}
           </p>
         </div>
+
+        {/* Sprint 5.7.2 hotfix #24: success card. Shows WHERE the
+            output file was saved and gives the user a way to
+            reveal it in Finder or kick off another compression
+            without leaving the view. Replaces the old behavior
+            of silently clearing everything the moment the
+            toast fired. */}
+        {lastSuccess && !busy && (
+          <div className="mb-10 p-6 rounded-2xl bg-gradient-to-br from-emerald-500/[0.08] to-cyan-500/[0.04] border border-emerald-500/20">
+            <div className="flex items-start gap-4">
+              <div className="flex-shrink-0 w-12 h-12 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400 text-[24px]">
+                ✓
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-emerald-300 text-[15px] font-semibold tracking-tight mb-1">
+                  {t("compress.success.title")} {lastSuccess.encrypted && "🔒"}
+                </div>
+                <div className="text-zinc-300 text-[13px] mb-3">
+                  <span className="font-mono">{lastSuccess.inputFilename}</span>
+                  {" → "}
+                  <span className="text-emerald-300 font-medium">
+                    {prettyBytes(lastSuccess.compressedSize)}
+                  </span>
+                  <span className="text-zinc-500">
+                    {" "}({Math.round((1 - lastSuccess.compressedSize / lastSuccess.originalSize) * 100)}% {t("compress.success.smaller")}){" "}
+                    {t("compress.success.in")} {(lastSuccess.durationMs / 1000).toFixed(1)}s
+                  </span>
+                </div>
+                <div className="text-zinc-500 text-[11px] mb-4 font-mono break-all">
+                  📁 {lastSuccess.outputPath}
+                </div>
+
+                {/* Sprint 5.7.2 hotfix #44: show the user how many bytes
+                    were skipped by the dev-cache filter, so a low
+                    ratio on a corpus like secretaria/ (50% .next cache)
+                    doesn't look like a bug. */}
+                {lastSuccess.skippedBytes && lastSuccess.skippedBytes > 0 && (
+                  <div className="text-amber-300/90 text-[11.5px] mb-3 flex items-start gap-2 bg-amber-500/[0.06] border border-amber-500/15 rounded-lg px-3 py-2">
+                    <span className="flex-shrink-0 text-[14px] leading-none">ℹ️</span>
+                    <span>
+                      <span className="font-semibold">Nota de rendimiento:</span>{" "}
+                      Se saltaron{" "}
+                      <span className="font-mono font-semibold">
+                        {prettyBytes(lastSuccess.skippedBytes)}
+                      </span>{" "}
+                      de caché de desarrollo (`.next`, `node_modules`, etc.).
+                      El ratio aplica solo a archivos de código fuente.
+                    </span>
+                  </div>
+                )}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={async () => {
+                      if (!isTauri) return;
+                      try {
+                        const { invoke } = await import("@tauri-apps/api/core");
+                        await invoke("reveal_in_finder_cmd", { path: lastSuccess.outputPath });
+                      } catch (e) {
+                        console.error("reveal failed:", e);
+                        setToast({ kind: "err", msg: `✗ ${e}` });
+                      }
+                    }}
+                    className="px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[12.5px] font-medium transition-colors"
+                  >
+                    📂 {t("compress.success.reveal")}
+                  </button>
+                  <button
+                    onClick={() => setLastSuccess(null)}
+                    className="px-4 py-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-300 text-[12.5px] font-medium transition-colors"
+                  >
+                    🔄 {t("compress.success.another")}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Big drop zone */}
         <div className="mb-10">
@@ -573,6 +806,14 @@ export function CompressView({
                     <span className="text-white text-[16px] font-medium">
                       {getModeTitle(m.id)}
                     </span>
+                    {/* Sprint 5.7.5: backend version badge so the
+                        user knows WHICH engine (v4 / v5 / v6) each
+                        mode runs. The badge sits inline with the
+                        title in a monospaced font to feel like
+                        version metadata, not a feature. */}
+                    <span className="ml-auto text-[10px] font-mono text-cyan-300/80 bg-cyan-500/10 px-1.5 py-0.5 rounded border border-cyan-500/20">
+                      {m.version}
+                    </span>
                   </div>
                   <div className="text-zinc-500 text-[11.5px] leading-relaxed mb-2.5 min-h-[2.6em]">
                     {getModeDesc(m.id)}
@@ -589,6 +830,137 @@ export function CompressView({
                 </button>
               );
             })}
+          </div>
+        </div>
+
+        {/* Sprint 5.7.2 hotfix #47: codec toggle (Auto | LZMA | Zstd). */}
+        <div className="mb-10">
+          <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-3">
+            {t("compress.codec")}
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            {CODECS.map((c) => {
+              const active = codec === c.id;
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => setCodec(c.id)}
+                  disabled={busy}
+                  className={`relative text-left p-5 rounded-2xl border transition-all disabled:opacity-50 ${
+                    active
+                      ? "bg-white/[0.08] border-violet-500/40"
+                      : "bg-white/[0.02] border-white/[0.06] hover:border-white/[0.12]"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-xl">{c.icon}</span>
+                    <span className="text-white text-[16px] font-medium">
+                      {t(`compress.codec.${c.id}`)}
+                    </span>
+                  </div>
+                  <div className="text-zinc-500 text-[11.5px] leading-relaxed min-h-[2.6em]">
+                    {t(`compress.codec.${c.id}.desc`)}
+                  </div>
+                  {active && (
+                    <div className="absolute top-3 right-3 w-2 h-2 rounded-full bg-violet-400" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Sprint 5.7.3 hotfix #49: fidelity toggle (Lossy | Lossless).
+            Uses an amber border so it visually stands apart from the
+            cyan mode selector and the violet codec selector — the three
+            toggles now form a colour-coded decision hierarchy:
+              cyan   = pipeline (Rapido/Balanceado/Ultra)
+              violet = codec (Auto/LZMA/Zstd)
+              amber  = fidelity (Lossy/Lossless) */}
+        <div className="mb-10">
+          <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-3">
+            {t("compress.fidelity")}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {FIDELITY.map((f) => {
+              const active = fidelity === f.id;
+              return (
+                <button
+                  key={f.id}
+                  onClick={() => setFidelity(f.id)}
+                  disabled={busy}
+                  className={`relative text-left p-5 rounded-2xl border transition-all disabled:opacity-50 ${
+                    active
+                      ? "bg-white/[0.08] border-amber-500/40"
+                      : "bg-white/[0.02] border-white/[0.06] hover:border-white/[0.12]"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-xl">{f.icon}</span>
+                    <span className="text-white text-[16px] font-medium">
+                      {t(`compress.fidelity.${f.id}`)}
+                    </span>
+                  </div>
+                  <div className="text-zinc-500 text-[11.5px] leading-relaxed min-h-[2.6em]">
+                    {t(`compress.fidelity.${f.id}.desc`)}
+                  </div>
+                  {active && (
+                    <div className="absolute top-3 right-3 w-2 h-2 rounded-full bg-amber-400" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Sprint 5.7.4 hotfix #50: Advanced panel — per-extension
+            override inputs. The two fields map directly to the
+            Rust `PreprocessorOverrides { raw_extensions,
+            minify_extensions }` and to the CLI's `--raw-ext` /
+            `--minify-ext` flags. The panel is greyed out under
+            "lossless" because the global Raw already covers
+            every file — pinning individual extensions would be
+            redundant. */}
+        <div
+          className={`mb-10 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5 ${
+            fidelity === "lossless" ? "opacity-40 pointer-events-none" : ""
+          }`}
+        >
+          <div className="flex items-baseline gap-3 mb-1">
+            <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase">
+              {t("compress.advanced")}
+            </div>
+            <div className="text-zinc-600 text-[11px]">
+              {t("compress.advanced.desc")}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mt-4">
+            <label className="block">
+              <div className="text-amber-400/80 text-[11px] tracking-wider uppercase mb-1.5">
+                {t("compress.advanced.raw.label")}
+              </div>
+              <input
+                type="text"
+                value={rawExtensions}
+                onChange={(e) => setRawExtensions(e.target.value)}
+                disabled={busy || fidelity === "lossless"}
+                placeholder={t("compress.advanced.raw.placeholder")}
+                className="w-full bg-white/[0.02] border border-white/[0.06] rounded-lg px-3 py-2 text-white text-[13px] font-mono placeholder:text-zinc-700 focus:border-amber-500/40 focus:outline-none disabled:opacity-50"
+              />
+            </label>
+            <label className="block">
+              <div className="text-violet-400/80 text-[11px] tracking-wider uppercase mb-1.5">
+                {t("compress.advanced.minify.label")}
+              </div>
+              <input
+                type="text"
+                value={minifyExtensions}
+                onChange={(e) => setMinifyExtensions(e.target.value)}
+                disabled={busy || fidelity === "lossless"}
+                placeholder={t("compress.advanced.minify.placeholder")}
+                className="w-full bg-white/[0.02] border border-white/[0.06] rounded-lg px-3 py-2 text-white text-[13px] font-mono placeholder:text-zinc-700 focus:border-violet-500/40 focus:outline-none disabled:opacity-50"
+              />
+            </label>
           </div>
         </div>
 
@@ -765,19 +1137,34 @@ export function CompressView({
               </span>
             </div>
             {/* Sprint 5.7.2 hotfix #23: real-time ETA / throughput /
-                elapsed (the new ProgressEvent fields). The backend
-                sends these on every emit, and the warm-up window
-                (<100 ms) sends zeros — guarded by Number.isFinite
-                so we don't display "0:00 / 0 MB/s / —" before the
-                first codec chunk lands. */}
+                elapsed (the new ProgressEvent fields). Sprint 5.7.2
+                hotfix #24: always show elapsed_ms (even 0 → "0:00")
+                and compute throughput as a fallback when
+                bytes_per_sec is 0 but bytes_done > 0 (the warm-up
+                window or events that arrived with elapsed < 100ms
+                used to show "—" for both, which looks broken at 100%). */}
             <div className="flex items-center justify-between text-[10.5px] text-zinc-500 tabular-nums mt-1">
               <span>
-                {progress.elapsed_ms > 0 ? formatMs(progress.elapsed_ms) : "—"}
+                {formatMs(progress.elapsed_ms)}
                 <span className="text-zinc-700 mx-1.5">·</span>
-                {progress.bytes_per_sec > 0 ? formatRate(progress.bytes_per_sec) : "—"}
+                {(() => {
+                  // Prefer the backend's reported throughput,
+                  // but fall back to bytes_done/elapsed_ms so the
+                  // bar never shows "—" when bytes have actually
+                  // been processed.
+                  let rate = progress.bytes_per_sec;
+                  if (!(rate > 0) && progress.elapsed_ms > 0 && progress.bytes_done > 0) {
+                    rate = (progress.bytes_done * 1000) / progress.elapsed_ms;
+                  }
+                  return rate > 0 ? formatRate(rate) : "—";
+                })()}
               </span>
               <span>
-                {progress.eta_ms > 0 ? `ETA ${formatMs(progress.eta_ms)}` : "ETA —"}
+                {progress.bytes_done >= progress.bytes_total && progress.bytes_total > 0
+                  ? "✓ completado"
+                  : progress.eta_ms > 0
+                    ? `ETA ${formatMs(progress.eta_ms)}`
+                    : "ETA —"}
               </span>
             </div>
           </div>
@@ -822,8 +1209,14 @@ export function CompressView({
           className="w-full py-4 rounded-2xl bg-gradient-to-b from-cyan-500 to-cyan-600 hover:from-cyan-400 hover:to-cyan-500 disabled:from-zinc-800 disabled:to-zinc-800 disabled:text-zinc-600 text-white text-[15px] font-semibold tracking-tight transition-all shadow-lg shadow-cyan-500/20 disabled:shadow-none"
         >
           {busy
-            ? `${t("compress.btn.busy")} ${progressPct.toFixed(0)}%`
-            : t("compress.btn")}
+            ? (progress?.phase === "writing"
+              ? `💾 ${t("compress.btn.writing")}`
+              : progress?.phase === "done"
+                ? `✓ ${t("compress.btn.done")}`
+                : `${t("compress.btn.busy")} ${progressPct.toFixed(0)}%`)
+            : lastSuccess
+              ? `✓ ${t("compress.btn.done")}`
+              : t("compress.btn")}
         </button>
 
         {error && (
