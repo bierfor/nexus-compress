@@ -24,7 +24,21 @@ import {
   AlertCircle,
   File as FileIcon,
   FilePlus,
+  ChevronDown,
+  ChevronRight,
+  Save,
+  Trash2,
 } from "lucide-react";
+import {
+  type CompressionProfile,
+  type AnyProfile,
+  type CustomProfile,
+  BUILTIN_PRESETS,
+  DEFAULT_PROFILE,
+  loadCustomProfiles,
+  saveCustomProfiles,
+  profilesEqual,
+} from "@/lib/profiles";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -188,33 +202,54 @@ export function CompressView({
 }) {
   const { t } = useLocale();
   const [files, setFiles] = useState<string[]>([]);
-  const [mode, setMode] = useState<Mode>("balanceado");
-  // Sprint 5.7.2 hotfix #47: codec toggle (Auto | LZMA | Zstd).
-  // Default is "auto" so the entropy-driven per-chunk flip from
-  // #39 still runs by default — the toggle is the user's opt-out
-  // when they want a single, predictable codec for the whole
-  // archive.
-  const [codec, setCodec] = useState<CodecChoice>("auto");
-  // Sprint 5.7.3 hotfix #49: fidelity toggle (Lossy | Lossless).
-  // Default "lossy" so existing users keep the 5-7x ratio. The
-  // user opts in to bit-exact reversibility by picking
-  // "lossless".
-  const [fidelity, setFidelity] = useState<FidelityChoice>("lossy");
-  // Sprint 5.7.7 hotfix #55: corpus mode (3-pill).
-  // "everything" (default since 5.7.7) includes the
-  // full directory; "source" skips dev caches (the
-  // pre-5.7.7 default); "minimal" keeps only source
-  // code + manifests. See api.rs CorpusMode.
-  const [corpusMode, setCorpusMode] = useState<CorpusModeChoice>("everything");
-  // Sprint 5.7.4 hotfix #50: per-extension override lists for
-  // the Advanced panel. Strings are stored as a single
-  // comma-separated list per the i18n placeholder convention
-  // (e.g. ".json, .env, .toml"). The user can type freely;
-  // we trim, lowercase, and dedup on the way out to the
-  // invoke. Defaults are empty so the legacy behaviour
-  // (built-in per-extension table) is preserved.
-  const [rawExtensions, setRawExtensions] = useState<string>("");
-  const [minifyExtensions, setMinifyExtensions] = useState<string>("");
+  // Sprint 5.7.8: profile state. A profile bundles
+  // every user-tweakable setting into one struct.
+  // The active preset is tracked separately so the UI
+  // can highlight the matching chip and offer a
+  // "save as custom" affordance when the user edits it.
+  const [profile, setProfile] = useState<CompressionProfile>(DEFAULT_PROFILE);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  // Custom profiles live in localStorage so they
+  // survive app restarts. Loaded on mount, saved on
+  // every change.
+  const [customProfiles, setCustomProfiles] = useState<CustomProfile[]>([]);
+  useEffect(() => {
+    setCustomProfiles(loadCustomProfiles());
+  }, []);
+  useEffect(() => {
+    saveCustomProfiles(customProfiles);
+  }, [customProfiles]);
+  // Which sections of the accordion are open. The
+  // active preset pre-opens relevant sections so the
+  // user can see what the preset changes.
+  const [openSections, setOpenSections] = useState<Set<string>>(
+    new Set(["presets"])
+  );
+  const toggleSection = (id: string) => {
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  // Editable name for the "save as custom" dialog.
+  const [saveAsName, setSaveAsName] = useState("");
+  const [showSaveAs, setShowSaveAs] = useState(false);
+  // Legacy individual setters removed in 5.7.8 —
+  // the profile is the single source of truth. The
+  // invoke and the renders below read directly from
+  // `profile.{mode, codec, fidelity, corpusMode,
+  // rawExtensions, minifyExtensions, encrypt,
+  // recoveryLevel}`. Helpers below (updateProfile)
+  // wrap setProfile with the right shape.
+  const updateProfile = useCallback(
+    (patch: Partial<CompressionProfile>) => {
+      setProfile((prev) => ({ ...prev, ...patch }));
+      setActivePresetId(null);
+    },
+    []
+  );
   const [destDir, setDestDir] = useState<string>("");
 
   // Sprint 5.7.4 hotfix #50: turn the comma-separated
@@ -443,6 +478,65 @@ export function CompressView({
     }
   }, []);
 
+  // Apply a built-in or custom preset: replace the
+  // current profile with the preset's settings, mark
+  // the chip as active, and pre-open the sections
+  // the user might want to see.
+  const applyPreset = useCallback((p: AnyProfile) => {
+    const next: CompressionProfile = {
+      schemaVersion: 1,
+      mode: p.mode,
+      codec: p.codec,
+      fidelity: p.fidelity,
+      corpusMode: p.corpusMode,
+      rawExtensions: p.rawExtensions,
+      minifyExtensions: p.minifyExtensions,
+      encrypt: p.encrypt,
+      recoveryLevel: p.recoveryLevel,
+    };
+    setProfile(next);
+    setActivePresetId(p.id);
+    // Pre-open the Advanced and Security sections if
+    // the preset touches them. Keeps the default
+    // collapsed view tidy for users who only want
+    // the preset's defaults.
+    const open = new Set<string>(["presets"]);
+    if (p.rawExtensions || p.minifyExtensions) open.add("advanced");
+    if (p.encrypt) open.add("security");
+    setOpenSections(open);
+  }, []);
+
+  // Save the current profile as a custom preset.
+  // Custom profiles live in localStorage and survive
+  // app restarts.
+  const saveAsCustom = useCallback(
+    (name: string) => {
+      const id = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const newCustom: CustomProfile = {
+        ...profile,
+        schemaVersion: 1,
+        id,
+        builtIn: false,
+        name: name.trim() || t("compress.profile.custom_default_name"),
+      };
+      setCustomProfiles((prev) => [...prev, newCustom]);
+      setActivePresetId(id);
+    },
+    [profile, t]
+  );
+
+  // Delete a custom preset. No-op for built-ins.
+  const deleteCustom = useCallback((id: string) => {
+    setCustomProfiles((prev) => prev.filter((p) => p.id !== id));
+    setActivePresetId(null);
+  }, []);
+
+  // Detect "current profile matches no preset" — used
+  // to show the "save as custom" affordance.
+  const profileIsCustom = !BUILTIN_PRESETS.some((bp) =>
+    profilesEqual(bp, profile)
+  ) && !customProfiles.some((cp) => profilesEqual(cp, profile));
+
   // Compress
   const onCompress = useCallback(async () => {
     if (files.length === 0) return;
@@ -450,12 +544,12 @@ export function CompressView({
     setError(null);
     setProgress(null);
     const startTime = Date.now();
-    const m = MODES.find((x) => x.id === mode)!;
+    const m = MODES.find((x) => x.id === profile.mode)!;
     const inputPath = files[0];
     const inputFilename = inputPath.split("/").pop() || "archivo";
     // Guard: encryption requires a non-empty password. We don't
     // fail the click silently — show an error and bail.
-    if (encrypt && !password) {
+    if (profile.encrypt && !password) {
       setError("encryption enabled but no password set");
       setBusy(false);
       return;
@@ -473,7 +567,7 @@ export function CompressView({
           // archive and bypass the flip. The Rust command
           // (commands.rs) maps this into a `CompressionLevel`
           // passed to `solid_archive::compress_with_progress`.
-          codec: codec,
+          codec: profile.codec,
           // Sprint 5.7.3 hotfix #49: fidelity toggle. "lossy"
           // (default) keeps the smart preprocessor
           // (Conservative / swc / Raw by extension). "lossless"
@@ -481,26 +575,30 @@ export function CompressView({
           // is bit-exact reversible. The Rust command
           // (commands.rs) maps this into a `bool` passed to
           // `compress_target_with_codec_lossless`.
-          lossless: fidelity === "lossless",
+          lossless: profile.fidelity === "lossless",
           // Sprint 5.7.4 hotfix #50: per-extension overrides
           // from the Advanced panel. Empty arrays mean "use
           // the built-in per-extension table" (the legacy
           // behaviour). The backend normalises (lowercases,
           // dedups, drops the leading dot) so the GUI can
           // pass either ".json" or "json" or "JSON".
-          raw_extensions: parseExtList(rawExtensions),
-          minify_extensions: parseExtList(minifyExtensions),
+          raw_extensions: parseExtList(profile.rawExtensions),
+          minify_extensions: parseExtList(profile.minifyExtensions),
           // Sprint 5.7.7 hotfix #55: corpus mode from the
           // 3-pill selector. Backend parses it into
           // api::CorpusMode and sets NEXUS_CORPUS_MODE
           // before the walk.
-          corpus_mode: corpusMode,
+          corpus_mode: profile.corpusMode,
           // Sprint 5.7.2: optional encryption. When `password`
           // is set, the backend routes to the encrypted pipeline
           // (v4 + AES-256-GCM + optional Reed-Solomon). When
           // `password` is null, the existing plain path runs.
-          password: encrypt ? password : null,
-          recovery_level: encrypt ? recoveryLevel : null,
+          password: profile.encrypt ? password : null,
+          recovery_level: profile.encrypt ? profile.recoveryLevel : null,
+          // Sprint 5.7.8: the active profile id. Backend can
+          // log this for reproducibility (a future
+          // "compression history by profile" feature).
+          profile_id: activePresetId,
         },
       });
       const durationMs = Date.now() - startTime;
@@ -566,7 +664,7 @@ export function CompressView({
       setBusy(false);
       setProgress(null);
     }
-  }, [files, mode, destDir, onComplete]);
+  }, [files, profile.mode, destDir, onComplete]);
 
   // Progress percentage (0–100)
   const progressPct =
@@ -588,7 +686,7 @@ export function CompressView({
 
   // Estimated savings for the preview
   const estSavings =
-    mode === "rapido" ? 0.15 : mode === "balanceado" ? 0.35 : 0.5;
+    profile.mode === "rapido" ? 0.15 : profile.mode === "balanceado" ? 0.35 : 0.5;
 
   return (
     <div
@@ -807,350 +905,464 @@ export function CompressView({
           )}
         </div>
 
-        {/* Mode selector */}
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-4">
-            {t("compress.mode")}
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            {MODES.map((m) => {
-              const active = mode === m.id;
-              return (
-                <button
-                  key={m.id}
-                  onClick={() => setMode(m.id)}
-                  disabled={busy}
-                  className={`relative text-left p-5 rounded-2xl border transition-all disabled:opacity-50 ${
-                    active
-                      ? "bg-white/[0.08] border-cyan-500/40"
-                      : "bg-white/[0.02] border-white/[0.06] hover:border-white/[0.12]"
-                  }`}
-                >
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-xl">{m.icon}</span>
-                    <span className="text-white text-[16px] font-medium">
-                      {getModeTitle(m.id)}
-                    </span>
-                    {/* Sprint 5.7.5: backend version badge so the
-                        user knows WHICH engine (v4 / v5 / v6) each
-                        mode runs. The badge sits inline with the
-                        title in a monospaced font to feel like
-                        version metadata, not a feature. */}
-                    <span className="ml-auto text-[10px] font-mono text-cyan-300/80 bg-cyan-500/10 px-1.5 py-0.5 rounded border border-cyan-500/20">
-                      {m.version}
-                    </span>
-                  </div>
-                  <div className="text-zinc-500 text-[11.5px] leading-relaxed mb-2.5 min-h-[2.6em]">
-                    {getModeDesc(m.id)}
-                  </div>
-                  <div className="flex items-center gap-0.5 text-amber-400/80 text-[11px]">
-                    {"★".repeat(m.stars)}
-                    <span className="text-zinc-700">
-                      {"★".repeat(5 - m.stars)}
-                    </span>
-                  </div>
-                  {active && (
-                    <div className="absolute top-3 right-3 w-2 h-2 rounded-full bg-cyan-400" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
 
-        {/* Sprint 5.7.2 hotfix #47: codec toggle (Auto | LZMA | Zstd). */}
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-3">
-            {t("compress.codec")}
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            {CODECS.map((c) => {
-              const active = codec === c.id;
-              return (
-                <button
-                  key={c.id}
-                  onClick={() => setCodec(c.id)}
-                  disabled={busy}
-                  className={`relative text-left p-5 rounded-2xl border transition-all disabled:opacity-50 ${
-                    active
-                      ? "bg-white/[0.08] border-violet-500/40"
-                      : "bg-white/[0.02] border-white/[0.06] hover:border-white/[0.12]"
-                  }`}
-                >
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-xl">{c.icon}</span>
-                    <span className="text-white text-[16px] font-medium">
-                      {t(`compress.codec.${c.id}`)}
-                    </span>
-                  </div>
-                  <div className="text-zinc-500 text-[11.5px] leading-relaxed min-h-[2.6em]">
-                    {t(`compress.codec.${c.id}.desc`)}
-                  </div>
-                  {active && (
-                    <div className="absolute top-3 right-3 w-2 h-2 rounded-full bg-violet-400" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        {/* Sprint 5.7.8: profile + accordion UI.
+            Replaces the 5 separate horizontal selector
+            blocks (Mode / Codec / Fidelity / Corpus /
+            Advanced / Encryption) with:
+              1. A horizontal preset bar at the top
+                 (chips: built-in presets + custom).
+              2. An accordion of 5 sections: Speed,
+                 Quality, Corpus, Advanced, Security.
+                 Each section is collapsed by default;
+                 clicking the header toggles it.
+            The active preset is highlighted. When the
+            user edits a field inside the accordion, the
+            chip loses its active state and a "Save as
+            custom" button appears. */}
 
-        {/* Sprint 5.7.3 hotfix #49: fidelity toggle (Lossy | Lossless).
-            Uses an amber border so it visually stands apart from the
-            cyan mode selector and the violet codec selector — the three
-            toggles now form a colour-coded decision hierarchy:
-              cyan   = pipeline (Rapido/Balanceado/Ultra)
-              violet = codec (Auto/LZMA/Zstd)
-              amber  = fidelity (Lossy/Lossless) */}
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-3">
-            {t("compress.fidelity")}
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            {FIDELITY.map((f) => {
-              const active = fidelity === f.id;
-              return (
-                <button
-                  key={f.id}
-                  onClick={() => setFidelity(f.id)}
-                  disabled={busy}
-                  className={`relative text-left p-5 rounded-2xl border transition-all disabled:opacity-50 ${
-                    active
-                      ? "bg-white/[0.08] border-amber-500/40"
-                      : "bg-white/[0.02] border-white/[0.06] hover:border-white/[0.12]"
-                  }`}
-                >
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-xl">{f.icon}</span>
-                    <span className="text-white text-[16px] font-medium">
-                      {t(`compress.fidelity.${f.id}`)}
-                    </span>
-                  </div>
-                  <div className="text-zinc-500 text-[11.5px] leading-relaxed min-h-[2.6em]">
-                    {t(`compress.fidelity.${f.id}.desc`)}
-                  </div>
-                  {active && (
-                    <div className="absolute top-3 right-3 w-2 h-2 rounded-full bg-amber-400" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Sprint 5.7.7 hotfix #55: corpus mode 3-pill selector.
-            Controls what gets included in the directory archive.
-            "everything" (default) = full snapshot, "source" =
-            skip dev caches (5.7.6 default), "minimal" = source
-            code only. Each pill shows an icon, the label, and
-            a 1-line description. The active pill is highlighted
-            with a coloured border + dot, matching the pattern
-            used for Mode/Codec/Fidelity. */}
-        <div className="mb-10">
+        {/* Preset bar */}
+        <div className="mb-6">
           <div className="flex items-baseline gap-3 mb-3">
             <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase">
-              {t("compress.corpus")}
+              {t("compress.profile.title")}
             </div>
             <div className="text-zinc-600 text-[11px]">
-              {t("compress.corpus.desc")}
+              {t("compress.profile.desc")}
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-3">
-            {CORPUS_MODES.map((m) => {
-              const active = corpusMode === m.id;
+          <div className="flex flex-wrap gap-2">
+            {BUILTIN_PRESETS.map((p) => {
+              const active = activePresetId === p.id;
               return (
                 <button
-                  key={m.id}
-                  onClick={() => setCorpusMode(m.id)}
-                  className={`relative text-left rounded-xl border p-3 transition-all ${
+                  key={p.id}
+                  onClick={() => applyPreset(p)}
+                  disabled={busy}
+                  className={`group relative px-3.5 py-2 rounded-full border text-[12px] transition-all disabled:opacity-50 ${
                     active
-                      ? "border-emerald-400/40 bg-emerald-400/[0.06] shadow-[0_0_0_1px_rgba(52,211,153,0.15)]"
-                      : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]"
+                      ? "border-cyan-400/50 bg-cyan-400/10 text-cyan-100 shadow-[0_0_0_1px_rgba(34,211,238,0.15)]"
+                      : "border-white/[0.08] bg-white/[0.02] text-zinc-300 hover:border-white/[0.16] hover:bg-white/[0.04]"
                   }`}
                 >
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[16px] leading-none">{m.icon}</span>
-                    <span className="text-zinc-200 text-[12.5px] font-semibold">
-                      {t(`compress.corpus.${m.id}`)}
-                    </span>
-                  </div>
-                  <div className="text-zinc-500 text-[11px] leading-snug">
-                    {t(`compress.corpus.${m.id}.desc` as const)}
-                  </div>
-                  {active && (
-                    <div className="absolute top-3 right-3 w-2 h-2 rounded-full bg-emerald-400" />
-                  )}
+                  <span className="mr-1.5">{p.icon}</span>
+                  <span className="font-medium">{t(`compress.preset.${p.id}` as "compress.preset.snapshot")}</span>
                 </button>
               );
             })}
+            {customProfiles.map((p) => {
+              const active = activePresetId === p.id;
+              return (
+                <div key={p.id} className="relative group">
+                  <button
+                    onClick={() => applyPreset(p)}
+                    disabled={busy}
+                    className={`pl-3.5 pr-7 py-2 rounded-full border text-[12px] transition-all disabled:opacity-50 ${
+                      active
+                        ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-100 shadow-[0_0_0_1px_rgba(52,211,153,0.15)]"
+                        : "border-white/[0.08] bg-white/[0.02] text-zinc-300 hover:border-white/[0.16] hover:bg-white/[0.04]"
+                    }`}
+                  >
+                    <span className="mr-1.5">⭐</span>
+                    <span className="font-medium">{p.name}</span>
+                  </button>
+                  <button
+                    onClick={() => deleteCustom(p.id)}
+                    disabled={busy}
+                    aria-label={t("compress.profile.delete")}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                </div>
+              );
+            })}
+            {/* Save current as custom */}
+            {profileIsCustom && (
+              <button
+                onClick={() => {
+                  setSaveAsName("");
+                  setShowSaveAs(true);
+                }}
+                disabled={busy}
+                className="px-3 py-2 rounded-full border border-dashed border-amber-400/40 bg-amber-400/[0.04] text-amber-200 hover:bg-amber-400/[0.08] text-[12px] transition-all disabled:opacity-50 flex items-center gap-1.5"
+              >
+                <Save size={12} />
+                {t("compress.profile.save_as_custom")}
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Sprint 5.7.4 hotfix #50: Advanced panel — per-extension
-            override inputs. The two fields map directly to the
-            Rust `PreprocessorOverrides { raw_extensions,
-            minify_extensions }` and to the CLI's `--raw-ext` /
-            `--minify-ext` flags. The panel is greyed out under
-            "lossless" because the global Raw already covers
-            every file — pinning individual extensions would be
-            redundant. */}
-        <div
-          className={`mb-10 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-5 ${
-            fidelity === "lossless" ? "opacity-40 pointer-events-none" : ""
-          }`}
-        >
-          <div className="flex items-baseline gap-3 mb-1">
-            <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase">
-              {t("compress.advanced")}
-            </div>
-            <div className="text-zinc-600 text-[11px]">
-              {t("compress.advanced.desc")}
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-3 mt-4">
-            <label className="block">
-              <div className="text-amber-400/80 text-[11px] tracking-wider uppercase mb-1.5">
-                {t("compress.advanced.raw.label")}
+        {/* Accordion of detailed controls */}
+        <div className="mb-10 rounded-2xl border border-white/[0.06] bg-white/[0.015] divide-y divide-white/[0.06] overflow-hidden">
+          {(
+            [
+              {
+                id: "speed",
+                title: t("compress.section.speed"),
+                desc: t("compress.section.speed.desc"),
+                icon: "⚡",
+                body: (
+                  <div className="space-y-5">
+                    <div>
+                      <div className="text-zinc-400 text-[11px] uppercase tracking-wider mb-2">
+                        {t("compress.mode")}
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        {MODES.map((m) => {
+                          const active = profile.mode === m.id;
+                          return (
+                            <button
+                              key={m.id}
+                              onClick={() => updateProfile({ mode: m.id })}
+                              disabled={busy}
+                              className={`text-left p-3 rounded-xl border transition-all disabled:opacity-50 ${
+                                active
+                                  ? "border-cyan-500/40 bg-cyan-500/[0.06]"
+                                  : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="text-[15px]">{m.icon}</span>
+                                <span className="text-white text-[13px] font-medium">
+                                  {getModeTitle(m.id)}
+                                </span>
+                                <span className="ml-auto text-[9px] text-zinc-500 font-mono">
+                                  {m.version}
+                                </span>
+                              </div>
+                              <div className="text-zinc-500 text-[10.5px] leading-snug">
+                                {t(`compress.mode.${m.id}.desc`)}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-zinc-400 text-[11px] uppercase tracking-wider mb-2">
+                        {t("compress.codec")}
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        {CODECS.map((c) => {
+                          const active = profile.codec === c.id;
+                          return (
+                            <button
+                              key={c.id}
+                              onClick={() => updateProfile({ codec: c.id })}
+                              disabled={busy}
+                              className={`p-3 rounded-xl border transition-all disabled:opacity-50 ${
+                                active
+                                  ? "border-violet-500/40 bg-violet-500/[0.06]"
+                                  : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="text-[15px]">{c.icon}</span>
+                                <span className="text-white text-[13px] font-medium">
+                                  {t(`compress.codec.${c.id}`)}
+                                </span>
+                              </div>
+                              <div className="text-zinc-500 text-[10.5px] leading-snug mt-1">
+                                {t(`compress.codec.${c.id}.desc`)}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                ),
+              },
+              {
+                id: "quality",
+                title: t("compress.section.quality"),
+                desc: t("compress.section.quality.desc"),
+                icon: "✨",
+                body: (
+                  <div className="space-y-4">
+                    <div className="text-zinc-400 text-[11px] uppercase tracking-wider mb-2">
+                      {t("compress.fidelity")}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {FIDELITY.map((f) => {
+                        const active = profile.fidelity === f.id;
+                        return (
+                          <button
+                            key={f.id}
+                            onClick={() => updateProfile({ fidelity: f.id })}
+                            disabled={busy}
+                            className={`text-left p-3 rounded-xl border transition-all disabled:opacity-50 ${
+                              active
+                                ? "border-amber-500/40 bg-amber-500/[0.06]"
+                                : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-[15px]">{f.icon}</span>
+                              <span className="text-white text-[13px] font-medium">
+                                {t(`compress.fidelity.${f.id}`)}
+                              </span>
+                            </div>
+                            <div className="text-zinc-500 text-[10.5px] leading-snug">
+                              {t(`compress.fidelity.${f.id}.desc`)}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ),
+              },
+              {
+                id: "corpus",
+                title: t("compress.section.corpus"),
+                desc: t("compress.section.corpus.desc"),
+                icon: "📂",
+                body: (
+                  <div className="space-y-3">
+                    {CORPUS_MODES.map((m) => {
+                      const active = profile.corpusMode === m.id;
+                      return (
+                        <button
+                          key={m.id}
+                          onClick={() => updateProfile({ corpusMode: m.id })}
+                          disabled={busy}
+                          className={`w-full text-left p-3 rounded-xl border transition-all disabled:opacity-50 ${
+                            active
+                              ? "border-emerald-500/40 bg-emerald-500/[0.06]"
+                              : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-[15px]">{m.icon}</span>
+                            <span className="text-white text-[13px] font-medium">
+                              {t(`compress.corpus.${m.id}`)}
+                            </span>
+                            {active && (
+                              <span className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                            )}
+                          </div>
+                          <div className="text-zinc-500 text-[10.5px] leading-snug">
+                            {t(`compress.corpus.${m.id}.desc`)}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ),
+              },
+              {
+                id: "advanced",
+                title: t("compress.section.advanced"),
+                desc: t("compress.section.advanced.desc"),
+                icon: "🛠",
+                body: (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-zinc-400 text-[11px] uppercase tracking-wider mb-1.5">
+                        {t("compress.advanced.raw.label")}
+                      </label>
+                      <input
+                        type="text"
+                        value={profile.rawExtensions}
+                        onChange={(e) =>
+                          updateProfile({ rawExtensions: e.target.value })
+                        }
+                        placeholder={t("compress.advanced.raw.placeholder")}
+                        disabled={busy || profile.fidelity === "lossless"}
+                        className="w-full bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 text-[12px] font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500 disabled:opacity-40"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-zinc-400 text-[11px] uppercase tracking-wider mb-1.5">
+                        {t("compress.advanced.minify.label")}
+                      </label>
+                      <input
+                        type="text"
+                        value={profile.minifyExtensions}
+                        onChange={(e) =>
+                          updateProfile({ minifyExtensions: e.target.value })
+                        }
+                        placeholder={t("compress.advanced.minify.placeholder")}
+                        disabled={busy || profile.fidelity === "lossless"}
+                        className="w-full bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 text-[12px] font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500 disabled:opacity-40"
+                      />
+                    </div>
+                    {profile.fidelity === "lossless" && (
+                      <div className="text-zinc-500 text-[10.5px] italic">
+                        {t("compress.advanced.disabled_lossless")}
+                      </div>
+                    )}
+                  </div>
+                ),
+              },
+              {
+                id: "security",
+                title: t("compress.section.security"),
+                desc: t("compress.section.security.desc"),
+                icon: "🔐",
+                body: (
+                  <div className="space-y-3">
+                    <label className="flex items-center justify-between p-3 rounded-xl border border-white/[0.06] bg-white/[0.02] cursor-pointer">
+                      <div>
+                        <div className="text-white text-[12.5px] font-medium">
+                          {t("compress.encrypt.label")}
+                        </div>
+                        <div className="text-zinc-500 text-[10.5px] leading-snug">
+                          {t("compress.encrypt.desc")}
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={profile.encrypt}
+                        onChange={(e) =>
+                          updateProfile({ encrypt: e.target.checked })
+                        }
+                        disabled={busy}
+                        className="w-4 h-4 accent-cyan-500 cursor-pointer disabled:opacity-50"
+                      />
+                    </label>
+                    {profile.encrypt && (
+                      <>
+                        <div>
+                          <label className="block text-zinc-400 text-[11px] uppercase tracking-wider mb-1.5">
+                            {t("compress.password.label")}
+                          </label>
+                          <div className="relative">
+                            <input
+                              type={showPwd ? "text" : "password"}
+                              value={password}
+                              onChange={(e) => setPassword(e.target.value)}
+                              placeholder={t("compress.password.placeholder")}
+                              autoComplete="new-password"
+                              spellCheck={false}
+                              disabled={busy}
+                              className="w-full bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 pr-9 text-[12px] font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowPwd((s) => !s)}
+                              tabIndex={-1}
+                              disabled={busy}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200 text-[10px] uppercase tracking-wider px-1.5 py-0.5"
+                            >
+                              {showPwd ? t("compress.password.hide") : t("compress.password.show")}
+                            </button>
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-zinc-400 text-[11px] uppercase tracking-wider mb-1.5">
+                            {t("compress.recovery.label")}
+                          </div>
+                          <div className="grid grid-cols-3 gap-1.5">
+                            {(
+                              [
+                                { v: "off", label: "off", desc: "0% overhead" },
+                                { v: "low", label: "low", desc: "1 / 10 files" },
+                                { v: "high", label: "high", desc: "2-3 / 8 files" },
+                              ] as const
+                            ).map((opt) => {
+                              const active = profile.recoveryLevel === opt.v;
+                              return (
+                                <button
+                                  key={opt.v}
+                                  onClick={() =>
+                                    updateProfile({ recoveryLevel: opt.v })
+                                  }
+                                  disabled={busy}
+                                  className={`p-2.5 rounded-lg border transition-all disabled:opacity-50 ${
+                                    active
+                                      ? "border-cyan-500/40 bg-cyan-500/[0.06]"
+                                      : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
+                                  }`}
+                                >
+                                  <div className="text-white text-[12px] font-medium">
+                                    {opt.label}
+                                  </div>
+                                  <div className="text-zinc-500 text-[10px]">
+                                    {opt.desc}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ),
+              },
+            ] as const
+          ).map((section) => {
+            const isOpen = openSections.has(section.id);
+            return (
+              <div key={section.id}>
+                <button
+                  onClick={() => toggleSection(section.id)}
+                  className="w-full flex items-center gap-3 px-5 py-3.5 text-left hover:bg-white/[0.02] transition-colors"
+                >
+                  <span className="text-[15px]">{section.icon}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-zinc-200 text-[13px] font-medium">
+                      {section.title}
+                    </div>
+                    <div className="text-zinc-500 text-[10.5px] truncate">
+                      {section.desc}
+                    </div>
+                  </div>
+                  {isOpen ? (
+                    <ChevronDown size={14} className="text-zinc-500" />
+                  ) : (
+                    <ChevronRight size={14} className="text-zinc-500" />
+                  )}
+                </button>
+                {isOpen && (
+                  <div className="px-5 pb-5">{section.body}</div>
+                )}
               </div>
-              <input
-                type="text"
-                value={rawExtensions}
-                onChange={(e) => setRawExtensions(e.target.value)}
-                disabled={busy || fidelity === "lossless"}
-                placeholder={t("compress.advanced.raw.placeholder")}
-                className="w-full bg-white/[0.02] border border-white/[0.06] rounded-lg px-3 py-2 text-white text-[13px] font-mono placeholder:text-zinc-700 focus:border-amber-500/40 focus:outline-none disabled:opacity-50"
-              />
-            </label>
-            <label className="block">
-              <div className="text-violet-400/80 text-[11px] tracking-wider uppercase mb-1.5">
-                {t("compress.advanced.minify.label")}
-              </div>
-              <input
-                type="text"
-                value={minifyExtensions}
-                onChange={(e) => setMinifyExtensions(e.target.value)}
-                disabled={busy || fidelity === "lossless"}
-                placeholder={t("compress.advanced.minify.placeholder")}
-                className="w-full bg-white/[0.02] border border-white/[0.06] rounded-lg px-3 py-2 text-white text-[13px] font-mono placeholder:text-zinc-700 focus:border-violet-500/40 focus:outline-none disabled:opacity-50"
-              />
-            </label>
-          </div>
+            );
+          })}
         </div>
 
-        {/* Destination */}
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-3">
-            {t("compress.dest")}
-          </div>
-          <div className="flex items-center gap-3 px-5 py-4 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
-            <span className="text-zinc-500 text-[13px]">📁</span>
-            <span
-              className="text-white text-[14px] flex-1 truncate font-mono"
-              title={destDir}
-            >
-              {destDir || t("compress.dest.detecting")}
-            </span>
+        {/* Save-as-custom modal (inline, not a real modal — simpler
+            than building a portal) */}
+        {showSaveAs && (
+          <div className="mb-6 p-4 rounded-xl border border-amber-400/30 bg-amber-400/[0.04] flex items-center gap-3">
+            <input
+              type="text"
+              value={saveAsName}
+              onChange={(e) => setSaveAsName(e.target.value)}
+              placeholder={t("compress.profile.save_as_placeholder")}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  saveAsCustom(saveAsName);
+                  setShowSaveAs(false);
+                } else if (e.key === "Escape") {
+                  setShowSaveAs(false);
+                }
+              }}
+              className="flex-1 bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 text-[12.5px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-400"
+            />
             <button
-              onClick={onBrowseDest}
-              disabled={busy}
-              className="px-3 py-1.5 text-[12px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-lg transition-colors disabled:opacity-50"
+              onClick={() => {
+                saveAsCustom(saveAsName);
+                setShowSaveAs(false);
+              }}
+              className="px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-100 text-[12px] font-medium hover:bg-amber-500/30"
             >
-              {t("compress.dest.change")}
+              {t("compress.profile.save")}
+            </button>
+            <button
+              onClick={() => setShowSaveAs(false)}
+              className="px-3 py-2 rounded-lg text-zinc-400 hover:text-zinc-200 text-[12px]"
+            >
+              {t("compress.profile.cancel")}
             </button>
           </div>
-        </div>
-
-        {/* Sprint 5.7.2: encryption + recovery panel. Toggle to
-            enable AES-256-GCM, choose a recovery level, type a
-            password. The panel collapses when encryption is off
-            (the default — 7z-style "off by default" UX would be
-            too aggressive; matching the design doc, encryption
-            is opt-in but enabled by default in production). */}
-        <div className="mb-4 panel p-3 flex flex-col gap-2">
-          <label className="flex items-center justify-between cursor-pointer">
-            <span className="metric-label flex items-center gap-2">
-              <span className="text-amber-400">🔒</span>
-              encryption
-            </span>
-            <span className="flex items-center gap-2">
-              <span className="text-[10px] text-zinc-500 uppercase tracking-wider">
-                {encrypt ? "on" : "off"}
-              </span>
-              <input
-                type="checkbox"
-                checked={encrypt}
-                onChange={(e) => setEncrypt(e.target.checked)}
-                disabled={busy}
-                className="w-4 h-4 accent-cyan-500 cursor-pointer disabled:opacity-50"
-              />
-            </span>
-          </label>
-
-          {encrypt && (
-            <div className="flex flex-col gap-2 mt-1 pt-2 border-t border-zinc-800">
-              {/* Password input + visibility toggle */}
-              <div className="relative">
-                <input
-                  type={showPwd ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="archive password"
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  disabled={busy}
-                  className="w-full bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 pr-9 text-[12px] font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500 focus:bg-zinc-900 disabled:opacity-50"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPwd((s) => !s)}
-                  tabIndex={-1}
-                  disabled={busy}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-cyan-400 text-[14px] leading-none disabled:opacity-50"
-                  title={showPwd ? "hide password" : "show password"}
-                >
-                  {showPwd ? "🙈" : "👁"}
-                </button>
-              </div>
-
-              {/* Recovery level radio group. Default "low" (10%
-                  parity, matches the 7z UX). */}
-              <div className="flex flex-col gap-1.5">
-                <div className="text-[10px] text-zinc-500 uppercase tracking-wider">
-                  recovery (Reed-Solomon)
-                </div>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {(
-                    [
-                      { v: "off", label: "off", desc: "0% overhead" },
-                      { v: "low", label: "low", desc: "1 / 10 files" },
-                      { v: "high", label: "high", desc: "2-3 / 8 files" },
-                    ] as const
-                  ).map((opt) => {
-                    const active = recoveryLevel === opt.v;
-                    return (
-                      <button
-                        key={opt.v}
-                        type="button"
-                        disabled={busy}
-                        onClick={() => setRecoveryLevel(opt.v)}
-                        className={`px-2 py-1.5 rounded border text-[10.5px] font-mono transition-colors disabled:opacity-50 ${
-                          active
-                            ? "border-cyan-500 bg-cyan-500/10 text-cyan-300"
-                            : "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300"
-                        }`}
-                      >
-                        <div className="font-medium">{opt.label}</div>
-                        <div className="text-[9px] text-zinc-500 mt-0.5">
-                          {opt.desc}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
+        )}
 
         {/* Progress (only when compressing) */}
         {busy && progress && (
@@ -1247,16 +1459,16 @@ export function CompressView({
         {files.length > 0 && !busy && (
           <div className="mb-10 p-6 rounded-2xl bg-gradient-to-br from-cyan-500/[0.06] to-emerald-500/[0.04] border border-white/[0.08]">
             <div className="text-zinc-400 text-[11px] tracking-[0.2em] uppercase mb-4">
-              {t("compress.estimate.title")} ({getModeTitle(mode)})
+              {t("compress.estimate.title")} ({getModeTitle(profile.mode)})
             </div>
             <div className="grid grid-cols-3 gap-6">
               <Stat label={t("compress.estimate.saving")} value={`${(estSavings * 100).toFixed(0)}%`} />
               <Stat
                 label={t("compress.estimate.speed")}
                 value={
-                  mode === "rapido"
+                  profile.mode === "rapido"
                     ? t("compress.speed.fast")
-                    : mode === "balanceado"
+                    : profile.mode === "balanceado"
                     ? t("compress.speed.medium")
                     : t("compress.speed.slow")
                 }
@@ -1264,9 +1476,9 @@ export function CompressView({
               <Stat
                 label={t("compress.estimate.best")}
                 value={
-                  mode === "rapido"
+                  profile.mode === "rapido"
                     ? t("compress.best.video")
-                    : mode === "balanceado"
+                    : profile.mode === "balanceado"
                     ? t("compress.best.general")
                     : t("compress.best.files")
                 }
