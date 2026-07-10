@@ -315,6 +315,20 @@ export function CompressView({
     /// Sprint 5.7.2 hotfix #44: bytes skipped by the dev-cache
     /// filter. Surfaced as a tooltip on the success card.
     skippedBytes?: number;
+    /// Sprint 5.7.9 part 6: corpus breakdown by category
+    /// (source bytes / build_artifact bytes / other bytes).
+    /// The UI uses this to warn the user when their
+    /// archive is dominated by build artifacts (where
+    /// no codec can do much). For a single-file input
+    /// this is undefined.
+    corpusBreakdown?: {
+      sourceBytes: number;
+      sourceFiles: number;
+      buildArtifactBytes: number;
+      buildArtifactFiles: number;
+      otherBytes: number;
+      otherFiles: number;
+    };
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -648,6 +662,11 @@ export function CompressView({
             // bytes into the success card so the UI can show the
             // "skipped X MiB" diagnostic.
             skippedBytes: (lastResult as any).skipped_bytes ?? 0,
+            // Sprint 5.7.9 part 6: corpus breakdown by category.
+            // Used to warn the user when the archive is dominated
+            // by build artifacts (low ratio is honest math, not
+            // a bug).
+            corpusBreakdown: (lastResult as any).corpus_breakdown,
           });
         } else {
           // Compression succeeded but auto-save produced no path —
@@ -797,6 +816,33 @@ export function CompressView({
                     </span>
                   </div>
                 )}
+                {/* Sprint 5.7.9 part 6: corpus breakdown by category.
+                    Shown when the build-artifact share is high (the
+                    most common case where compression ratio is
+                    honestly low because the corpus is mostly
+                    already-compressed binaries). The user is
+                    pointed at Source mode which skips build
+                    artifacts. */}
+                {lastSuccess.corpusBreakdown && (() => {
+                  const b = lastSuccess.corpusBreakdown!;
+                  const total = b.sourceBytes + b.buildArtifactBytes + b.otherBytes;
+                  if (total === 0) return null;
+                  const buildPct = (b.buildArtifactBytes / total) * 100;
+                  if (buildPct < 50) return null;
+                  return (
+                    <div className="text-amber-300/90 text-[11.5px] mb-3 flex items-start gap-2 bg-amber-500/[0.06] border border-amber-500/15 rounded-lg px-3 py-2">
+                      <span className="flex-shrink-0 text-[14px] leading-none">💡</span>
+                      <span>
+                        <span className="font-semibold">Tu corpus es {buildPct.toFixed(0)}% artefactos de build</span>{" "}
+                        (<span className="font-mono">{prettyBytes(b.buildArtifactBytes)}</span>{" "}
+                        en <code className="text-amber-200/80">.next/</code>, <code className="text-amber-200/80">node_modules/</code>, <code className="text-amber-200/80">venv/</code>, etc.).
+                        Esos archivos ya están comprimidos — ningún codec puede reducir el ratio.
+                        Para mejor ratio en el código, cambiá a{" "}
+                        <span className="font-semibold">📝 Solo fuentes</span> o <span className="font-semibold">✨ Mínimo</span> arriba.
+                      </span>
+                    </div>
+                  );
+                })()}
                 <div className="flex items-center gap-2">
                   <button
                     onClick={async () => {

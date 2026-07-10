@@ -516,6 +516,13 @@ pub struct CompressTargetResult {
     pub compressed_bytes: Vec<u8>,
     /// Number of files in the archive (1 for a single-file input).
     pub n_files: u64,
+    /// Sprint 5.7.9 part 6: corpus breakdown by category
+    /// (source / build_artifact / other). The UI uses
+    /// this to warn the user when the archive is
+    /// dominated by build artifacts (where no codec
+    /// can do much). For a single-file input this is
+    /// the zero `CorpusBreakdown`.
+    pub corpus_breakdown: CorpusBreakdown,
     /// Path the compressed output was written to (next to the input
     /// file or inside the input directory). Empty if auto-save was
     /// skipped (e.g. permission error).
@@ -937,6 +944,11 @@ where
         compress_time_ms,
         compressed_bytes,
         n_files,
+        corpus_breakdown: if is_dir {
+            crate::stats::take_corpus_breakdown()
+        } else {
+            CorpusBreakdown::default()
+        },
         output_path: written,
         output_ext,
     })
@@ -1563,6 +1575,11 @@ where
         compress_time_ms,
         compressed_bytes: compressed,
         n_files: if is_dir { walk_dir_count(input_path) } else { 1 },
+        corpus_breakdown: if is_dir {
+            crate::stats::take_corpus_breakdown()
+        } else {
+            CorpusBreakdown::default()
+        },
         output_path: written,
         output_ext,
     })
@@ -2901,7 +2918,85 @@ fn collect_paths(
         out.len(),
         out.iter().map(|(_, b)| b.len()).sum::<usize>() / (1024 * 1024)
     );
+    // Sprint 5.7.9 part 6: classify the corpus by category so
+    // the UI can warn the user when most of the archive is
+    // dev cache / pre-compressed binaries (where no codec
+    // can do much). The classification is based on path
+    // patterns: anything inside `.next/`, `node_modules/`,
+    // `venv/`, `target/`, `dist/`, `__pycache__/`, etc. is
+    // counted as "build_artifact" (typically already
+    // minified/compiled/compressed). Files matching the
+    // Rust/JS/TS/Python source extension allow-list are
+    // counted as "source". Everything else (configs,
+    // data files, docs) is "other".
+    let breakdown = classify_corpus_breakdown(&out);
+    crate::stats::record_corpus_breakdown(&breakdown);
     Ok((out, skipped_bytes))
+}
+
+/// Sprint 5.7.9 part 6: classify a corpus by path pattern.
+/// Used by the UI to display a "your corpus is X% build
+/// artifacts, switch to Source mode" warning when the
+/// user picks Everything mode on a cache-heavy dir.
+fn classify_corpus_breakdown(
+    files: &[(String, Vec<u8>)],
+) -> CorpusBreakdown {
+    let mut breakdown = CorpusBreakdown::default();
+    const BUILD_ARTIFACT_DIRS: &[&str] = &[
+        ".next", "node_modules", "venv", ".venv", "target",
+        "dist", "build", "__pycache__", ".turbo", ".swc",
+        ".cache", "coverage", ".parcel-cache", ".next-cache",
+    ];
+    const SOURCE_EXTS: &[&str] = &[
+        "ts", "tsx", "js", "jsx", "mjs", "cjs",
+        "py", "pyx", "pyi", "rs", "go", "java", "kt", "swift",
+        "c", "cpp", "cc", "cxx", "h", "hpp", "hxx",
+        "cs", "rb", "php", "scala", "ex", "exs", "erl", "hs",
+        "lua", "r", "jl", "dart", "vue", "svelte",
+        "sh", "bash", "sql", "graphql", "proto",
+    ];
+    for (rel, bytes) in files {
+        let size = bytes.len() as u64;
+        let path = std::path::Path::new(rel);
+        let mut in_artifact = false;
+        for comp in path.components() {
+            if let Some(name) = comp.as_os_str().to_str() {
+                if BUILD_ARTIFACT_DIRS.iter().any(|d| *d == name) {
+                    in_artifact = true;
+                    break;
+                }
+            }
+        }
+        if in_artifact {
+            breakdown.build_artifact_bytes += size;
+            breakdown.build_artifact_files += 1;
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext_lower = ext.to_ascii_lowercase();
+        if SOURCE_EXTS.iter().any(|s| *s == ext_lower.as_str()) {
+            breakdown.source_bytes += size;
+            breakdown.source_files += 1;
+        } else {
+            breakdown.other_bytes += size;
+            breakdown.other_files += 1;
+        }
+    }
+    breakdown
+}
+
+/// Per-corpus breakdown reported to the UI. Lets the
+/// frontend show "your corpus is 87% build artifacts" so
+/// the user understands a low ratio on a Next.js /
+/// Python-venv project is not a bug.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+pub struct CorpusBreakdown {
+    pub source_files: u64,
+    pub source_bytes: u64,
+    pub build_artifact_files: u64,
+    pub build_artifact_bytes: u64,
+    pub other_files: u64,
+    pub other_bytes: u64,
 }
 
 /// Decompress a NexusCompress stream. Returns an error if the
