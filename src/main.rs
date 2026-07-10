@@ -315,11 +315,19 @@ fn main() {
                         Some(nexus_compress::solid_archive::Codec::Lzma) => "LZMA",
                         Some(nexus_compress::solid_archive::Codec::Zstd) => "ZSTD",
                     };
-                    // Show the level only for LZMA; Zstd uses
-                    // its own internal preset (3 by default).
+                    // Sprint 5.7.9: AUTO now resolves to Zstd
+                    // (the fast default), so its suffix should
+                    // be " Zstd 3" not " LZMA <level>". The
+                    // level arg in CLI is only used when the
+                    // user explicitly picked LZMA via --codec
+                    // lzma; for Auto/Zstd, zstd uses its own
+                    // internal preset (3 by default).
                     let level_suffix = match codec_override {
+                        Some(nexus_compress::solid_archive::Codec::Lzma) => {
+                            format!(" {}", level)
+                        }
                         Some(nexus_compress::solid_archive::Codec::Zstd) => String::new(),
-                        _ => format!(" LZMA {}", level),
+                        None => String::new(), // AUTO → Zstd (5.7.9)
                     };
                     // Sprint 5.7.3 hotfix #49: append the
                     // lossless marker so the user can see the
