@@ -1220,6 +1220,7 @@ where
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         CompressionLevel::Lzma(lzma_level) => {
             use rayon::prelude::*;
+            use crate::scheduler::{Weighted, sonic_par_try_map, default_thread_count};
             let progress_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let total_chunks = super_chunks.len();
             let progress_ref = &progress;
@@ -1227,17 +1228,31 @@ where
                 crate::ram::lzma_stream_for_requested_preset(lzma_level)
                     .map_err(|e| format!("LZMA stream: {}", e))
             };
-            let compressed_chunks: Vec<Vec<u8>> = super_chunks
-                .par_iter()
-                .enumerate()
-                .map(|(i, chunk)| {
+            // Sprint 5.7.6 hotfix #54: Sonic Scheduler. We
+            // pre-weight the super_chunks by their byte count
+            // and let LPT partition the work across N
+            // buckets. Each bucket runs sequentially on a
+            // rayon worker thread, but the WORK ASSIGNMENT
+            // is balanced: a 256 MiB random chunk and ten
+            // 1 MiB text chunks no longer land on the same
+            // thread (which would serialize them).
+            let weighted_chunks: Vec<Weighted<Vec<u8>>> = super_chunks
+                .iter()
+                .map(|c| Weighted::new(c.len() as u64, c.clone()))
+                .collect();
+            let n_threads = default_thread_count();
+            let chunk_codecs_ref = &chunk_codecs;
+            let compressed_chunks: Vec<Vec<u8>> = sonic_par_try_map(
+                weighted_chunks,
+                n_threads,
+                |orig_idx, chunk| -> Result<Vec<u8>, String> {
                     let mut out = Vec::new();
                     {
                         // Sprint 5.7.2 hotfix #38: if this chunk was
                         // marked Zstd(-3) by the aggregator, use zstd-fast
                         // (LZMA would hang for minutes on .sst/.png data).
                         let use_fast = matches!(
-                            chunk_codecs.get(i).copied().unwrap_or(level),
+                            chunk_codecs_ref.get(orig_idx).copied().unwrap_or(level),
                             CompressionLevel::Zstd(n) if n < 0
                         );
                         if use_fast {
@@ -1279,9 +1294,9 @@ where
                         chunk.len() / (1024 * 1024),
                         out.len() / 1024
                     );
-                    Ok::<_, String>(out)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                    Ok(out)
+                },
+            )?;
             let total_compressed_size: usize = compressed_chunks.iter().map(|c| c.len()).sum();
             // Sprint 5.7.2 hotfix #46: capture per-chunk compressed
             // sizes in the outer-scope vector so the writer can

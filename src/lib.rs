@@ -49,6 +49,7 @@ pub mod ram;
 pub mod rans_v4;
 pub mod rle;
 pub mod solid_archive;
+pub mod scheduler;
 pub mod stats;
 
 pub use api::{compress_directory_with_backend, CompressionBackend};
