@@ -92,6 +92,63 @@ impl std::str::FromStr for CompressionLevel {
 }
 
 // -----------------------------------------------------------------------
+// Sprint 5.7.7 hotfix #55: CorpusMode
+// -----------------------------------------------------------------------
+
+/// What to include when archiving a directory.
+///
+/// The user controls this with a 3-pill selector in the UI
+/// ("Everything" / "Source" / "Minimal") and a CLI flag
+/// (`--corpus=everything|source|minimal`). The default is
+/// `Everything` since 5.7.7 — the previous default of skipping
+/// dev caches was useful for ratio, but it silently dropped
+/// files the user might want to recover later (a freshly cloned
+/// repo with its `target/` or `.next/` is recoverable from
+/// the package manager, but an in-progress WIP isn't).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CorpusMode {
+    /// Include every file under the root. No skipping.
+    Everything,
+    /// Skip dev caches and build artifacts.
+    Source,
+    /// Keep only source code + manifests.
+    Minimal,
+}
+
+impl Default for CorpusMode {
+    fn default() -> Self {
+        Self::Everything
+    }
+}
+
+impl std::str::FromStr for CorpusMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "everything" | "all" | "full" => Ok(Self::Everything),
+            "source" | "src" | "code" => Ok(Self::Source),
+            "minimal" | "min" => Ok(Self::Minimal),
+            other => Err(format!(
+                "unknown corpus mode '{}'; expected 'everything', 'source', or 'minimal'",
+                other
+            )),
+        }
+    }
+}
+
+impl CorpusMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Everything => "everything",
+            Self::Source => "source",
+            Self::Minimal => "minimal",
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
 // Result types
 // -----------------------------------------------------------------------
 
@@ -2592,47 +2649,16 @@ fn dir_size_estimate(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn should_skip_dir(path: &Path) -> bool {
-    // Walk the path components from the root and match against the
-    // skip list. Using `components()` so the match works regardless
-    // of the user's choice of root.
+fn corpus_should_skip_dir(path: &Path, mode: CorpusMode) -> bool {
+    // Sprint 5.7.7 hotfix #55: parametrise by CorpusMode.
+    if matches!(mode, CorpusMode::Everything) {
+        return false;
+    }
     const SKIP_DIRS: &[&str] = &[
-        // Next.js / Turbopack dev cache.
-        ".next",
-        ".turbo",
-        ".swc",
-        // Claude Code's worktree cache — contains nested git
-        // checkouts that look like source but are intermediate.
-        ".claude",
-        // Nexus dev-server caches (Nexus framework, not ours).
-        ".nexus",
-        // Node modules — typically 100-500 MB of already-compressed
-        // packages; users generally exclude them via `.gitignore`.
-        "node_modules",
-        // Rust / Cargo build artifacts.
-        "target",
-        // Python virtualenvs and bytecode caches.
-        ".venv",
-        "venv",
-        "__pycache__",
-        // Git internals.
-        ".git",
-        // OS / editor transient state.
-        ".DS_Store",
-        "Thumbs.db",
-        // Build output / dist directories.
-        "dist",
-        "build",
-        ".cache",
-        ".tmp",
-        // Coverage / test artifacts.
-        "coverage",
-        ".nyc_output",
-        // Logs.
-        "logs",
-        "log",
-        // PID / socket files.
-        ".run",
+        ".next", ".turbo", ".swc", ".claude", ".nexus",
+        "node_modules", "target", ".venv", "venv", "__pycache__",
+        ".git", ".DS_Store", "Thumbs.db", "dist", "build",
+        ".cache", ".tmp", "coverage", ".nyc_output", "logs", "log", ".run",
     ];
     for comp in path.components() {
         if let Some(name) = comp.as_os_str().to_str() {
@@ -2641,36 +2667,84 @@ fn should_skip_dir(path: &Path) -> bool {
             }
         }
     }
+    if matches!(mode, CorpusMode::Minimal) {
+        const MINIMAL_SKIP_DIRS: &[&str] = &[
+            "assets", "static", "public", "media", "images", "img",
+            "fonts", "icons", "videos", "audio", "screenshots",
+            "docs", "doc", "documentation", "examples", "demo",
+            "fixtures", "mocks", "snapshots", "__snapshots__",
+            "test-data", "testdata",
+        ];
+        for comp in path.components() {
+            if let Some(name) = comp.as_os_str().to_str() {
+                if MINIMAL_SKIP_DIRS.iter().any(|s| *s == name) {
+                    return true;
+                }
+            }
+        }
+    }
     false
 }
 
-fn should_skip_file(path: &Path) -> bool {
-    // Skip lock files of lock-file managers' caches, plus TS
-    // incremental build cache, plus backup/swap files.
+fn corpus_should_skip_file(path: &Path, mode: CorpusMode) -> bool {
+    if matches!(mode, CorpusMode::Everything) {
+        return false;
+    }
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        // Strip leading `.` for matching.
         const SKIP_SUFFIXES: &[&str] = &[
-            ".tsbuildinfo",
-            ".pid",
-            ".sock",
-            ".swp",
-            ".bak",
-            ".tmp",
-            "~",
+            ".tsbuildinfo", ".pid", ".sock", ".swp", ".bak", ".tmp", "~",
         ];
         for s in SKIP_SUFFIXES {
             if name.ends_with(s) {
                 return true;
             }
         }
-        // Skip package-lock.json / pnpm-lock.yaml / yarn.lock — these
-        // are 100-300 KB of JSON that doesn't compress much.
         if name == "package-lock.json"
             || name == "pnpm-lock.yaml"
             || name == "yarn.lock"
             || name == "bun.lockb"
         {
             return true;
+        }
+    }
+    if matches!(mode, CorpusMode::Minimal) {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            const SOURCE_EXTS: &[&str] = &[
+                "ts", "tsx", "js", "jsx", "mjs", "cjs",
+                "py", "pyx", "pyi",
+                "rs", "go", "java", "kt", "kts", "swift",
+                "c", "cpp", "cc", "cxx", "h", "hpp", "hxx",
+                "cs", "rb", "php", "scala", "sc", "clj", "cljs",
+                "ex", "exs", "erl", "hrl", "hs", "lhs", "ml", "mli",
+                "lua", "r", "jl", "dart", "vue", "svelte",
+                "sh", "bash", "zsh", "fish", "ps1",
+                "sql", "graphql", "gql", "proto",
+                "md", "mdx", "txt", "rst", "adoc",
+            ];
+            let ext_lower = ext.to_ascii_lowercase();
+            if !SOURCE_EXTS.iter().any(|s| *s == ext_lower.as_str()) {
+                return true;
+            }
+        } else {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            const ALLOWED_NO_EXT: &[&str] = &[
+                "Makefile", "makefile", "GNUmakefile",
+                "Rakefile", "Gemfile", "Vagrantfile",
+                "Dockerfile", "Procfile",
+                "LICENSE", "LICENCE", "NOTICE",
+                "README", "CHANGELOG", "CONTRIBUTING",
+                "Cargo.lock", "go.mod", "go.sum",
+                "package.json", "tsconfig.json",
+                "pyproject.toml", "setup.py", "setup.cfg",
+                "requirements.txt", "Pipfile", "Pipfile.lock",
+                "pom.xml", "build.gradle", "build.gradle.kts",
+                ".gitignore", ".gitattributes", ".editorconfig",
+                ".eslintrc", ".eslintrc.js", ".eslintrc.json",
+                ".prettierrc", ".prettierrc.js", ".prettierrc.json",
+            ];
+            if !ALLOWED_NO_EXT.iter().any(|s| *s == name) {
+                return true;
+            }
         }
     }
     false
@@ -2682,6 +2756,15 @@ fn collect_paths(
         out: &mut Vec<std::path::PathBuf>,
         skipped_bytes: &mut u64,
     ) -> Result<(), String> {
+        // Sprint 5.7.7 hotfix #55: read mode from env.
+        // Pragmatic choice: thread it through every
+        // callsite would be a much larger diff. The CLI
+        // and Tauri command set NEXUS_CORPUS_MODE before
+        // invoking this walker.
+        let mode = std::env::var("NEXUS_CORPUS_MODE")
+            .ok()
+            .and_then(|s| s.parse::<CorpusMode>().ok())
+            .unwrap_or_default();
         let entries = std::fs::read_dir(dir)
             .map_err(|e| format!("read_dir({}) failed: {}", dir.display(), e))?;
         for entry in entries {
@@ -2691,7 +2774,7 @@ fn collect_paths(
                 .file_type()
                 .map_err(|e| format!("file_type({}) failed: {}", path.display(), e))?;
             if file_type.is_dir() {
-                if should_skip_dir(&path) {
+                if corpus_should_skip_dir(&path, mode) {
                     // Sprint 5.7.2 hotfix #45: report an ESTIMATE for
                     // the skip size, do NOT recurse into the dir.
                     // Recursive walks on dirs like `.claude/worktrees/*`
@@ -2707,7 +2790,7 @@ fn collect_paths(
                 }
                 collect_paths(root, &path, out, skipped_bytes)?;
             } else if file_type.is_file() {
-                if should_skip_file(&path) {
+                if corpus_should_skip_file(&path, mode) {
                     if let Ok(md) = entry.metadata() {
                         *skipped_bytes += md.len();
                         eprintln!(
@@ -3311,4 +3394,5 @@ mod tests {
         assert_eq!(err.code, "internal");
         assert_eq!(err.message, "oops");
     }
+
 }

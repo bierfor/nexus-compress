@@ -229,6 +229,17 @@ pub async fn compress_target_cmd(
         raw_extensions,
         minify_extensions,
     );
+    // Sprint 5.7.7 hotfix #55: corpus mode from the
+    // GUI's 3-pill selector. Default Everything
+    // (no skip). The walker reads NEXUS_CORPUS_MODE
+    // env var, so we set it here before spawn_blocking.
+    let corpus_mode: Option<nexus_compress::api::CorpusMode> = req
+        .get("corpus_mode")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<nexus_compress::api::CorpusMode>().ok());
+    if let Some(m) = corpus_mode {
+        std::env::set_var("NEXUS_CORPUS_MODE", m.as_str());
+    }
     // Sprint 5.7.2 PR #4: optional encryption. When the frontend
     // includes `password` in the req, we route to the encrypted
     // pipeline (v4 codec + AES-256-GCM + optional Reed-Solomon).

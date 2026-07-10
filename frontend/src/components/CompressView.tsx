@@ -112,6 +112,20 @@ const CODECS: { id: CodecChoice; icon: string }[] = [
 // text corpora (typically 1.5-2x instead of 5-7x).
 type FidelityChoice = "lossy" | "lossless";
 
+// Sprint 5.7.7 hotfix #55: corpus mode 3-pill selector.
+// "everything" (default) = full directory, no skip.
+// "source" = skip dev caches / lock files (pre-5.7.7
+// hardcoded default; still useful for ratio-focused
+// backups). "minimal" = only source code + manifests,
+// highest ratio but cannot rebuild.
+type CorpusModeChoice = "everything" | "source" | "minimal";
+
+const CORPUS_MODES: { id: CorpusModeChoice; icon: string; desc: string }[] = [
+  { id: "everything", icon: "📦", desc: "compress.corpus.everything.desc" },
+  { id: "source",     icon: "📝", desc: "compress.corpus.source.desc" },
+  { id: "minimal",    icon: "✨", desc: "compress.corpus.minimal.desc" },
+];
+
 const FIDELITY: { id: FidelityChoice; icon: string }[] = [
   { id: "lossy", icon: "✨" },
   { id: "lossless", icon: "🔒" },
@@ -186,6 +200,12 @@ export function CompressView({
   // user opts in to bit-exact reversibility by picking
   // "lossless".
   const [fidelity, setFidelity] = useState<FidelityChoice>("lossy");
+  // Sprint 5.7.7 hotfix #55: corpus mode (3-pill).
+  // "everything" (default since 5.7.7) includes the
+  // full directory; "source" skips dev caches (the
+  // pre-5.7.7 default); "minimal" keeps only source
+  // code + manifests. See api.rs CorpusMode.
+  const [corpusMode, setCorpusMode] = useState<CorpusModeChoice>("everything");
   // Sprint 5.7.4 hotfix #50: per-extension override lists for
   // the Advanced panel. Strings are stored as a single
   // comma-separated list per the i18n placeholder convention
@@ -470,6 +490,11 @@ export function CompressView({
           // pass either ".json" or "json" or "JSON".
           raw_extensions: parseExtList(rawExtensions),
           minify_extensions: parseExtList(minifyExtensions),
+          // Sprint 5.7.7 hotfix #55: corpus mode from the
+          // 3-pill selector. Backend parses it into
+          // api::CorpusMode and sets NEXUS_CORPUS_MODE
+          // before the walk.
+          corpus_mode: corpusMode,
           // Sprint 5.7.2: optional encryption. When `password`
           // is set, the backend routes to the encrypted pipeline
           // (v4 + AES-256-GCM + optional Reed-Solomon). When
@@ -906,6 +931,54 @@ export function CompressView({
                   </div>
                   {active && (
                     <div className="absolute top-3 right-3 w-2 h-2 rounded-full bg-amber-400" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Sprint 5.7.7 hotfix #55: corpus mode 3-pill selector.
+            Controls what gets included in the directory archive.
+            "everything" (default) = full snapshot, "source" =
+            skip dev caches (5.7.6 default), "minimal" = source
+            code only. Each pill shows an icon, the label, and
+            a 1-line description. The active pill is highlighted
+            with a coloured border + dot, matching the pattern
+            used for Mode/Codec/Fidelity. */}
+        <div className="mb-10">
+          <div className="flex items-baseline gap-3 mb-3">
+            <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase">
+              {t("compress.corpus")}
+            </div>
+            <div className="text-zinc-600 text-[11px]">
+              {t("compress.corpus.desc")}
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            {CORPUS_MODES.map((m) => {
+              const active = corpusMode === m.id;
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => setCorpusMode(m.id)}
+                  className={`relative text-left rounded-xl border p-3 transition-all ${
+                    active
+                      ? "border-emerald-400/40 bg-emerald-400/[0.06] shadow-[0_0_0_1px_rgba(52,211,153,0.15)]"
+                      : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[16px] leading-none">{m.icon}</span>
+                    <span className="text-zinc-200 text-[12.5px] font-semibold">
+                      {t(`compress.corpus.${m.id}`)}
+                    </span>
+                  </div>
+                  <div className="text-zinc-500 text-[11px] leading-snug">
+                    {t(`compress.corpus.${m.id}.desc` as const)}
+                  </div>
+                  {active && (
+                    <div className="absolute top-3 right-3 w-2 h-2 rounded-full bg-emerald-400" />
                   )}
                 </button>
               );

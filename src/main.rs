@@ -59,6 +59,8 @@ fn print_help() {
     eprintln!("                    Archives are bit-exact reversible but ratio drops to ~1.5-2x.");
     eprintln!("                    Use for backups where integrity > compression.");
     eprintln!("    --raw-ext EXT[,..]  pin extensions to Raw (bit-exact). e.g. --raw-ext .json,.env");
+    eprintln!("    --corpus MODE       directory walk mode: everything|source|minimal");
+    eprintln!("                        (default: everything = no skip, full archive)");
     eprintln!("                    Overrides the default per-extension rule. --lossless implies all.");
     eprintln!("    --minify-ext EXT[,..]  pin extensions to Conservative minify. e.g. --minify-ext .md");
     eprintln!("                    Useful to opt a file OUT of swc AST (when the default is .ts).");
@@ -110,6 +112,13 @@ fn main() {
     // of the default rule.
     let mut raw_ext: Vec<String> = Vec::new();
     let mut minify_ext: Vec<String> = Vec::new();
+    // Sprint 5.7.7 hotfix #55: --corpus MODE. Controls
+    // the directory walk. Default is "everything" (no
+    // skip) — the user wanted control, and the previous
+    // hardcoded skip-list silently dropped files.
+    // Accepts: everything|source|minimal (with aliases
+    // all|full|src|code|min).
+    let mut corpus_mode: Option<nexus_compress::api::CorpusMode> = None;
     let mut password: Option<String> = None;
     let mut recovery: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -175,6 +184,21 @@ fn main() {
                     );
                 }
             }
+            // Sprint 5.7.7 hotfix #55: --corpus MODE.
+            arg if arg == "--corpus" || arg.starts_with("--corpus=") => {
+                let v = if let Some(eq) = a.strip_prefix("--corpus=") {
+                    eq.to_string()
+                } else {
+                    iter.next().cloned().unwrap_or_default()
+                };
+                match v.parse::<nexus_compress::api::CorpusMode>() {
+                    Ok(m) => corpus_mode = Some(m),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(2);
+                    }
+                }
+            }
             other if other.starts_with("--") => {
                 eprintln!("unknown option: {}", other);
                 std::process::exit(2);
@@ -187,6 +211,12 @@ fn main() {
     if positional.is_empty() {
         print_help();
         std::process::exit(2);
+    }
+    // Sprint 5.7.7 hotfix #55: set NEXUS_CORPUS_MODE
+    // before the walk. The walker reads this env var
+    // in collect_paths(). Default (None) is Everything.
+    if let Some(m) = corpus_mode {
+        std::env::set_var("NEXUS_CORPUS_MODE", m.as_str());
     }
     let sub = positional[0].as_str();
     match sub {
