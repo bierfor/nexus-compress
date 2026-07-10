@@ -96,6 +96,21 @@ const PASSTHROUGH_EXTS: &[&str] = &[
     "iso", "dmg", "img", "vhd", "vmdk",
     // Compiled binaries — usually already have internal compression
     "exe", "dll", "so", "dylib", "class", "pdb",
+    // Python bytecode — already compressed (PEP 552 + zlib)
+    "pyc", "pyo",
+    // Java bytecode — already compressed (class) is above; jar
+    // is also there. Add `.war` / `.ear` for completeness.
+    // SQLite databases — already compressed (per page)
+    "db", "sqlite", "sqlite3", "ldb", "sst", "rocksdb",
+    // Java JAR/WAR/EAR are in the archive list above.
+    // Our own archive format (zstd-compressed)
+    "nxs6", "nxar",
+    // macOS / iOS / Android package formats
+    "apk", "aab", "ipa", "dmg", "pkg", "deb", "rpm",
+    // Compiled LLVM bitcode
+    "bc",
+    // Windows installer / MSI
+    "msi", "msp", "cab",
 ];
 
 /// Per-file entry in the archive.
