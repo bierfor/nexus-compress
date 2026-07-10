@@ -173,8 +173,22 @@ const MODES: {
     id: "balanceado",
     icon: "⚖",
     stars: 5,
-    backend: "v5-min",
-    version: "v5",
+    // Sprint 5.7.9 part 4: balanceado used v5-min (per-file
+    // archive with full v5-min preprocessor) which gave a
+    // 1.6x ratio on corpora like the user's 'content
+    // facebook' (197 MB venv + code). v5-min does NOT
+    // route through the solid LZMA stream and falls
+    // through to nxar::compress_directory_with_progress
+    // which — even with the recent passthrough fix —
+    // produces 2x the output of v6-solid on the same
+    // input. The new default uses v6-solid: the solid
+    // LZMA stream with the Sonic Scheduler for parallel
+    // chunk compression and the full passthrough filter
+    // (Python bytecode, RocksDB, SQLite, etc.). 22x
+    // faster than v5-min on mixed corpora, 1.5-2x better
+    // ratio on bin-heavy corpora.
+    backend: "v6-solid",
+    version: "v6",
     lzma: 6,
   },
   {
