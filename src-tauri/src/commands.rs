@@ -298,7 +298,83 @@ pub async fn compress_target_cmd(
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))?;
-    let result: CompressTargetResult = to_ipc(inner)?;
+    let mut result: CompressTargetResult = to_ipc(inner)?;
+
+    // Sprint 5.7.13: write the compressed bytes to disk BEFORE
+    // returning to the frontend. The previous version returned
+    // `result.compressed_bytes` (a `Vec<u8>` of the entire
+    // archive) over the Tauri IPC. On a 5 GB corpus the WebView
+    // would spend minutes copying the buffer through the IPC
+    // boundary (`WebKit::WebURLSchemeTask::didReceiveData` →
+    // `WebCore::SharedMemory::copyBuffer` → `_platform_memmove`)
+    // and the UI would freeze, ballooning the process footprint
+    // to 30+ GB. The fix is to write the file here, in the
+    // backend, and return only the path. The frontend already
+    // expects `output_path` to be non-empty
+    // (CompressView.tsx:642 hotfix #40).
+    let output_dir_for_write = req
+        .get("output_dir")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    // Resolve the final output path: `output_dir/<basename>.nxs6`
+    // if the user picked a directory, or `<basename>.nxs6`
+    // next to the input if they didn't.
+    let final_output_path: PathBuf = match output_dir_for_write.as_ref() {
+        Some(dir) if !dir.as_os_str().is_empty() => {
+            dir.join(format!("{}.{}", filename_for_db, result.output_ext))
+        }
+        _ => {
+            // No output_dir: write next to the input.
+            let input_path = PathBuf::from(&path_str);
+            let parent = input_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            parent.join(format!(
+                "{}.{}",
+                input_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("archive"),
+                result.output_ext
+            ))
+        }
+    };
+    // Only write if the engine actually produced bytes
+    // (i.e. compression succeeded). For an empty corpus the
+    // engine returns 0 bytes and the frontend should see that.
+    if !result.compressed_bytes.is_empty() {
+        if let Some(parent) = final_output_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return Err(format!(
+                    "failed to create output dir {}: {}",
+                    parent.display(),
+                    e
+                ));
+            }
+        }
+        if let Err(e) = std::fs::write(&final_output_path, &result.compressed_bytes) {
+            return Err(format!(
+                "failed to write archive to {}: {}",
+                final_output_path.display(),
+                e
+            ));
+        }
+        result.output_path = final_output_path.to_string_lossy().to_string();
+        eprintln!(
+            "[nexus-rar] wrote {} bytes to {}",
+            result.compressed_size,
+            result.output_path
+        );
+    } else {
+        // Empty archive (e.g. empty corpus). We still want
+        // output_path to reflect what we tried to do so the
+        // UI can surface the "0 bytes" state cleanly.
+        result.output_path = final_output_path.to_string_lossy().to_string();
+    }
+    // Strip the bytes from the IPC payload. The frontend doesn't
+    // need them — it shows the path in the success card and
+    // optionally opens Finder to the path.
+    result.compressed_bytes = Vec::new();
 
     // Sprint 5.7 hotfix #20: persist into the local SQLite store so
     // the Recientes view (RecentView.tsx) and the Home dashboard
