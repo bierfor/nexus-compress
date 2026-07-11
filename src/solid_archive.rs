@@ -294,88 +294,16 @@ pub struct FileEntry {
 /// Files matching `is_incompressible_ext()` use zstd(-3) which on
 /// incompressible data runs at ~5.7 GB/s (vs LZMA which would
 /// spend minutes looking for matches that don't exist).
+///
+/// **Sprint 5.7.10-A:** this is now a thin wrapper around
+/// [`crate::format_knowledge::is_raw_format`], the single source
+/// of truth for the extension list. The previous ~80-entry
+/// `matches!()` arm lived here and was duplicated verbatim in
+/// `pick_preprocessor_with_overrides`, plus partially in
+/// `nxar::PASSTHROUGH_EXTS` and `api::PASSTHROUGH_EXT_LIST`.
+/// All four call sites now route through the master list.
 fn is_incompressible_ext(name: &str) -> bool {
-    let ext = std::path::Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .unwrap_or_default();
-    matches!(
-        ext.as_str(),
-        // Already-compressed data formats (RocksDB LZ4, native binaries,
-        // pre-built libraries, image/video/audio formats, archives).
-        "sst" | "ldb" | "rocksdb"
-        | "dylib" | "so" | "dll" | "node"
-        | "o" | "a" | "obj" | "lib" | "pdb"
-        // Raster images (already-compressed — no gain from minify).
-        | "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "icns"
-        | "bmp" | "tiff" | "tif"
-        // Modern image formats (HEIC/AVIF/JXL are all
-        // already compressed with intra-prediction; the
-        // Conservative minifier would mangle the codec-
-        // specific header bytes).
-        | "heic" | "heif" | "avif" | "jxl"
-        // RAW camera formats.
-        | "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2"
-        // Vector design files — already optimized/compressed.
-        | "ai" | "eps" | "psd" | "psb" | "xd" | "sketch" | "fig" | "svgz"
-        // 3D models — usually compressed binary.
-        | "stl" | "3ds" | "fbx" | "blend" | "gltf" | "glb" | "usdz"
-        // Video containers.
-        // NOTE: `ts` is excluded — it's ambiguous with
-        // TypeScript (TypeScript source files use the
-        // `.ts` extension too, and we want them to go
-        // through SwcAst, not the Raw passthrough). MPEG-TS
-        // files will be detected by the entropy check at
-        // runtime — random bytes trigger the incompressible
-        // flag, structured .ts video streams will get the
-        // Conservative minify (which is a no-op for binary
-        // data anyway).
-        | "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v"
-        | "flv" | "wmv" | "3gp" | "3g2" | "m2ts" | "mts" | "vob"
-        // Audio.
-        | "mp3" | "aac" | "m4a" | "flac" | "ogg" | "opus" | "wav"
-        | "wma" | "aiff" | "aif" | "mka" | "alac"
-        // Fonts.
-        | "woff" | "woff2" | "ttf" | "otf" | "eot"
-        // Archives.
-        | "gz" | "bz2" | "xz" | "zst" | "lz4" | "br"
-        | "zip" | "7z" | "rar" | "tar" | "iso" | "cab" | "dmg" | "pkg" | "deb" | "rpm"
-        // Disk images / installers / virtual machines.
-        | "img" | "vmdk" | "vdi" | "qcow2" | "ova" | "ovf"
-        // Our own formats.
-        | "nxs" | "nxe" | "nxr"
-        // Documents — already-optimized binary formats.
-        | "pdf"
-        // Java/compiled bytecode.
-        | "class" | "jar" | "war"
-        // Office Open XML (Word, Excel, PowerPoint are all
-        // zip archives with XML inside — Conservative minify
-        // would corrupt the zip central directory).
-        | "docx" | "docm" | "dotx" | "dotm"
-        | "xlsx" | "xlsm" | "xlsb" | "xltx" | "xltm"
-        | "pptx" | "pptm" | "potx" | "potm" | "ppsx" | "ppsm"
-        // Legacy Office.
-        | "doc" | "xls" | "ppt" | "msi"
-        // OpenDocument / LibreOffice.
-        | "odt" | "ods" | "odp" | "odb" | "odf" | "odg" | "odm"
-        // Apple iWork (Pages/Numbers/Keynote — all zip-based).
-        | "pages" | "numbers" | "key"
-        // E-books (zip with XHTML).
-        | "epub" | "mobi" | "azw" | "azw3" | "fb2"
-        // Subtitle / caption files are text and Conservative
-        // is safe for them, but the SRT/VTT formats are
-        // sometimes wrapped in MP4 containers — listing them
-        // as Raw here means the codec handles the whole
-        // stream without minify interference.
-        | "srt" | "vtt" | "sub" | "idx"
-        // Databases (binary formats).
-        | "sqlite" | "sqlite3" | "db" | "mdb" | "accdb"
-        // Scientific / engineering data.
-        | "hdf5" | "nc" | "nc4" | "fits"
-        // Encrypted / certificate formats.
-        | "keystore" | "jks" | "p12" | "pfx" | "cer" | "crt" | "pem"
-    )
+    crate::format_knowledge::is_raw_format(name)
 }
 
 /// Sprint 5.7.2 hotfix #39: Shannon entropy pre-flight check.
@@ -473,17 +401,19 @@ impl PreprocessorOverrides {
     }
 }
 
-fn pick_preprocessor(name: &str) -> Preprocessor {
-    pick_preprocessor_with_overrides(name, &PreprocessorOverrides::default())
-}
-
-/// Sprint 5.7.4 hotfix #50: same as `pick_preprocessor` but
-/// consults the per-extension override list first. The
-/// resolution order is:
+/// Sprint 5.7.4 hotfix #50: consults the per-extension override
+/// list first, then the default rule. The resolution order is:
 ///   1. `overrides.raw_extensions` (if the file's ext is here,
 ///      force Raw — bit-exact regardless of the default rule)
 ///   2. `overrides.minify_extensions` (force Conservative)
-///   3. Default rule (the original pick_preprocessor table)
+///   3. Default rule (the `format_knowledge::is_raw_format`
+///      table + JS-family SwcAst + Conservative fallback)
+///
+/// **Sprint 5.7.10-A:** the dead wrapper `pick_preprocessor`
+/// (no-arg version, unused since the overrides landed in
+/// 5.7.4) was removed. Callers that don't have overrides use
+/// `pick_preprocessor_with_overrides(name, &PreprocessorOverrides::default())`
+/// directly.
 fn pick_preprocessor_with_overrides(
     name: &str,
     overrides: &PreprocessorOverrides,
@@ -517,78 +447,28 @@ fn pick_preprocessor_with_overrides(
     // pre-flight correctly skipped minify for `report.docx`,
     // but the preprocessor itself still minified it
     // (returning `Conservative`), which the
-    // format-coverage tests caught. This match is now
-    // the single source of truth for the "always Raw"
-    // list — keep it in sync with `is_incompressible_ext`
-    // when adding new formats.
-    match ext.as_str() {
-        // Known high-entropy / already-compressed formats → passthrough.
-        // Streaming them through the preprocessor + codec costs CPU
-        // with near-zero ratio gain. Reading direct saves ~200-500 MB/s.
-        "sst" | "ldb" | "rocksdb"
-        | "dylib" | "so" | "dll" | "node"
-        | "o" | "a" | "obj" | "lib" | "pdb"
-        // Raster images.
-        | "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "icns"
-        | "bmp" | "tiff" | "tif"
-        // Modern image formats (HEIC/AVIF/JXL).
-        | "heic" | "heif" | "avif" | "jxl"
-        // RAW camera formats.
-        | "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2"
-        // Vector design files.
-        | "ai" | "eps" | "psd" | "psb" | "xd" | "sketch" | "fig" | "svgz"
-        // 3D models.
-        | "stl" | "3ds" | "fbx" | "blend" | "gltf" | "glb" | "usdz"
-        // Video containers. `ts` is excluded — it's
-        // ambiguous with TypeScript (see the same note in
-        // is_incompressible_ext). MPEG-TS files go through
-        // SwcAst (binary-safe) and the user's TypeScript
-        // source gets the proper AST minify.
-        | "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v"
-        | "flv" | "wmv" | "3gp" | "3g2" | "m2ts" | "mts" | "vob"
-        // Audio.
-        | "mp3" | "aac" | "m4a" | "flac" | "ogg" | "opus" | "wav"
-        | "wma" | "aiff" | "aif" | "mka" | "alac"
-        // Fonts.
-        | "woff" | "woff2" | "ttf" | "otf" | "eot"
-        // Archives.
-        | "gz" | "bz2" | "xz" | "zst" | "lz4" | "br"
-        | "zip" | "7z" | "rar" | "tar" | "iso" | "cab" | "dmg" | "pkg" | "deb" | "rpm"
-        // Disk images / VMs.
-        | "img" | "vmdk" | "vdi" | "qcow2" | "ova" | "ovf"
-        // Our own formats.
-        | "nxs" | "nxe" | "nxr"
-        // Documents.
-        | "pdf"
-        // Java/compiled bytecode.
-        | "class" | "jar" | "war"
-        // Office Open XML (zip archives with XML inside).
-        | "docx" | "docm" | "dotx" | "dotm"
-        | "xlsx" | "xlsm" | "xlsb" | "xltx" | "xltm"
-        | "pptx" | "pptm" | "potx" | "potm" | "ppsx" | "ppsm"
-        // Legacy Office.
-        | "doc" | "xls" | "ppt" | "msi"
-        // OpenDocument / LibreOffice.
-        | "odt" | "ods" | "odp" | "odb" | "odf" | "odg" | "odm"
-        // Apple iWork.
-        | "pages" | "numbers" | "key"
-        // E-books.
-        | "epub" | "mobi" | "azw" | "azw3" | "fb2"
-        // Subtitles.
-        | "srt" | "vtt" | "sub" | "idx"
-        // Databases.
-        | "sqlite" | "sqlite3" | "db" | "mdb" | "accdb"
-        // Scientific data.
-        | "hdf5" | "nc" | "nc4" | "fits"
-        // Encrypted / certificate formats.
-        | "keystore" | "jks" | "p12" | "pfx" | "cer" | "crt" | "pem" => Preprocessor::Raw,
-        // JavaScript/TypeScript AST minify — lossy but big ratio on source.
-        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => Preprocessor::SwcAst,
-        // HTML/CSS fall through to Conservative minify (the hotfix #41
-        // HTML-aware minify was prototyped but proved buggy — reverted).
-        // Everything else: conservative whitespace/comment strip.
-        _ => Preprocessor::Conservative,
+    // format-coverage tests caught.
+    //
+    // **Sprint 5.7.10-A:** both call sites now route
+    // through `crate::format_knowledge::is_raw_format`, the
+    // single source of truth. Adding a new format is a
+    // one-line change in `format_knowledge::RAW_FORMATS`.
+    if crate::format_knowledge::is_raw_format(name) {
+        return Preprocessor::Raw;
     }
+    // JavaScript/TypeScript AST minify — lossy but big ratio on source.
+    // This is a *second* pass after the raw check: `.ts` is
+    // deliberately NOT in RAW_FORMATS (see the module
+    // docstring in `format_knowledge.rs`) so TypeScript keeps
+    // its SwcAst path. MPEG-TS files (same extension) get
+    // caught by the runtime Shannon entropy check instead.
+    if matches!(ext.as_str(), "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx") {
+        return Preprocessor::SwcAst;
+    }
+    // HTML/CSS fall through to Conservative minify (the hotfix #41
+    // HTML-aware minify was prototyped but proved buggy — reverted).
+    // Everything else: conservative whitespace/comment strip.
+    Preprocessor::Conservative
 }
 
 /// Sprint 5.7.5 hotfix #52: the Format Oracle. Decides

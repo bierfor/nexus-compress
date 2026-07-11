@@ -74,44 +74,15 @@ const NXAR_VERSION: u8 = 0x01;
 /// codec entirely and store the bytes verbatim — re-encoding
 /// random-ish compressed data would spend 30–90 s per file for
 /// zero size reduction.
-const PASSTHROUGH_EXTS: &[&str] = &[
-    // Images — already entropy-encoded on disk
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico",
-    "heic", "heif", "avif", "jxl", "tiff", "tif",
-    "dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2",
-    // Video — already entropy-encoded
-    "mp4", "m4v", "mov", "webm", "mkv", "avi", "wmv", "flv",
-    "3gp", "3g2", "ts", "m2ts", "mts", "vob", "ogv",
-    // Audio — already entropy-encoded (lossy codecs) or compressed (lossless)
-    "mp3", "m4a", "aac", "ogg", "opus", "flac", "alac", "wav",
-    "wma", "aiff", "aif", "mka",
-    // Archives — already compressed
-    "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst", "lz4", "lz",
-    "pkg", "deb", "rpm", "apk", "ipa", "jar", "war", "ear",
-    // Documents — PDF/DOCX/XLSX/PPTX are ZIP-based + compressed
-    "pdf", "docx", "pptx", "xlsx", "odt", "ods", "odp", "epub",
-    // Fonts — already compressed binary formats
-    "ttf", "otf", "woff", "woff2", "eot",
-    // Disk images — already compressed
-    "iso", "dmg", "img", "vhd", "vmdk",
-    // Compiled binaries — usually already have internal compression
-    "exe", "dll", "so", "dylib", "class", "pdb",
-    // Python bytecode — already compressed (PEP 552 + zlib)
-    "pyc", "pyo",
-    // Java bytecode — already compressed (class) is above; jar
-    // is also there. Add `.war` / `.ear` for completeness.
-    // SQLite databases — already compressed (per page)
-    "db", "sqlite", "sqlite3", "ldb", "sst", "rocksdb",
-    // Java JAR/WAR/EAR are in the archive list above.
-    // Our own archive format (zstd-compressed)
-    "nxs6", "nxar",
-    // macOS / iOS / Android package formats
-    "apk", "aab", "ipa", "dmg", "pkg", "deb", "rpm",
-    // Compiled LLVM bitcode
-    "bc",
-    // Windows installer / MSI
-    "msi", "msp", "cab",
-];
+///
+/// **Sprint 5.7.10-A:** the standalone `PASSTHROUGH_EXTS`
+/// const was deleted. The single source of truth now lives
+/// in [`crate::format_knowledge::RAW_FORMATS`] and is
+/// queried via [`crate::format_knowledge::is_raw_format`].
+/// This module re-exports the helper for ergonomics so the
+/// call sites below read as `format_knowledge::is_raw_format(name)`
+/// without dragging the full crate path each time.
+use crate::format_knowledge;
 
 /// Per-file entry in the archive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,10 +243,14 @@ where
         // so the decoder can detect passthrough entries and skip
         // the codec entirely. Entry size on disk = uncompressed
         // (no LZ77 / rANS work).
-        let lower_rel = rel.to_ascii_lowercase();
-        let is_passthrough = PASSTHROUGH_EXTS.iter().any(|ext| {
-            lower_rel.ends_with(ext) || lower_rel.ends_with(&format!(".{}", ext))
-        });
+        //
+        // Sprint 5.7.10-A: the previous `lower.ends_with(ext)`
+        // check had false positives — `foopng` matched because
+        // its basename ends with the substring "png", and
+        // `foo.somethingpng` matched the same way. The new
+        // `is_raw_format` uses `Path::extension()` so it only
+        // fires on a proper `.png` extension.
+        let is_passthrough = format_knowledge::is_raw_format(&rel);
         if is_passthrough {
             let header = b"NXAR\x01PT";
             let mut payload = Vec::with_capacity(header.len() + bytes.len());

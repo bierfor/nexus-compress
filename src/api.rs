@@ -2384,31 +2384,16 @@ where
             //      AFTER the LZMA stream so the decoder can reassemble.
             let mut lzma_files: Vec<(String, Vec<u8>)> = Vec::with_capacity(files.len());
             let mut passthrough_files: Vec<(String, Vec<u8>)> = Vec::new();
-            let lower_ext = |s: &str| s.to_ascii_lowercase();
-            // Same list as nxar.rs's PASSTHROUGH_EXTS. We duplicate
-            // it here (rather than re-exporting from nxar) to keep
-            // api.rs self-contained.
-            const PASSTHROUGH_EXT_LIST: &[&str] = &[
-                "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico",
-                "heic", "heif", "avif", "jxl", "tiff", "tif",
-                "dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2",
-                "mp4", "m4v", "mov", "webm", "mkv", "avi", "wmv", "flv",
-                "3gp", "3g2", "ts", "m2ts", "mts", "vob", "ogv",
-                "mp3", "m4a", "aac", "ogg", "opus", "flac", "alac", "wav",
-                "wma", "aiff", "aif", "mka",
-                "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst",
-                "lz4", "lz", "pkg", "deb", "rpm", "apk", "ipa", "jar", "war", "ear",
-                "pdf", "docx", "pptx", "xlsx", "odt", "ods", "odp", "epub",
-                "ttf", "otf", "woff", "woff2", "eot",
-                "iso", "dmg", "img", "vhd", "vmdk",
-                "exe", "dll", "so", "dylib", "class", "pdb",
-            ];
+            // Sprint 5.7.10-A: the local `PASSTHROUGH_EXT_LIST`
+            // and the `lower.ends_with(ext)` check are gone.
+            // The single source of truth lives in
+            // `crate::format_knowledge::RAW_FORMATS` and is
+            // queried via `is_raw_format`. The new check uses
+            // `Path::extension()` so it doesn't false-positive
+            // on basenames that happen to end in the substring
+            // (e.g. `foopng` no longer matches `png`).
             for (name, bytes) in files.iter() {
-                let lower = lower_ext(name);
-                let is_pt = PASSTHROUGH_EXT_LIST.iter().any(|ext| {
-                    lower.ends_with(ext) || lower.ends_with(&format!(".{}", ext))
-                });
-                if is_pt {
+                if crate::format_knowledge::is_raw_format(name) {
                     passthrough_files.push((name.clone(), bytes.clone()));
                 } else {
                     lzma_files.push((name.clone(), bytes.clone()));
