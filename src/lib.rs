@@ -56,6 +56,11 @@ pub mod rle;
 pub mod solid_archive;
 pub mod scheduler;
 pub mod stats;
+/// Sprint 5.7.10-B: single source of truth for corpus walking
+/// + skip-list filtering. Replaces the four duplicated walkers
+/// that used to live in `nxar.rs`, `main.rs`, `api.rs`, and
+/// `bin/bench_solid.rs`.
+pub mod walker;
 
 pub use api::{compress_directory_with_backend, CompressionBackend};
 pub use codec::{compress, compress_premium, decompress};

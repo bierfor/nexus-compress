@@ -658,7 +658,7 @@ where
     // Sprint 5.7.2 hotfix #29: emit an IMMEDIATE "starting" event
     // so the UI shows something the instant the user clicks
     // Comprimir. Previously the first event fired only AFTER
-    // walk_dir_total_bytes + walk_dir_for_solid (which read all
+    // walker::total_bytes + walk_dir_for_solid (which read all
     // 5 GB of files into RAM) — leaving the UI frozen at 0%
     // for up to a minute on large directories.
     progress(ProgressEvent {
@@ -797,7 +797,7 @@ where
             // a pre-event at 0% with a real bytes_total before the
             // work starts, so the user sees the bar at 0% with
             // a non-zero denominator from the first paint.
-            let total_size = walk_dir_total_bytes(input_path);
+            let total_size = crate::walker::total_bytes(input_path);
             progress(ProgressEvent {
                 phase: "compressing".to_string(),
                 current_file: String::new(),
@@ -1473,7 +1473,7 @@ where
         // for the file enumeration; acceptable for a "secure
         // backup" UX where the user already expects a few-second
         // wait.
-        let total_size = walk_dir_total_bytes(input_path);
+        let total_size = crate::walker::total_bytes(input_path);
         let (dir_result, archive) = compress_directory_with_backend(
             input_path,
             CompressionBackend::V6Solid,
@@ -1574,7 +1574,7 @@ where
         ratio,
         compress_time_ms,
         compressed_bytes: compressed,
-        n_files: if is_dir { walk_dir_count(input_path) } else { 1 },
+        n_files: if is_dir { crate::walker::count_files(input_path) } else { 1 },
         corpus_breakdown: if is_dir {
             crate::stats::take_corpus_breakdown()
         } else {
@@ -1618,27 +1618,6 @@ fn compute_output_path_with_ext(
     let base = parent.join(format!("{}.{}", stem, output_ext));
     let final_path = strip_trailing_dot_star(&base);
     (final_path.to_string_lossy().into_owned(), output_ext)
-}
-
-/// Count files in a directory (regular files only) for the
-/// `n_files` field of `CompressTargetResult` in the encrypted
-/// directory path. Used to populate the UI's "X files" stat.
-fn walk_dir_count(root: &Path) -> u64 {
-    fn walk(p: &Path) -> std::io::Result<u64> {
-        let mut n = 0u64;
-        for entry in std::fs::read_dir(p)? {
-            let entry = entry?;
-            let path = entry.path();
-            let ft = entry.file_type()?;
-            if ft.is_dir() {
-                n += walk(&path)?;
-            } else if ft.is_file() {
-                n += 1;
-            }
-        }
-        Ok(n)
-    }
-    walk(root).unwrap_or(0)
 }
 
 /// Decompress a V3-format encrypted archive (NXE\0 / NXR\0 magic).
@@ -2219,28 +2198,6 @@ impl ProgressEvent {
     }
 }
 
-/// Walk a directory and sum the byte sizes of every regular file.
-/// Used for the bytes_total in the progress bar.
-fn walk_dir_total_bytes(root: &Path) -> u64 {
-    fn walk(p: &Path) -> std::io::Result<u64> {
-        let mut total = 0u64;
-        for entry in std::fs::read_dir(p)? {
-            let entry = entry?;
-            let path = entry.path();
-            let ft = entry.file_type()?;
-            if ft.is_dir() {
-                total += walk(&path)?;
-            } else if ft.is_file() {
-                if let Ok(md) = entry.metadata() {
-                    total += md.len();
-                }
-            }
-        }
-        Ok(total)
-    }
-    walk(root).unwrap_or(0)
-}
-
 /// Compress a directory using the chosen backend. The directory
 /// is walked recursively and each file is fed through the right
 /// preprocessor. For `V6Solid` the preprocessed bytes are
@@ -2605,369 +2562,37 @@ where
     }
 }
 
-/// Sprint 5.7.9: read a file with the kernel's read-ahead
-/// turned on. On macOS, `fcntl(fd, F_RDAHEAD, 1)` enables
-/// aggressive sequential read-ahead. This bypasses the
-/// kernel's near-full-SSD conservatism (the kernel backs
-/// off prefetch when free blocks are scarce, to preserve
-/// blocks for wear-leveling). The cost is a single fcntl
-/// syscall per file; the benefit is 1.5-2x throughput on
-/// a busy SSD like the M4 Pro at 90% capacity.
-///
-/// On non-macOS platforms (Windows / Linux for the headless
-/// build), we fall through to plain `std::fs::read`. The
-/// Linux build is the only non-macOS target — the GUI is
-/// macOS-only — so on Linux we still get the speedup via
-/// posix_fadvise if someone enables it later. For now
-/// the feature-gate is the right balance: cheap on macOS
-/// (where it matters most), no-op elsewhere.
-#[cfg(target_os = "macos")]
-fn read_with_readahead(path: &Path) -> Result<Vec<u8>, String> {
-    use std::os::unix::io::AsRawFd;
-    use std::io::Read;
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("read({}) failed: {}", path.display(), e))?;
-    // F_RDAHEAD = 44 on macOS. Enable sequential read-ahead.
-    extern "C" {
-        fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
-    }
-    const F_RDAHEAD: i32 = 44;
-    let fd = file.as_raw_fd();
-    unsafe {
-        let _ = fcntl(fd, F_RDAHEAD, 1);
-    }
-    let mut bytes = Vec::new();
-    file.take(u64::MAX).read_to_end(&mut bytes)
-        .map_err(|e| format!("read_to_end({}) failed: {}", path.display(), e))?;
-    Ok(bytes)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn read_with_readahead(path: &Path) -> Result<Vec<u8>, String> {
-    std::fs::read(path).map_err(|e| format!("read({}) failed: {}", path.display(), e))
-}
-
 /// Walk a directory recursively into (relative_path, bytes) pairs.
-/// Shared with the CLI's `walk_dir` helper — duplicated here to
-/// keep the Tauri boundary self-contained.
+///
+/// **Sprint 5.7.10-B:** this is now a thin wrapper around
+/// [`crate::walker::walk`], the single source of truth for
+/// corpus walking + skip-list filtering. The 320-line
+/// implementation that used to live here (collect_paths +
+/// corpus_should_skip_dir + corpus_should_skip_file +
+/// classify_corpus_breakdown + dir_size_estimate) was
+/// deleted and the logic centralised in `src/walker.rs`.
+///
+/// The `CorpusMode` is read from the `NEXUS_CORPUS_MODE` env
+/// var (same as before — the CLI and Tauri command set it
+/// before invoking this wrapper). The classification into
+/// source / build_artifact / other is computed DURING the
+/// walk, in a single pass.
 fn walk_dir_for_solid(root: &Path) -> ApiResult<(Vec<(String, Vec<u8>)>, u64)> {
-    // Sprint 5.7.2 hotfix #29: parallelize the slow I/O phase that
-    // used to block for ~1 minute on a 5 GB input. The original
-    // walked the directory tree and read each file's bytes SEQUEN-
-    // TIALLY. For 5 GB on HDD (~100 MB/s sequential read) that's
-    // 50 seconds where the UI shows 0% / no events at all.
-    //
-    // Now we:
-    //   1. Walk the tree SEQUENTIALLY to collect paths (fast — just
-    //      stat() calls, no file I/O).
-    //   2. Read file CONTENTS in parallel via rayon (the actual
-    //      bottleneck — disk I/O benefits from queue_depth > 1).
-    //   3. Sort by relative path so the archive is deterministic.
-    let mut paths: Vec<std::path::PathBuf> = Vec::new();
-    /// Sprint 5.7.2 hotfix #43: skip-list for transient build/dev caches.
-///
-/// These directories contain compiler caches, intermediate artifacts,
-/// or runtime state that is NOT part of the user's source code. They
-/// are typically:
-///   - Multi-GB (Turbopack cache alone is 2-3 GB on Next.js projects)
-///   - Already compressed (RocksDB LZ4 inside .sst files)
-///   - Re-creatable from source (`rm -rf .next && next build` works)
-/// Including them in an archive wastes CPU + I/O and produces a
-/// misleadingly-low compression ratio that looks like a bug.
-///
-/// Sprint 5.7.2 hotfix #45: previously we ran `dir_size` (recursive
-/// readdir + metadata) on every skipped directory to populate the
-/// UI tooltip. For 164k filesystems like FlowNow that walk took
-/// minutes — the dir_size alone dominated the wall time. Now we
-/// return a non-recursive best-effort estimate (the dir's own
-/// apparent size + a flag) and let the UI label it as "estimate".
-/// The exact byte count is no longer needed — the user only needs
-/// to see "skipped N MiB of dev cache" not a precise number.
-fn dir_size_estimate(path: &Path) -> u64 {
-    // Use the dir's own metadata. On macOS this returns the inode
-    // allocation (not the recursive sum), so for huge trees it
-    // is small but bounded. The UI labels the result as an
-    // estimate.
-    std::fs::metadata(path)
-        .map(|m| m.len())
-        .unwrap_or(0)
-}
-
-fn corpus_should_skip_dir(path: &Path, mode: CorpusMode) -> bool {
-    // Sprint 5.7.7 hotfix #55: parametrise by CorpusMode.
-    if matches!(mode, CorpusMode::Everything) {
-        return false;
-    }
-    const SKIP_DIRS: &[&str] = &[
-        ".next", ".turbo", ".swc", ".claude", ".nexus",
-        "node_modules", "target", ".venv", "venv", "__pycache__",
-        ".git", ".DS_Store", "Thumbs.db", "dist", "build",
-        ".cache", ".tmp", "coverage", ".nyc_output", "logs", "log", ".run",
-    ];
-    for comp in path.components() {
-        if let Some(name) = comp.as_os_str().to_str() {
-            if SKIP_DIRS.iter().any(|s| *s == name) {
-                return true;
-            }
-        }
-    }
-    if matches!(mode, CorpusMode::Minimal) {
-        const MINIMAL_SKIP_DIRS: &[&str] = &[
-            "assets", "static", "public", "media", "images", "img",
-            "fonts", "icons", "videos", "audio", "screenshots",
-            "docs", "doc", "documentation", "examples", "demo",
-            "fixtures", "mocks", "snapshots", "__snapshots__",
-            "test-data", "testdata",
-        ];
-        for comp in path.components() {
-            if let Some(name) = comp.as_os_str().to_str() {
-                if MINIMAL_SKIP_DIRS.iter().any(|s| *s == name) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn corpus_should_skip_file(path: &Path, mode: CorpusMode) -> bool {
-    if matches!(mode, CorpusMode::Everything) {
-        return false;
-    }
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        const SKIP_SUFFIXES: &[&str] = &[
-            ".tsbuildinfo", ".pid", ".sock", ".swp", ".bak", ".tmp", "~",
-        ];
-        for s in SKIP_SUFFIXES {
-            if name.ends_with(s) {
-                return true;
-            }
-        }
-        if name == "package-lock.json"
-            || name == "pnpm-lock.yaml"
-            || name == "yarn.lock"
-            || name == "bun.lockb"
-        {
-            return true;
-        }
-    }
-    if matches!(mode, CorpusMode::Minimal) {
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            const SOURCE_EXTS: &[&str] = &[
-                "ts", "tsx", "js", "jsx", "mjs", "cjs",
-                "py", "pyx", "pyi",
-                "rs", "go", "java", "kt", "kts", "swift",
-                "c", "cpp", "cc", "cxx", "h", "hpp", "hxx",
-                "cs", "rb", "php", "scala", "sc", "clj", "cljs",
-                "ex", "exs", "erl", "hrl", "hs", "lhs", "ml", "mli",
-                "lua", "r", "jl", "dart", "vue", "svelte",
-                "sh", "bash", "zsh", "fish", "ps1",
-                "sql", "graphql", "gql", "proto",
-                "md", "mdx", "txt", "rst", "adoc",
-            ];
-            let ext_lower = ext.to_ascii_lowercase();
-            if !SOURCE_EXTS.iter().any(|s| *s == ext_lower.as_str()) {
-                return true;
-            }
-        } else {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            const ALLOWED_NO_EXT: &[&str] = &[
-                "Makefile", "makefile", "GNUmakefile",
-                "Rakefile", "Gemfile", "Vagrantfile",
-                "Dockerfile", "Procfile",
-                "LICENSE", "LICENCE", "NOTICE",
-                "README", "CHANGELOG", "CONTRIBUTING",
-                "Cargo.lock", "go.mod", "go.sum",
-                "package.json", "tsconfig.json",
-                "pyproject.toml", "setup.py", "setup.cfg",
-                "requirements.txt", "Pipfile", "Pipfile.lock",
-                "pom.xml", "build.gradle", "build.gradle.kts",
-                ".gitignore", ".gitattributes", ".editorconfig",
-                ".eslintrc", ".eslintrc.js", ".eslintrc.json",
-                ".prettierrc", ".prettierrc.js", ".prettierrc.json",
-            ];
-            if !ALLOWED_NO_EXT.iter().any(|s| *s == name) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn collect_paths(
-        root: &Path,
-        dir: &Path,
-        out: &mut Vec<std::path::PathBuf>,
-        skipped_bytes: &mut u64,
-    ) -> Result<(), String> {
-        // Sprint 5.7.7 hotfix #55: read mode from env.
-        // Pragmatic choice: thread it through every
-        // callsite would be a much larger diff. The CLI
-        // and Tauri command set NEXUS_CORPUS_MODE before
-        // invoking this walker.
-        let mode = std::env::var("NEXUS_CORPUS_MODE")
-            .ok()
-            .and_then(|s| s.parse::<CorpusMode>().ok())
-            .unwrap_or_default();
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| format!("read_dir({}) failed: {}", dir.display(), e))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("dir entry failed: {}", e))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|e| format!("file_type({}) failed: {}", path.display(), e))?;
-            if file_type.is_dir() {
-                if corpus_should_skip_dir(&path, mode) {
-                    // Sprint 5.7.2 hotfix #45: report an ESTIMATE for
-                    // the skip size, do NOT recurse into the dir.
-                    // Recursive walks on dirs like `.claude/worktrees/*`
-                    // dominated the wall clock.
-                    let est = dir_size_estimate(&path);
-                    *skipped_bytes += est;
-                    eprintln!(
-                        "[WALK-SKIP] {} (est. {} bytes) — dev cache / build artifact",
-                        path.display(),
-                        est
-                    );
-                    continue;
-                }
-                collect_paths(root, &path, out, skipped_bytes)?;
-            } else if file_type.is_file() {
-                if corpus_should_skip_file(&path, mode) {
-                    if let Ok(md) = entry.metadata() {
-                        *skipped_bytes += md.len();
-                        eprintln!(
-                            "[WALK-SKIP] {} ({} KiB) — lock file / build cache",
-                            path.display(),
-                            md.len() / 1024
-                        );
-                    }
-                    continue;
-                }
-                out.push(path);
-            }
-        }
-        Ok(())
-    }
-
-    let mut skipped_bytes: u64 = 0;
-    collect_paths(root, root, &mut paths, &mut skipped_bytes)
-        .map_err(|e| ApiError::new("directory.io", e))?;
-    if skipped_bytes > 0 {
+    let mode = std::env::var("NEXUS_CORPUS_MODE")
+        .ok()
+        .and_then(|s| s.parse::<CorpusMode>().ok())
+        .unwrap_or_default();
+    let result = crate::walker::walk(root, mode)
+        .map_err(|e| ApiError::new("directory.io", e.to_string()))?;
+    if result.skipped_bytes > 0 {
         eprintln!(
             "[WALK-SKIP] total skipped: {} MiB of dev cache / build artifacts",
-            skipped_bytes / (1024 * 1024)
+            result.skipped_bytes / (1024 * 1024)
         );
     }
-
-    // Sprint 5.7.2 hotfix #43: persist skipped_bytes for the UI
-    // success card (Opción D — diagnostic tooltip).
-    crate::stats::record_skipped_bytes(skipped_bytes);
-
-    let n_files = paths.len();
-    eprintln!("[WALK-PARALLEL] collected {} paths, reading in parallel", n_files);
-
-    use rayon::prelude::*;
-    let root_for_rel = root.to_path_buf();
-    let read_results: Result<Vec<(String, Vec<u8>)>, String> = paths
-        .par_iter()
-        .map(|path| {
-            // Sprint 5.7.9: hint the kernel that we'll read
-            // this file sequentially. On macOS, fcntl(fd,
-            // F_RDAHEAD, 1) turns on aggressive read-ahead
-            // for the file descriptor. On a near-full SSD
-            // (the M4 Pro at 90% capacity), the kernel's
-            // default prefetch is conservative because
-            // it tries to preserve free blocks for
-            // wear-leveling. F_RDAHEAD bypasses that
-            // conservatism for files we know we'll read
-            // end-to-end, which on this workload improves
-            // throughput 1.5-2x. On Linux we'd use
-            // posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL)
-            // but the project supports macOS only for the
-            // GUI build, so we feature-gate it.
-            let bytes = read_with_readahead(path)?;
-            let rel = path
-                .strip_prefix(&root_for_rel)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            Ok((rel, bytes))
-        })
-        .collect();
-
-    let mut out = read_results.map_err(|e| ApiError::new("directory.io", e))?;
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    eprintln!("[WALK-PARALLEL] done, {} files loaded ({} MiB total)",
-        out.len(),
-        out.iter().map(|(_, b)| b.len()).sum::<usize>() / (1024 * 1024)
-    );
-    // Sprint 5.7.9 part 6: classify the corpus by category so
-    // the UI can warn the user when most of the archive is
-    // dev cache / pre-compressed binaries (where no codec
-    // can do much). The classification is based on path
-    // patterns: anything inside `.next/`, `node_modules/`,
-    // `venv/`, `target/`, `dist/`, `__pycache__/`, etc. is
-    // counted as "build_artifact" (typically already
-    // minified/compiled/compressed). Files matching the
-    // Rust/JS/TS/Python source extension allow-list are
-    // counted as "source". Everything else (configs,
-    // data files, docs) is "other".
-    let breakdown = classify_corpus_breakdown(&out);
-    crate::stats::record_corpus_breakdown(&breakdown);
-    Ok((out, skipped_bytes))
-}
-
-/// Sprint 5.7.9 part 6: classify a corpus by path pattern.
-/// Used by the UI to display a "your corpus is X% build
-/// artifacts, switch to Source mode" warning when the
-/// user picks Everything mode on a cache-heavy dir.
-fn classify_corpus_breakdown(
-    files: &[(String, Vec<u8>)],
-) -> CorpusBreakdown {
-    let mut breakdown = CorpusBreakdown::default();
-    const BUILD_ARTIFACT_DIRS: &[&str] = &[
-        ".next", "node_modules", "venv", ".venv", "target",
-        "dist", "build", "__pycache__", ".turbo", ".swc",
-        ".cache", "coverage", ".parcel-cache", ".next-cache",
-    ];
-    const SOURCE_EXTS: &[&str] = &[
-        "ts", "tsx", "js", "jsx", "mjs", "cjs",
-        "py", "pyx", "pyi", "rs", "go", "java", "kt", "swift",
-        "c", "cpp", "cc", "cxx", "h", "hpp", "hxx",
-        "cs", "rb", "php", "scala", "ex", "exs", "erl", "hs",
-        "lua", "r", "jl", "dart", "vue", "svelte",
-        "sh", "bash", "sql", "graphql", "proto",
-    ];
-    for (rel, bytes) in files {
-        let size = bytes.len() as u64;
-        let path = std::path::Path::new(rel);
-        let mut in_artifact = false;
-        for comp in path.components() {
-            if let Some(name) = comp.as_os_str().to_str() {
-                if BUILD_ARTIFACT_DIRS.iter().any(|d| *d == name) {
-                    in_artifact = true;
-                    break;
-                }
-            }
-        }
-        if in_artifact {
-            breakdown.build_artifact_bytes += size;
-            breakdown.build_artifact_files += 1;
-            continue;
-        }
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let ext_lower = ext.to_ascii_lowercase();
-        if SOURCE_EXTS.iter().any(|s| *s == ext_lower.as_str()) {
-            breakdown.source_bytes += size;
-            breakdown.source_files += 1;
-        } else {
-            breakdown.other_bytes += size;
-            breakdown.other_files += 1;
-        }
-    }
-    breakdown
+    crate::stats::record_skipped_bytes(result.skipped_bytes);
+    crate::stats::record_corpus_breakdown(&result.breakdown);
+    Ok((result.files, result.skipped_bytes))
 }
 
 /// Per-corpus breakdown reported to the UI. Lets the
@@ -3529,5 +3154,4 @@ mod tests {
         assert_eq!(err.code, "internal");
         assert_eq!(err.message, "oops");
     }
-
 }

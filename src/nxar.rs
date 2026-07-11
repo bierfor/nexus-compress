@@ -117,29 +117,13 @@ pub struct DirectoryResult {
 /// Recursively walk a directory and collect all regular files.
 /// Symlinks are skipped (we don't follow them to avoid loops and
 /// to keep the archive self-contained).
+///
+/// **Sprint 5.7.10-B:** thin re-export of
+/// [`crate::walker::walk_paths`]. Kept as a public fn in this
+/// module for backward compatibility with the existing call
+/// sites (`archive_inspect` and the `nxar` tests).
 pub fn walk(dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(p) = stack.pop() {
-        let md = match fs::symlink_metadata(&p) {
-            Ok(m) => m,
-            Err(_) => continue, // skip unreadable entries
-        };
-        if md.is_file() {
-            out.push(p);
-        } else if md.is_dir() {
-            let rd = match fs::read_dir(&p) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            for e in rd.flatten() {
-                stack.push(e.path());
-            }
-        }
-        // symlinks and other types are skipped
-    }
-    out.sort();
-    Ok(out)
+    crate::walker::walk_paths(dir)
 }
 
 /// Read a file, returning its bytes. Used by the per-file

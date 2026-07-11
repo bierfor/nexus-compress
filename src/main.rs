@@ -525,112 +525,28 @@ fn main() {
 
 /// Walk a directory recursively and return `(relative_path, bytes)`
 /// for every regular file, sorted by relative path for determinism.
-fn walk_dir(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
-    walk_dir_with_skip(root)
-}
-
-/// Sprint 5.7.2 hotfix #45: walk with dev-cache skip-list. The CLI
-/// was using a recursive walk with no skip-list, so on corpora
-/// like FlowNow (164k files, mostly inside `.claude`/`.next`/cache
-/// dirs) it took 10+ minutes just to walk the filesystem. Now we
-/// short-circuit at the skip-list directories.
+/// Walk a directory recursively and return `(relative_path, bytes)`
+/// for every regular file, sorted by relative path for determinism.
 ///
-/// Sprint 5.7.7 hotfix #55: the skip-list now respects the
-/// `NEXUS_CORPUS_MODE` env var. `Everything` mode (the 5.7.7
-/// default) skips NOTHING — the user explicitly chose to
-/// include the full directory. The previous hardcoded
-/// skip-list was inconsistent with the GUI: the GUI's
-/// "Everything" mode was passing the env var to
-/// `walk_dir_for_solid` in api.rs (which then used the
-/// CorpusMode-aware skip list), but the CLI was using this
-/// separate, mode-blind skip list. Result: the GUI and
-/// the CLI behaved differently on the same directory. Now
-/// they both honour the env var.
+/// **Sprint 5.7.10-B:** thin wrapper around [`crate::walker::walk`],
+/// the single source of truth for corpus walking + skip-list
+/// filtering. The 110-line local walker (with its `CorpusModeLike`
+/// enum that mirrored `api::CorpusMode`) was deleted and the CLI
+/// now shares the GUI's walker code path. The `Thumbs.db` entry
+/// that was missing from the CLI's local skip-list is now picked
+/// up automatically.
 fn walk_dir_with_skip(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
-    let mode_str = std::env::var("NEXUS_CORPUS_MODE").unwrap_or_default();
-    let mode = CorpusModeLike::from(&mode_str);
-    let mut out = Vec::new();
-    walk_with_skip_recursive(root, root, &mut out, mode)?;
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
-}
-/// Per-mode skip lists. Source mode (the 5.7.6 default)
-/// skipped dev caches / lock files. Minimal mode adds
-/// assets/docs. Everything mode skips nothing.
-fn should_skip_dir(name: &str, mode: CorpusModeLike) -> bool {
-    if matches!(mode, CorpusModeLike::Everything) {
-        return false;
+    let mode = std::env::var("NEXUS_CORPUS_MODE")
+        .ok()
+        .and_then(|s| s.parse::<nexus_compress::api::CorpusMode>().ok())
+        .unwrap_or_default();
+    let result = nexus_compress::walker::walk(root, mode)?;
+    if result.skipped_bytes > 0 {
+        eprintln!(
+            "[WALK-SKIP] total skipped: {} MiB of dev cache / build artifacts",
+            result.skipped_bytes / (1024 * 1024)
+        );
     }
-    const SKIP_DIRS: &[&str] = &[
-        ".next", ".turbo", ".swc", ".claude", ".nexus", "node_modules",
-        "target", ".venv", "venv", "__pycache__", ".git", ".DS_Store",
-        "dist", "build", ".cache", ".tmp", "coverage", ".nyc_output",
-        "logs", "log", ".run",
-    ];
-    SKIP_DIRS.iter().any(|s| *s == name)
+    Ok(result.files)
 }
 
-/// Local enum that mirrors `nexus_compress::api::CorpusMode`
-/// so the CLI can decide skip rules without depending on
-/// the full api module. Kept in sync with api.rs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CorpusModeLike {
-    Everything,
-    Source,
-    Minimal,
-}
-impl CorpusModeLike {
-    fn from(s: &str) -> Self {
-        match s.to_ascii_lowercase().as_str() {
-            "everything" | "all" | "full" => Self::Everything,
-            "source" | "src" | "code" => Self::Source,
-            "minimal" | "min" => Self::Minimal,
-            _ => Self::Everything, // default 5.7.7
-        }
-    }
-}
-
-fn walk_with_skip_recursive(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<(String, Vec<u8>)>,
-    mode: CorpusModeLike,
-) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            if should_skip_dir(name, mode) {
-                eprintln!("[WALK-SKIP] {}/", path.display());
-                continue;
-            }
-            walk_with_skip_recursive(root, &path, out, mode)?;
-        } else if file_type.is_file() {
-            // Skip lock files of lock-file managers' caches (only in
-            // Source / Minimal mode, not Everything).
-            if !matches!(mode, CorpusModeLike::Everything)
-                && (name == "package-lock.json"
-                    || name == "pnpm-lock.yaml"
-                    || name == "yarn.lock"
-                    || name == "bun.lockb"
-                    || name.ends_with(".tsbuildinfo")
-                    || name.ends_with(".pid"))
-            {
-                continue;
-            }
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let bytes = std::fs::read(&path)?;
-            out.push((rel, bytes));
-        }
-    }
-    Ok(())
-}
