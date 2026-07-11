@@ -33,6 +33,14 @@ path = "src/lib.rs"
 [dependencies]
 rans = "0.4"
 serde = { version = "1", features = ["derive"] }
+# Sprint 5.7.10-C: serde_json is now a direct dep so the
+# `CompressionProfile::from_json` entry point on the
+# `supreme_engine` module can parse the new nested
+# `profile: { ... }` payload from the Tauri command. It
+# was previously a transitive dep through `tauri::command`
+# macros, but the engine now uses it in its public API
+# surface.
+serde_json = "1"
 # Sprint 5.7 hotfix #21: RAM auto-tune for the LZMA dictionary size.
 # Pure-Rust, ~no-deps, ~1 ms on first call (cached by the OS page-cache
 # after that). We only need the system's available memory at compress

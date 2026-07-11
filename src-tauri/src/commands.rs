@@ -18,11 +18,120 @@ use nexus_compress::api::{
     CompressionLevel, DecompressResult, DecompressTargetResult, EngineInfo, PeekResult,
     ProgressEvent, SelfTestResult,
 };
+use nexus_compress::supreme_engine::{
+    CompressionProfile, ProfileCodec, ProfileFidelity, ProfileMode, PROFILE_SCHEMA_VERSION,
+};
 use std::path::PathBuf;
 use std::str::FromStr;
 
 fn to_ipc<T>(r: ApiResult<T>) -> Result<T, String> {
     r.map_err(|e| format!("{}: {}", e.code, e.message))
+}
+
+/// Sprint 5.7.10-C: translate the legacy flat-field Tauri
+/// request shape into a `CompressionProfile`.
+///
+/// The 5.7.10-A/-B/-C infrastructure makes the engine profile-
+/// driven, but the frontend still sends the legacy flat fields
+/// (`backend`, `codec`, `lossless`, `corpus_mode`, etc.) for
+/// backward compatibility. This helper maps each flat field
+/// to its profile counterpart, defaulting to the safe option
+/// when the field is missing.
+///
+/// In 5.7.10-D the frontend switches to sending
+/// `{ req: { path, profile: { ... } } }` directly. The
+/// `from_json` constructor on `CompressionProfile` already
+/// handles the nested shape, so this helper becomes a
+/// one-line passthrough.
+fn build_profile_from_legacy_req(
+    req: &serde_json::Value,
+) -> Result<CompressionProfile, String> {
+    // If the request includes a nested `profile` object,
+    // use it directly (5.7.10-D forward path).
+    if let Some(profile_value) = req.get("profile") {
+        return CompressionProfile::from_json(profile_value);
+    }
+
+    // Legacy flat-field shape (5.7.10-C backward-compat path).
+    //
+    // `mode`: the preset ID maps directly to ProfileMode
+    // ("rapido" | "balanceado" | "ultra"). Default "balanceado".
+    let mode = req
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .map(|s| ProfileMode::from_str(s))
+        .transpose()?
+        .unwrap_or_default();
+
+    // `codec`: "auto" | "lzma" | "zstd". Default "auto".
+    let codec = req
+        .get("codec")
+        .and_then(|v| v.as_str())
+        .map(|s| ProfileCodec::from_str(s))
+        .transpose()?
+        .unwrap_or_default();
+
+    // `fidelity`: derived from `lossless` / `no_minify` boolean.
+    // Both flag forms are accepted (the legacy CLI uses one
+    // and the legacy GUI the other).
+    let fidelity = if req
+        .get("lossless")
+        .and_then(|v| v.as_bool())
+        .or_else(|| req.get("no_minify").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+    {
+        ProfileFidelity::Lossless
+    } else {
+        ProfileFidelity::Lossy
+    };
+
+    // `corpus_mode`: "everything" | "source" | "minimal".
+    // Default "everything" (5.7.7 inversion).
+    let corpus_mode = req
+        .get("corpus_mode")
+        .and_then(|v| v.as_str())
+        .map(|s| api::CorpusMode::from_str(s))
+        .transpose()?
+        .unwrap_or_default();
+
+    // `raw_extensions` / `minify_extensions`: arrays of strings.
+    // Empty arrays default to "use the built-in per-extension
+    // table" (the legacy behaviour).
+    let raw_extensions: Vec<String> = req
+        .get("raw_extensions")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let minify_extensions: Vec<String> = req
+        .get("minify_extensions")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    // `encrypt` / `recovery_level`: derived from the password
+    // + recovery pair. Encrypt is true when password is set
+    // (the legacy path also forced encrypt when password was
+    // present). Recovery defaults to "low" (the design-doc
+    // default of 10% parity).
+    let encrypt = req.get("password").and_then(|v| v.as_str()).is_some();
+    let recovery_level = req
+        .get("recovery_level")
+        .and_then(|v| v.as_str())
+        .map(|s| api::RecoveryLevel::from_str(s))
+        .transpose()?
+        .unwrap_or_default();
+
+    Ok(CompressionProfile {
+        schema_version: PROFILE_SCHEMA_VERSION,
+        mode,
+        codec,
+        fidelity,
+        corpus_mode,
+        raw_extensions,
+        minify_extensions,
+        encrypt,
+        recovery_level,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -163,105 +272,52 @@ pub async fn compress_target_cmd(
     db_state: State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
     req: serde_json::Value,
 ) -> Result<CompressTargetResult, String> {
-    let path = req
+    // Sprint 5.7.10-C: this command was ~100 lines of JSON
+    // parsing + if-let dispatch into 4 different backend
+    // functions. It's now a thin shell that:
+    //   1. Builds a `CompressionProfile` from the request fields
+    //      (translates the legacy flat shape to the profile).
+    //   2. Builds a `CompressInvocation` (profile + path + password
+    //      + output dir).
+    //   3. Hands it to `SupremeEngine::compress`, which resolves
+    //      the right backend / codec / preprocessor internally.
+    //
+    // The legacy flat-field shape is preserved for 5.7.10-C
+    // (this sprint) so the live frontend keeps working
+    // unchanged. In 5.7.10-D the command will accept a
+    // nested `profile: { ... }` object directly. In
+    // 5.7.10-E the `CompressionBackend` enum is deleted.
+    let path_str = req
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing 'path' in req".to_string())?
         .to_string();
-    let backend_str = req
-        .get("backend")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing 'backend' in req".to_string())?;
-    let lzma_level = req.get("lzma_level").and_then(|v| v.as_u64()).unwrap_or(6) as u32;
     let output_dir = req
         .get("output_dir")
         .and_then(|v| v.as_str())
         .map(PathBuf::from);
-    // Sprint 5.7.2 hotfix #47: GUI codec toggle. When the
-    // frontend sends a `codec` field (one of "auto" | "lzma" |
-    // "zstd"), we honour the choice by routing to the V6Solid
-    // pipeline with a pinned CompressionLevel instead of the
-    // legacy Auto (entropy flip) behaviour. Missing / "auto"
-    // keeps the existing path.
-    let codec_override: Option<nexus_compress::solid_archive::Codec> = req
-        .get("codec")
-        .and_then(|v| v.as_str())
-        .and_then(|s| match s.to_ascii_lowercase().as_str() {
-            "lzma" | "lzma2" => Some(nexus_compress::solid_archive::Codec::Lzma),
-            "zstd" => Some(nexus_compress::solid_archive::Codec::Zstd),
-            _ => None,
-        });
-    // Sprint 5.7.3 hotfix #49: GUI lossless toggle. When the
-    // frontend sends `lossless: true` (or `no_minify: true`),
-    // we route to the dedicated lossless entry point. The
-    // archive is bit-exact reversible (no Conservative minify,
-    // no swc AST, no entropy flip) at the cost of a worse
-    // ratio on text corpora.
-    let lossless: bool = req
-        .get("lossless")
-        .and_then(|v| v.as_bool())
-        .or_else(|| req.get("no_minify").and_then(|v| v.as_bool()))
-        .unwrap_or(false);
-    // Sprint 5.7.4 hotfix #50: per-extension override lists
-    // surfaced by the GUI's Advanced panel and the CLI's
-    // `--raw-ext` / `--minify-ext` flags. Empty by default,
-    // which preserves the legacy behaviour (the encoder
-    // uses its built-in per-extension table).
-    let raw_extensions: Vec<String> = req
-        .get("raw_extensions")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let minify_extensions: Vec<String> = req
-        .get("minify_extensions")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let overrides = nexus_compress::solid_archive::PreprocessorOverrides::new(
-        raw_extensions,
-        minify_extensions,
-    );
-    // Sprint 5.7.7 hotfix #55: corpus mode from the
-    // GUI's 3-pill selector. Default Everything
-    // (no skip). The walker reads NEXUS_CORPUS_MODE
-    // env var, so we set it here before spawn_blocking.
-    let corpus_mode: Option<nexus_compress::api::CorpusMode> = req
-        .get("corpus_mode")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<nexus_compress::api::CorpusMode>().ok());
-    if let Some(m) = corpus_mode {
-        std::env::set_var("NEXUS_CORPUS_MODE", m.as_str());
-    }
-    // Sprint 5.7.2 PR #4: optional encryption. When the frontend
-    // includes `password` in the req, we route to the encrypted
-    // pipeline (v4 codec + AES-256-GCM + optional Reed-Solomon).
-    // The `recovery_level` string ("off" / "low" / "high") defaults
-    // to "low" (10 % parity) when password is set, matching the
-    // design doc's "recovery on by default" choice.
-    let password: Option<String> = req
+    let password: Option<Vec<u8>> = req
         .get("password")
         .and_then(|v| v.as_str())
-        .map(String::from);
-    let recovery_str: Option<String> = req
-        .get("recovery_level")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let backend =
-        CompressionBackend::from_str(backend_str).map_err(|e| format!("invalid_backend: {}", e))?;
-    let p = PathBuf::from(path);
+        .map(|s| s.as_bytes().to_vec());
+
+    // Translate the legacy flat-field shape to a CompressionProfile.
+    // The frontend will switch to sending `profile: { ... }`
+    // directly in 5.7.10-D. Until then, every field that
+    // exists in the profile is mapped from its flat twin.
+    let profile = build_profile_from_legacy_req(&req)?;
+    let p = PathBuf::from(&path_str);
     let filename_for_db = p
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("file")
         .to_string();
+    let invocation = nexus_compress::supreme_engine::CompressInvocation {
+        profile,
+        path: p,
+        password,
+        output_dir,
+    };
 
     let inner: ApiResult<CompressTargetResult> = tauri::async_runtime::spawn_blocking(move || {
         let app_for_event = app.clone();
@@ -273,38 +329,7 @@ pub async fn compress_target_cmd(
         let cb = |event: ProgressEvent| {
             throttler.feed("compress-progress", &event);
         };
-        // Two paths: encrypted (password is set) or plain.
-        // We keep the dispatch in one function so the frontend
-        // doesn't have to call different commands; the password
-        // is the only signal that decides the branch.
-        if let Some(pwd) = password.as_deref() {
-            let recovery = match recovery_str.as_deref() {
-                Some(s) => api::RecoveryLevel::from_str(s)
-                    .map_err(|e| ApiError::new("compress.invalid_recovery_level", e))?,
-                None => api::RecoveryLevel::default(),
-            };
-            let opts = api::CompressWithPasswordOptions {
-                password: pwd.as_bytes(),
-                recovery,
-            };
-            api::compress_target_with_password(&p, &opts, cb)
-        } else {
-            // Sprint 5.7.3 hotfix #49: route to the lossless
-            // entry point when the GUI toggled `--lossless`.
-            // The function internally splits the lossless vs
-            // lossy paths so the call site stays a single
-            // line.
-            api::compress_target_with_codec_lossless_overrides(
-                &p,
-                backend,
-                lzma_level,
-                output_dir.as_deref(),
-                codec_override,
-                lossless,
-                &overrides,
-                cb,
-            )
-        }
+        nexus_compress::supreme_engine::SupremeEngine::compress(&invocation, cb)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))?;

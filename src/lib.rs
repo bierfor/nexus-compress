@@ -56,6 +56,14 @@ pub mod rle;
 pub mod solid_archive;
 pub mod scheduler;
 pub mod stats;
+/// Sprint 5.7.10-C: SupremeEngine — single entry point for
+/// compression. Replaces the leaky IPC frontier (8 separate
+/// fields parsed by the Tauri command + 4 different
+/// `compress_*_with_backend` dispatch functions) with a
+/// profile-driven API. The engine resolves the user's
+/// `CompressionProfile` into a `ResolvedPlan` (concrete
+/// backend + codec + preprocessor) internally.
+pub mod supreme_engine;
 /// Sprint 5.7.10-B: single source of truth for corpus walking
 /// + skip-list filtering. Replaces the four duplicated walkers
 /// that used to live in `nxar.rs`, `main.rs`, `api.rs`, and
