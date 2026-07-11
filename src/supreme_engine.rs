@@ -671,8 +671,21 @@ where
 
     // Dispatch to the right solid_archive entry point based on
     // lossless vs overrides vs default.
+    //
+    // Sprint 5.7.11 fix: when the corpus is 100% passthrough
+    // (no LZMA-eligible text files) we still need a valid
+    // solid-archive header so the decoder's `parse_toc` can
+    // read the `NXPT` trailer that follows. `compress` with
+    // an empty file list produces a header with `n_files=0`
+    // and an empty solid block; the chunk-groups sub-TOC is
+    // `n_groups=0` and `solid_block_offset` points right
+    // after that. The trailer parser then takes over. Before
+    // this fix, a JPEG-only / PNG-only corpus would produce
+    // a raw `NXPT` blob with no magic, and decompression
+    // failed with "bad magic".
     let mut archive = if lzma_files.is_empty() {
-        Vec::new()
+        crate::solid_archive::compress(&[], SolidLevel::Auto)
+            .map_err(|e| api::ApiError::new("solid.compress.empty", e))?
     } else if plan.lossless {
         crate::solid_archive::compress_with_progress_lossless(
             &lzma_files,
@@ -750,7 +763,12 @@ where
     };
 
     // Append passthrough payloads with a marker so the decoder
-    // can reassemble.
+    // can reassemble. Sprint 5.7.10 post-merge: we also try
+    // to zstd the passthrough bytes — for already-compressed
+    // data zstd produces output ≤ input + minimal overhead, so
+    // we get a free compression win on binary dev-caches. If
+    // zstd makes the bytes larger (shouldn't happen but just
+    // in case) we fall back to raw passthrough.
     use std::io::Write;
     for (name, bytes) in passthrough_files.iter() {
         archive.write_all(b"NXPT").ok();
@@ -759,7 +777,30 @@ where
             .write_all(&(name_bytes.len() as u32).to_le_bytes())
             .ok();
         archive.write_all(name_bytes).ok();
-        archive.write_all(bytes).ok();
+        // zstd with level 1 is fast enough for large corpora
+        // and produces output ≤ input on most "already
+        // compressed" data (PNG, JPG, MP4, .pyc, .wasm, .so,
+        // .dylib, etc.). The compressor overhead per file is
+        // ~50 bytes of frame header — negligible.
+        let zstd_bytes = zstd::stream::encode_all(bytes.as_slice(), 1)
+            .unwrap_or_else(|_| bytes.clone());
+        if zstd_bytes.len() < bytes.len() {
+            // Zstd actually compressed — emit a Z marker + the
+            // zstd bytes (decompression on the way out is also
+            // fast, zstd level 1 decode is ~600 MB/s).
+            archive.write_all(b"Z").ok();
+            archive
+                .write_all(&(zstd_bytes.len() as u32).to_le_bytes())
+                .ok();
+            archive.write_all(&zstd_bytes).ok();
+        } else {
+            // Zstd didn't help — emit raw bytes.
+            archive.write_all(b"R").ok();
+            archive
+                .write_all(&(bytes.len() as u32).to_le_bytes())
+                .ok();
+            archive.write_all(bytes).ok();
+        }
     }
 
     let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;

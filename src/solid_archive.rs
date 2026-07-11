@@ -1377,6 +1377,27 @@ pub fn peek_toc(archive: &[u8]) -> Result<(Vec<FileEntry>, u64), String> {
     Ok((parsed.entries, total))
 }
 
+/// Sprint 5.7.11: a passthrough file's raw on-disk representation,
+/// captured by `parse_toc` from the `NXPT` trailer that the encoder
+/// appends after the LZMA/zstd solid block. The decoder turns
+/// these into proper `FileEntry`s in `decompress` (decoding the
+/// payload with zstd if the marker is `Z`, or using it raw if `R`).
+///
+/// We keep the raw payload here (not the decoded bytes) so callers
+/// that only parse the TOC without decompressing the solid block
+/// (e.g. `list_solid_paginated`) can still see the passthrough
+/// filenames and sizes without paying the zstd cost.
+#[derive(Debug, Clone)]
+pub struct PassthroughRawEntry {
+    pub name: String,
+    /// `0` = the payload was zstd-compressed by the encoder
+    ///       (`Z` marker). `1` = raw bytes (`R` marker, the
+    ///       encoder fell back to raw because zstd didn't shrink).
+    pub codec: u8,
+    /// Compressed payload as written to the archive.
+    pub payload: Vec<u8>,
+}
+
 /// Result of parsing a solid archive's TOC.
 #[derive(Debug)]
 pub struct ParsedToc {
@@ -1391,6 +1412,12 @@ pub struct ParsedToc {
     /// is rebuilt by the parser as a single group using the
     /// archive's global codec and the solid block's total size.
     pub chunk_groups: Vec<(Codec, u32)>,
+    /// Sprint 5.7.11: passthrough entries captured from the
+    /// `NXPT` trailer at the end of the archive. Empty for
+    /// archives written before the SupremeEngine path
+    /// (Sprint 5.7.10-C) and for archives whose `raw_extensions`
+    /// list was empty at compression time.
+    pub passthroughs: Vec<PassthroughRawEntry>,
 }
 
 /// Parse the TOC portion of a solid archive (header + entry list)
@@ -1593,11 +1620,88 @@ pub fn parse_toc(archive: &[u8]) -> Result<ParsedToc, String> {
         vec![(codec, total_size)]
     };
 
+    // Sprint 5.7.11: parse the `NXPT` trailer at the end of the
+    // archive if present. The SupremeEngine (5.7.10-C) appends
+    // passthrough files here after the LZMA/zstd solid block.
+    // Archives written before that change have no trailer — the
+    // loop below simply produces an empty `passthroughs` vec.
+    //
+    // We compute `solid_block_end` as the byte right after the
+    // solid block (sum of all chunk-group sizes), and parse
+    // anything past it as a sequence of `NXPT` entries. If the
+    // first 4 bytes of the trailer region aren't `NXPT` we treat
+    // the whole archive as a non-SupremeEngine archive (no
+    // passthroughs) and return what we already have.
+    let total_solid_bytes: usize = chunk_groups
+        .iter()
+        .map(|(_, s)| *s as usize)
+        .sum();
+    let solid_block_end: usize = pos + total_solid_bytes;
+    let mut passthroughs: Vec<PassthroughRawEntry> = Vec::new();
+    if solid_block_end + 4 <= archive.len()
+        && &archive[solid_block_end..solid_block_end + 4] == b"NXPT"
+    {
+        let mut p = solid_block_end;
+        while p + 9 <= archive.len() && &archive[p..p + 4] == b"NXPT" {
+            p += 4;
+            let name_len = u32::from_le_bytes(
+                archive[p..p + 4]
+                    .try_into()
+                    .map_err(|_| "solid archive: bad passthrough name_len".to_string())?,
+            ) as usize;
+            p += 4;
+            if p + name_len > archive.len() {
+                return Err("solid archive: truncated passthrough name".into());
+            }
+            let name = String::from_utf8(archive[p..p + name_len].to_vec())
+                .map_err(|_| "solid archive: invalid UTF-8 in passthrough name".to_string())?;
+            p += name_len;
+            if p + 5 > archive.len() {
+                return Err("solid archive: truncated passthrough marker+len".into());
+            }
+            // 0 = zstd-compressed (`Z`), 1 = raw (`R`).
+            let codec = match archive[p] {
+                b'Z' => 0,
+                b'R' => 1,
+                other => {
+                    return Err(format!(
+                        "solid archive: unknown passthrough marker {}",
+                        other
+                    ))
+                }
+            };
+            p += 1;
+            let payload_len = u32::from_le_bytes(
+                archive[p..p + 4]
+                    .try_into()
+                    .map_err(|_| "solid archive: bad passthrough payload_len".to_string())?,
+            ) as usize;
+            p += 4;
+            if p + payload_len > archive.len() {
+                return Err("solid archive: truncated passthrough payload".into());
+            }
+            let payload = archive[p..p + payload_len].to_vec();
+            p += payload_len;
+            passthroughs.push(PassthroughRawEntry { name, codec, payload });
+        }
+        // If the trailer didn't end cleanly on a non-NXPT byte,
+        // that's an error — we don't want a half-parsed trailer
+        // silently surviving.
+        if p != archive.len() {
+            return Err(format!(
+                "solid archive: passthrough trailer ended mid-entry at byte {} (file len {})",
+                p,
+                archive.len()
+            ));
+        }
+    }
+
     Ok(ParsedToc {
         entries,
         dict,
         solid_block_offset: pos,
         chunk_groups,
+        passthroughs,
     })
 }
 
@@ -1681,7 +1785,65 @@ pub fn decompress(archive: &[u8]) -> Result<(Vec<FileEntry>, Vec<u8>), String> {
         }
     }
 
-    Ok((entries, solid_uncompressed))
+    // Sprint 5.7.11: decode the `NXPT` passthrough trailer (if
+    // present) and concatenate each entry's decoded bytes to the
+    // end of `solid_uncompressed`. We then synthesize a
+    // `FileEntry` for each passthrough with `solid_offset`
+    // pointing to the start of its slice inside
+    // `solid_uncompressed`. The `pre_size` is the decoded length
+    // (which equals the original file size — passthroughs are
+    // bit-exact). The `chunk_codec` is left as `Codec::Lzma` as
+    // a harmless sentinel — the extraction code never
+    // dispatches on it for `Raw` preprocessor entries.
+    let mut combined_entries: Vec<FileEntry> = entries;
+    for pt in parsed.passthroughs.iter() {
+        let decoded: Vec<u8> = match pt.codec {
+            // 0 = zstd-compressed (`Z` marker). Decode with the
+            // crate's zstd decoder; on failure we surface the
+            // exact archive error rather than silently falling
+            // back to the compressed bytes.
+            0 => {
+                let mut dec = zstd::stream::read::Decoder::new(pt.payload.as_slice())
+                    .map_err(|e| format!(
+                        "solid archive: passthrough '{}' zstd decode failed: {}",
+                        pt.name, e
+                    ))?;
+                let mut out = Vec::with_capacity(pt.payload.len() * 2);
+                dec.read_to_end(&mut out).map_err(|e| format!(
+                    "solid archive: passthrough '{}' zstd read failed: {}",
+                    pt.name, e
+                ))?;
+                out
+            }
+            // 1 = raw bytes (`R` marker). The encoder chose this
+            // path because zstd didn't shrink the input.
+            1 => pt.payload.clone(),
+            other => {
+                return Err(format!(
+                    "solid archive: passthrough '{}' has unknown codec {}",
+                    pt.name, other
+                ));
+            }
+        };
+        let offset = solid_uncompressed.len() as u64;
+        let size = decoded.len() as u64;
+        solid_uncompressed.extend_from_slice(&decoded);
+        combined_entries.push(FileEntry {
+            name: pt.name.clone(),
+            original_size: size,
+            pre_size: size,
+            preprocessor: Preprocessor::Raw,
+            // Sentinel: the extraction code path for Raw entries
+            // doesn't look at `chunk_codec` — it just slices
+            // `solid_uncompressed[solid_offset..solid_offset+pre_size]`.
+            // We pick LZMA so the byte is deterministic and any
+            // future diagnostic that prints it is consistent.
+            chunk_codec: Codec::Lzma,
+            solid_offset: offset,
+        });
+    }
+
+    Ok((combined_entries, solid_uncompressed))
 }
 
 #[cfg(test)]
@@ -2505,5 +2667,188 @@ mod tests {
                     entry.name, got.len(), original.len());
             }
         }
+    }
+
+    // Sprint 5.7.11: passthrough trailer roundtrip.
+    //
+    // The SupremeEngine (5.7.10-C) writes the LZMA/zstd solid
+    // block first, then appends a `NXPT` trailer for each
+    // passthrough file (PNG, JPG, MP4, .pyc, .dylib, ...).
+    // Each trailer entry is one of:
+    //   * `Z` + u32 payload_len + zstd-compressed bytes
+    //   * `R` + u32 payload_len + raw bytes (encoder fell back
+    //     because zstd didn't shrink the input)
+    //
+    // The decoder must concatenate the decoded payload to
+    // `solid_uncompressed`, expose it as a `FileEntry` with
+    // `preprocessor=Raw`, and slice it back bit-exact. These
+    // two tests pin the contract on a minimal archive built
+    // by hand so the test doesn't depend on SupremeEngine
+    // internals (those are covered by the integration tests
+    // in `tests/`).
+    fn append_nxpt_trailer(archive: &mut Vec<u8>, entries: &[(String, u8, Vec<u8>)]) {
+        use std::io::Write;
+        for (name, marker, payload) in entries {
+            archive.write_all(b"NXPT").unwrap();
+            let name_bytes = name.as_bytes();
+            archive
+                .write_all(&(name_bytes.len() as u32).to_le_bytes())
+                .unwrap();
+            archive.write_all(name_bytes).unwrap();
+            archive.write_all(std::slice::from_ref(marker)).unwrap();
+            archive
+                .write_all(&(payload.len() as u32).to_le_bytes())
+                .unwrap();
+            archive.write_all(payload).unwrap();
+        }
+    }
+
+    #[test]
+    fn passthrough_zstd_marker_roundtrip_is_bit_exact() {
+        // Build a base solid archive with one trivial text file
+        // (so the LZMA/zstd chunk is non-empty and the chunk
+        // groups are populated), then append a passthrough with
+        // the `Z` marker carrying a zstd-compressed payload.
+        let base_files: Vec<(String, Vec<u8>)> = vec![(
+            "src/index.ts".to_string(),
+            b"const x: number = 1;\n".repeat(8),
+        )];
+        let mut archive =
+            compress(&base_files, CompressionLevel::Auto).expect("compress base");
+
+        // Compress a fake "PNG" with zstd and append it as a
+        // passthrough. The body is repetitive (so zstd shrinks
+        // it) but the content doesn't matter — the test only
+        // checks that the decoder restores the original
+        // 10,000 bytes bit-exact.
+        let png_body: Vec<u8> = (0..10_000_u32)
+            .flat_map(|i| i.to_le_bytes())
+            .collect();
+        let png_zstd = zstd::stream::encode_all(png_body.as_slice(), 1)
+            .expect("zstd encode");
+        // Sanity: the zstd output should actually be smaller
+        // than the input (the body has clear patterns). If not,
+        // the test setup is wrong.
+        assert!(
+            png_zstd.len() < png_body.len(),
+            "test setup: zstd expected to shrink the synthetic PNG"
+        );
+        append_nxpt_trailer(
+            &mut archive,
+            &[("assets/logo.png".to_string(), b'Z', png_zstd)],
+        );
+
+        let (entries, solid) = decompress(&archive).expect("decompress");
+        // 1 LZMA entry + 1 passthrough entry = 2.
+        assert_eq!(entries.len(), 2);
+        let pt_entry = entries
+            .iter()
+            .find(|e| e.name == "assets/logo.png")
+            .expect("passthrough entry present");
+        // Bit-exact recovery.
+        let start = pt_entry.solid_offset as usize;
+        let end = start + pt_entry.pre_size as usize;
+        assert_eq!(end, solid.len(), "passthrough slice at end of solid");
+        assert_eq!(
+            &solid[start..end],
+            png_body.as_slice(),
+            "Z-marker passthrough must roundtrip bit-exact"
+        );
+        // The LZMA entry must still be there and accessible.
+        let lzma_entry = entries
+            .iter()
+            .find(|e| e.name == "src/index.ts")
+            .expect("LZMA entry present");
+        assert!(lzma_entry.preprocessor != Preprocessor::Raw);
+    }
+
+    #[test]
+    fn passthrough_raw_marker_roundtrip_is_bit_exact() {
+        // Same shape as the zstd test, but the encoder chose
+        // the `R` path (zstd didn't help). We just write raw
+        // bytes; the decoder must still concatenate them to
+        // `solid_uncompressed` and expose them as a
+        // `preprocessor=Raw` FileEntry.
+        let base_files: Vec<(String, Vec<u8>)> = vec![(
+            "src/main.ts".to_string(),
+            b"export const x = 42;\n".repeat(4),
+        )];
+        let mut archive =
+            compress(&base_files, CompressionLevel::Auto).expect("compress base");
+
+        // Random-ish payload that we explicitly DON'T zstd-
+        // compress. We pick high-entropy bytes so any future
+        // regression that tries to zstd-decode raw bytes
+        // will fail loudly here.
+        let dylib_body: Vec<u8> = (0..4_096_u32)
+            .map(|i| ((i.wrapping_mul(0x9E3779B1)) >> 13) as u8)
+            .collect();
+        append_nxpt_trailer(
+            &mut archive,
+            &[("lib/native.dylib".to_string(), b'R', dylib_body.clone())],
+        );
+
+        let (entries, solid) = decompress(&archive).expect("decompress");
+        assert_eq!(entries.len(), 2);
+        let pt_entry = entries
+            .iter()
+            .find(|e| e.name == "lib/native.dylib")
+            .expect("passthrough entry present");
+        let start = pt_entry.solid_offset as usize;
+        let end = start + pt_entry.pre_size as usize;
+        assert_eq!(end, solid.len());
+        assert_eq!(&solid[start..end], dylib_body.as_slice());
+        assert_eq!(pt_entry.preprocessor, Preprocessor::Raw);
+    }
+
+    #[test]
+    fn parse_toc_recognizes_passthroughs_without_decompressing_solid() {
+        // Sprint 5.7.11: `parse_toc` should be able to surface
+        // passthrough filenames + payload sizes from the
+        // trailer WITHOUT paying the cost of decompressing the
+        // solid block. The `list_solid_paginated` IPC call
+        // depends on this so the file browser stays snappy
+        // even on 5 GB corpora.
+        let base_files: Vec<(String, Vec<u8>)> = vec![(
+            "src/a.ts".to_string(),
+            b"const x = 1;\n".repeat(4),
+        )];
+        let mut archive =
+            compress(&base_files, CompressionLevel::Auto).expect("compress base");
+        let png_body: Vec<u8> = b"\x89PNG_FAKE_HEADER".to_vec();
+        let png_zstd =
+            zstd::stream::encode_all(png_body.as_slice(), 1).expect("zstd encode");
+        append_nxpt_trailer(
+            &mut archive,
+            &[("assets/icon.png".to_string(), b'Z', png_zstd.clone())],
+        );
+
+        // parse_toc must surface the passthrough name and the
+        // compressed payload (NOT the decoded one — that would
+        // require a zstd decode inside the parser).
+        let parsed = parse_toc(&archive).expect("parse_toc");
+        assert_eq!(parsed.passthroughs.len(), 1);
+        assert_eq!(parsed.passthroughs[0].name, "assets/icon.png");
+        assert_eq!(parsed.passthroughs[0].codec, 0, "Z marker → codec 0");
+        assert_eq!(parsed.passthroughs[0].payload, png_zstd);
+    }
+
+    #[test]
+    fn archive_without_trailer_still_parses() {
+        // Backward-compat: an archive written before Sprint
+        // 5.7.11 (no `NXPT` trailer) must still parse cleanly
+        // with `passthroughs` empty.
+        let files: Vec<(String, Vec<u8>)> = vec![(
+            "src/legacy.ts".to_string(),
+            b"const x: number = 1;\n".repeat(4),
+        )];
+        let archive = compress(&files, CompressionLevel::Auto).expect("compress");
+        let parsed = parse_toc(&archive).expect("parse_toc legacy");
+        assert!(
+            parsed.passthroughs.is_empty(),
+            "legacy archive must report zero passthroughs"
+        );
+        let (entries, _solid) = decompress(&archive).expect("decompress legacy");
+        assert_eq!(entries.len(), 1);
     }
 }

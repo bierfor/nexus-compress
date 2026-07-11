@@ -356,16 +356,15 @@ fn extract_solid_entries(
 ) -> Result<Vec<String>, String> {
     use nexus_compress::solid_archive::decompress as solid_decompress;
     let bytes = std::fs::read(path).map_err(|e| format!("read solid archive: {}", e))?;
-    // Step 1: read the TOC (cheap — no LZMA).
-    let parsed = nexus_compress::solid_archive::parse_toc(&bytes)
-        .map_err(|e| format!("parse solid toc: {}", e))?;
-    let entries = parsed.entries;
-    // Step 2: full LZMA decompression (one pass, mandatory for
-    // solid archives — same as WinRAR/ZIP). After this we
-    // have the preprocessed bytes of every entry concatenated
-    // in the order they were compressed. Per-entry offsets
-    // come from the TOC.
-    let (_entries, solid_uncompressed) =
+    // Step 1+2: full solid decompress. The result already
+    // includes the LZMA/zstd entries AND the Sprint 5.7.11
+    // passthrough entries (decoded from the `NXPT` trailer and
+    // concatenated to the end of `solid_uncompressed`). Using
+    // `decompress`'s combined list here is what makes passthrough
+    // files (PNG/JPG/MP4/.dylib/.so/.pyc/etc.) actually
+    // recoverable on disk — before 5.7.11, this function only
+    // used `parsed.entries` and silently dropped the passthroughs.
+    let (entries, solid_uncompressed) =
         solid_decompress(&bytes).map_err(|e| format!("solid decompress: {}", e))?;
     let selected_set: Option<std::collections::HashSet<String>> =
         selected.map(|v| v.into_iter().collect());
