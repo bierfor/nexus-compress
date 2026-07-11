@@ -189,7 +189,15 @@ impl std::str::FromStr for ProfileFidelity {
 /// The complete user intent. One struct, one source of truth
 /// for what the user wants. The engine resolves it into
 /// concrete backends / codecs / preprocessors internally.
+///
+/// The `rename_all = "camelCase"` serde attribute matches the
+/// frontend TypeScript interface (`schemaVersion`,
+/// `corpusMode`, `rawExtensions`, `minifyExtensions`,
+/// `recoveryLevel`). This is the IPC contract — the
+/// frontend sends camelCase JSON, the backend parses it
+/// directly into this struct without translation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CompressionProfile {
     /// Schema version. v1 is the initial struct.
     pub schema_version: u32,

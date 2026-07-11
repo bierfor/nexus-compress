@@ -1325,6 +1325,7 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
 /// Reed-Solomon parity). See `src/encrypted.rs` for the
 /// full design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RecoveryLevel {
     /// No parity shards. 0 % overhead, no recovery.
     Off,

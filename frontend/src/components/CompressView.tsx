@@ -583,46 +583,38 @@ export function CompressView({
       return;
     }
     try {
+      // Sprint 5.7.10-D: the request is now a single
+      // `profile` object instead of 8 separate fields. The
+      // backend (SupremeEngine) reads the profile and
+      // resolves the right backend / codec / preprocessor
+      // internally. The flat-field shape still works
+      // (build_profile_from_legacy_req in commands.rs
+      // translates it), but the frontend is moving to the
+      // canonical nested shape.
       const lastResult: CompressResult = await tauriInvoke("compress_target_cmd", {
         req: {
           path: inputPath,
-          backend: m.backend,
-          lzma_level: m.lzma,
           output_dir: destDir || null,
-          // Sprint 5.7.2 hotfix #47: codec toggle. "auto" is
-          // the legacy path (entropy flip per chunk). "lzma"
-          // and "zstd" pin a single codec for the whole
-          // archive and bypass the flip. The Rust command
-          // (commands.rs) maps this into a `CompressionLevel`
-          // passed to `solid_archive::compress_with_progress`.
-          codec: profile.codec,
-          // Sprint 5.7.3 hotfix #49: fidelity toggle. "lossy"
-          // (default) keeps the smart preprocessor
-          // (Conservative / swc / Raw by extension). "lossless"
-          // forces every file to Preprocessor::Raw, the archive
-          // is bit-exact reversible. The Rust command
-          // (commands.rs) maps this into a `bool` passed to
-          // `compress_target_with_codec_lossless`.
-          lossless: profile.fidelity === "lossless",
-          // Sprint 5.7.4 hotfix #50: per-extension overrides
-          // from the Advanced panel. Empty arrays mean "use
-          // the built-in per-extension table" (the legacy
-          // behaviour). The backend normalises (lowercases,
-          // dedups, drops the leading dot) so the GUI can
-          // pass either ".json" or "json" or "JSON".
-          raw_extensions: parseExtList(profile.rawExtensions),
-          minify_extensions: parseExtList(profile.minifyExtensions),
-          // Sprint 5.7.7 hotfix #55: corpus mode from the
-          // 3-pill selector. Backend parses it into
-          // api::CorpusMode and sets NEXUS_CORPUS_MODE
-          // before the walk.
-          corpus_mode: profile.corpusMode,
-          // Sprint 5.7.2: optional encryption. When `password`
-          // is set, the backend routes to the encrypted pipeline
-          // (v4 + AES-256-GCM + optional Reed-Solomon). When
-          // `password` is null, the existing plain path runs.
+          profile: {
+            schemaVersion: 1,
+            mode: profile.mode,
+            codec: profile.codec,
+            fidelity: profile.fidelity,
+            corpusMode: profile.corpusMode,
+            // Per-extension overrides: the GUI keeps them as
+            // comma-separated strings in the profile (legacy
+            // shape for localStorage); we parse to a string
+            // array here. The backend's PreprocessorOverrides
+            // constructor normalises / dedupes.
+            rawExtensions: parseExtList(profile.rawExtensions),
+            minifyExtensions: parseExtList(profile.minifyExtensions),
+            encrypt: profile.encrypt,
+            recoveryLevel: profile.recoveryLevel,
+          },
+          // Password is intentionally NOT in the profile —
+          // it's a runtime secret, not a saved setting.
+          // Custom profiles in localStorage don't carry it.
           password: profile.encrypt ? password : null,
-          recovery_level: profile.encrypt ? profile.recoveryLevel : null,
           // Sprint 5.7.8: the active profile id. Backend can
           // log this for reproducibility (a future
           // "compression history by profile" feature).
