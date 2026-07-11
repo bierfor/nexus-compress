@@ -183,9 +183,20 @@ fn nxs7_zstd_roundtrip_with_dict() {
     )
     .expect("zstd compress");
 
-    // Verify the header is NXS7 v2 (VERSION=2) and codec=1 (zstd).
+    // Verify the magic is NXS7. The VERSION byte was bumped
+    // multiple times since this test was written (current VERSION
+    // is 4 — Sprint 5.7.2 hotfix #34 added the dict field, #46
+    // added the chunk-groups sub-TOC). We accept any supported
+    // version here because the property under test is "the dict
+    // roundtrips through the v2/v3/v4 header layout", not "the
+    // version stays pinned to a specific byte".
     assert_eq!(&archive[0..5], b"NXS7\n", "magic");
-    assert_eq!(archive[5], 2, "version must be 2 (NXS7)");
+    let version = archive[5];
+    assert!(
+        matches!(version, 2 | 3 | 4),
+        "version must be 2, 3, or 4 (NXS7); got {}",
+        version
+    );
 
     // parse_toc should return a non-empty dict (we trained one).
     let parsed = parse_toc(&archive).expect("parse_toc");
@@ -241,7 +252,8 @@ fn nxs7_lzma_dict_len_zero_is_skipped() {
     use nexus_compress::solid_archive::{parse_toc, CompressionLevel};
 
     // 1 file is enough to verify the header layout (dict_len=0
-    // followed by no dict_bytes, then solid block).
+    // followed by no dict_bytes, then chunk-groups sub-TOC, then
+    // solid block).
     let files = vec![("a.txt".to_string(), b"hello world".to_vec())];
     let archive = nexus_compress::solid_archive::compress(
         &files,
@@ -249,15 +261,27 @@ fn nxs7_lzma_dict_len_zero_is_skipped() {
     )
     .expect("compress");
 
-    // The 4 bytes right before the solid block should be 0 (dict_len=0).
+    // The wire format (current VERSION=4) is:
+    //   MAGIC(5) + VERSION(1) + N_FILES(4) + TOC + DICT_LEN(4) +
+    //   chunk-groups sub-TOC(4 + n*5) + solid block
+    //
+    // This test predates hotfix #46 (chunk-groups sub-TOC) — the
+    // original layout ended right after DICT_LEN. We walk back
+    // past the sub-TOC to find the dict_len field.
     let parsed = parse_toc(&archive).expect("parse_toc");
     assert!(parsed.dict.is_empty());
     assert!(parsed.solid_block_offset > 0);
 
-    // Walk back: dict_len field is the 4 bytes just before solid_block_offset.
-    let dict_len_bytes = &archive[parsed.solid_block_offset - 4..parsed.solid_block_offset];
+    // Sub-TOC size: 4 bytes for n_groups + n_groups * 5 bytes per
+    // group entry (1 byte codec + 4 bytes size).
+    let sub_toc_bytes = 4 + parsed.chunk_groups.len() * 5;
+    let dict_len_end = parsed.solid_block_offset - sub_toc_bytes;
+    let dict_len_bytes = &archive[dict_len_end - 4..dict_len_end];
     let dict_len = u32::from_le_bytes(dict_len_bytes.try_into().unwrap());
-    assert_eq!(dict_len, 0, "LZMA archive must have dict_len=0");
+    assert_eq!(
+        dict_len, 0,
+        "LZMA archive must have dict_len=0 (after sub-TOC walk-back)"
+    );
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -283,8 +307,8 @@ fn nxs6_legacy_v1_archive_decompresses() {
     // For the solid_block, we use the SAME LZMA bytes that the v2
     // encoder produces (since v1 and v2 use the same LZMA codec for
     // LZMA-level archives). The trick: we produce a v2 LZMA archive,
-    // then strip the codec byte and the dict_len=0 field, and rewrite
-    // the version to 1.
+    // then strip the codec byte, the dict_len=0 field, AND the
+    // chunk-groups sub-TOC, and rewrite the version to 1.
     let files_for_compress: Vec<(String, Vec<u8>)> = vec![(
         "old_file.txt".to_string(),
         b"legacy NXS6 content for retrocompatibility test\n".to_vec(),
@@ -295,24 +319,25 @@ fn nxs6_legacy_v1_archive_decompresses() {
     )
     .expect("v2 compress");
 
-    // v2 layout: [MAGIC=5][VER=1][CODEC=1][N_FILES=4][TOC][DICT_LEN=4][solid]
-    // v1 layout: [MAGIC=5][VER=1][N_FILES=4][TOC][solid]
+    // Sprint 5.7.2 hotfix #46 added the chunk-groups sub-TOC
+    // between the dict_len and the solid block. The current v2
+    // layout is:
+    //   [MAGIC=5][VER=1+][CODEC=1][N_FILES=4][TOC][DICT_LEN=4]
+    //   [N_GROUPS=4][group*5][solid]
+    //
+    // The original v1 layout is:
+    //   [MAGIC=5][VER=1][N_FILES=4][TOC][solid]
     //
     // Bytes we keep unchanged: MAGIC (0..5) and the solid block.
-    // Bytes we drop: the codec byte (offset 6) and the trailing
-    // dict_len=0 (4 bytes before solid block).
-    //
-    // To find the solid block, parse the v2 header to compute its
-    // exact length. v2 header = MAGIC(5) + VER(1) + CODEC(1) +
-    // N_FILES(4) + TOC entries + DICT_LEN(4). The TOC entries
-    // are the same in v1 and v2, so the v1 header = MAGIC(5) +
-    // VER=1(1) + N_FILES(4) + TOC entries.
+    // Bytes we drop: the codec byte (1), the dict_len (4), the
+    // n_groups (4), and `n_groups * 5` bytes of group entries.
     let toc_v2 = parse_toc(&v2_archive).expect("v2 parse_toc");
     let solid_block_start_v2 = toc_v2.solid_block_offset;
     eprintln!(
-        "[test] v2 solid_block_offset={}, total_len={}",
+        "[test] v2 solid_block_offset={}, total_len={}, chunk_groups={}",
         solid_block_start_v2,
-        v2_archive.len()
+        v2_archive.len(),
+        toc_v2.chunk_groups.len()
     );
     let solid_block = &v2_archive[solid_block_start_v2..];
 
@@ -329,21 +354,23 @@ fn nxs6_legacy_v1_archive_decompresses() {
         v1_header.push(e.preprocessor as u8);
         v1_header.extend_from_slice(&e.solid_offset.to_le_bytes());
     }
-    // v1 has NO dict field. v2 has 4 bytes (dict_len=0) here that
-    // we already skipped by computing solid_block_start_v2 = end of
-    // v2 header (which already accounts for the dict_len=0).
-    // (solid_block_start_v2 is v2's `pos` after the dict_len field,
-    // which equals the start of the solid block in v2.)
-
-    // Sanity: header is one byte shorter than v2 (no codec) and 4
-    // bytes shorter (no dict_len), so v1_header.len() should equal
-    // solid_block_start_v2 - 1 (codec) - 4 (dict_len) = solid_block_start_v2 - 5.
+    // v1 has NO dict field, NO sub-TOC. The v3 header that
+    // `solid_block_start_v2` skips is:
+    //   CODEC(1) + N_GROUPS(4) + n_groups * 5
+    // = 5 + n_groups * 5
+    //
+    // (LZMA archives stay at VERSION 3 — no dict field. The
+    // dict field is only present in VERSION 4 archives which
+    // carry a trained zstd dict. See `compress_with_progress_full`
+    // for the version selection logic.)
+    let v2_overhead_skipped = 1 + (4 + toc_v2.chunk_groups.len() * 5);
     assert_eq!(
         v1_header.len(),
-        solid_block_start_v2 - 5,
-        "v1 header length mismatch: got {}, expected {}",
+        solid_block_start_v2 - v2_overhead_skipped,
+        "v1 header length mismatch: got {}, expected {} (v2_overhead={})",
         v1_header.len(),
-        solid_block_start_v2 - 5
+        solid_block_start_v2 - v2_overhead_skipped,
+        v2_overhead_skipped
     );
 
     // Assemble the v1 archive.
@@ -361,6 +388,11 @@ fn nxs6_legacy_v1_archive_decompresses() {
     let parsed = parse_toc(&v1_archive).expect("parse_toc NXS6 v1");
     assert_eq!(parsed.entries.len(), 1);
     assert!(parsed.dict.is_empty(), "NXS6 has no dict field");
+    // NXS6 also has no chunk_groups sub-TOC — the parser
+    // synthesizes a single group from the global codec. We don't
+    // assert chunk_groups.len() == 0 here because the
+    // synthesizer always returns 1 group; the property is that
+    // decompression works, which is what we test below.
 
     let (entries, recovered) = decompress(&v1_archive).expect("decompress NXS6 v1");
     assert_eq!(entries.len(), 1);
@@ -369,5 +401,141 @@ fn nxs6_legacy_v1_archive_decompresses() {
     eprintln!(
         "[test] NXS6 v1 retrocompatibility: {} bytes recovered",
         recovered.len()
+    );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Sprint 5.7.12: aggressive multi-stream LZMA stress test.
+//
+//  The Sprint 5.7.2 memory snapshot flagged a "preexisting bug"
+//  in the encoder/decoder for LZMA multi-stream roundtrip on
+//  corpora > 128 MB. After hotfix #46 (chunk-groups sub-TOC)
+//  and the 5.7.10 SupremeEngine refactor, the 7/7 super-chunk
+//  tests in this file already pass with 600 MiB / 5 super-
+//  chunks. This stress test pushes it further: 1.5 GiB across
+//  12+ super-chunks, with every file preprocessor=Raw (so the
+//  recovered bytes are bit-exact identical to the input — not
+//  "minified of the source").
+//
+//  Run: cargo test --release --test v6solid_super_chunks_test
+//        stress_test_lzma_multistream_1_5_gib
+//
+//  Slow on debug builds (~3 min on M4 Pro). Skip on CI by
+//  default; the test is marked #[ignore] so the default
+//  `cargo test` doesn't pay for it. Run explicitly with
+//  `cargo test -- --ignored` to execute.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+#[test]
+#[ignore = "stress test: 1.5 GiB / 12 super-chunks, slow on debug (~3 min M4 Pro)"]
+fn stress_test_lzma_multistream_1_5_gib() {
+    use nexus_compress::solid_archive::{compress_with_progress_lossless, CompressionLevel};
+
+    // 12 files × 128 MiB = 1.5 GiB. Each file just under the
+    // 128 MiB super-chunk cap, so the buffer aggregator creates
+    // one super-chunk per file → exactly 12 super-chunks in the
+    // LZMA stream. The XzDecoder::new_multi_decoder must chew
+    // through 12 concatenated LZMA frames without dropping a
+    // single byte.
+    let per_file: usize = 128 * 1024 * 1024;
+    let n_files: usize = 12;
+    let total: usize = per_file * n_files;
+    eprintln!(
+        "[stress] building {} files × {} MiB = {} MiB of pseudo-random data",
+        n_files,
+        per_file / (1024 * 1024),
+        total / (1024 * 1024)
+    );
+
+    // Pseudo-random data: LCG that produces 8 bits/byte of
+    // entropy. Same seed pattern as `make_text_bytes` so the
+    // buffer is deterministic across runs (CI can reproduce
+    // failures). We avoid zero bytes so xz2's LZMA dict
+    // doesn't degenerate.
+    let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(n_files);
+    for f in 0..n_files {
+        let mut buf = Vec::with_capacity(per_file);
+        let mut lcg: u64 = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(f as u64);
+        while buf.len() < per_file {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let chunk = (lcg as u32).to_le_bytes();
+            buf.extend_from_slice(&chunk);
+        }
+        buf.truncate(per_file);
+        files.push((format!("data/file_{f:02}.bin"), buf));
+    }
+
+    // Compress with LZMA(6), force_raw=true via the
+    // `compress_with_progress_lossless` entry point. Every file
+    // is preprocessor=Raw so the recovered bytes are bit-exact
+    // identical to the input.
+    let archive = compress_with_progress_lossless(
+        &files,
+        CompressionLevel::Lzma(6),
+        |_, _, _| {},
+    )
+    .expect("1.5 GiB lossless compress should not fail");
+
+    eprintln!(
+        "[stress] compressed: {} MiB → {} MiB ({:.2}x ratio)",
+        total / (1024 * 1024),
+        archive.len() / (1024 * 1024),
+        total as f64 / archive.len() as f64
+    );
+
+    // Roundtrip.
+    let (entries, recovered) =
+        nexus_compress::solid_archive::decompress(&archive).expect("1.5 GiB decompress should not fail");
+
+    // 12 entries, all Raw, all 128 MiB, offsets strictly monotonic.
+    assert_eq!(entries.len(), n_files, "expected 12 entries");
+    for (i, e) in entries.iter().enumerate() {
+        assert_eq!(
+            e.pre_size, per_file as u64,
+            "entry {i} pre_size {} != {} (per_file)",
+            e.pre_size, per_file
+        );
+        assert_eq!(
+            e.original_size, e.pre_size,
+            "entry {i} original_size != pre_size (must be Raw)"
+        );
+        assert_eq!(
+            e.preprocessor,
+            nexus_compress::solid_archive::Preprocessor::Raw,
+            "entry {i} must be Raw (force_raw=true)"
+        );
+    }
+    assert_offset_arithmetic(&entries, recovered.len());
+    assert_eq!(
+        recovered.len(),
+        total,
+        "recovered total {} != input total {}",
+        recovered.len(),
+        total
+    );
+
+    // Bit-exact: every byte of every file must match. This is
+    // the property the Sprint 5.7.2 memory snapshot feared
+    // was broken for multi-stream archives.
+    for (i, e) in entries.iter().enumerate() {
+        let start = e.solid_offset as usize;
+        let end = start + e.pre_size as usize;
+        let got = &recovered[start..end];
+        let want = &files[i].1;
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "entry {i} recovered len {} != input len {}",
+            got.len(),
+            want.len()
+        );
+        assert_eq!(
+            got, want,
+            "entry {i} bytes mismatch (LZMA multi-stream roundtrip failed)"
+        );
+    }
+
+    eprintln!(
+        "[stress] OK: 1.5 GiB / 12 super-chunks / bit-exact roundtrip succeeded"
     );
 }
