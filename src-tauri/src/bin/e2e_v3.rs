@@ -348,10 +348,14 @@ async fn main() {
     std::fs::write(&nxs6_path, &archive_bytes).expect("write nxs6");
     // List
     let entries_solid = archive_inspect::list_entries(&nxs6_path).expect("list nxs6");
+    // Sprint 5.7.10-E: the engine returns `CompressTargetResult`
+    // (no per-entry Vec — the per-file TOC is in the archive
+    // itself, not the engine result). Use `n_files` from the
+    // result for the count check.
     assert_eq!(
-        entries_solid.len(),
-        result.entries.len(),
-        "list_entries must match the in-memory TOC"
+        entries_solid.len() as u64,
+        result.n_files,
+        "list_entries must match n_files reported by the engine"
     );
     for e in &entries_solid {
         assert!(e.size > 0);

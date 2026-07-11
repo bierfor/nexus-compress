@@ -50,7 +50,11 @@ fn main() {
             commands::peek_archive_target_cmd,
             commands::reveal_in_finder_cmd,
             commands::pick_save_location_cmd,
-            commands::backend_info_cmd,
+            // Sprint 5.7.10-E: removed `commands::backend_info_cmd`
+            // — the legacy backend enum is gone, the engine
+            // is the only public compress path, and the
+            // backend_info() helper that the GUI never read
+            // was deleted in the same commit.
             commands::engine_info_cmd,
             commands::self_test_cmd,
             commands::pick_file_cmd,
