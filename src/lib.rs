@@ -70,6 +70,9 @@ pub mod supreme_engine;
 /// `bin/bench_solid.rs`.
 pub mod walker;
 
-pub use api::{compress_directory_with_backend, CompressionBackend};
+/// Sprint 5.7.10-E: removed the `compress_directory_with_backend`
+/// and `CompressionBackend` re-exports. The legacy dispatch
+/// surface is gone — the SupremeEngine (`crate::supreme_engine`)
+/// is the only public compress entry point.
 pub use codec::{compress, compress_premium, decompress};
 pub use format::{BlockType, NexusHeader};

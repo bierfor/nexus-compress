@@ -317,12 +317,32 @@ async fn main() {
         )
         .expect("write nxs6 file");
     }
-    let (result, archive_bytes) = nexus_compress::api::compress_directory_with_backend(
-        &nxs6_src,
-        nexus_compress::api::CompressionBackend::V6Solid,
-        1,
+    // Sprint 5.7.10-E: drive the engine via a profile. The
+    // legacy `compress_directory_with_backend(V6Solid, 1)` API
+    // is gone.
+    let profile = nexus_compress::supreme_engine::CompressionProfile {
+        schema_version: nexus_compress::supreme_engine::PROFILE_SCHEMA_VERSION,
+        mode: nexus_compress::supreme_engine::ProfileMode::Ultra,
+        codec: nexus_compress::supreme_engine::ProfileCodec::Lzma,
+        fidelity: nexus_compress::supreme_engine::ProfileFidelity::Lossy,
+        corpus_mode: nexus_compress::api::CorpusMode::Everything,
+        raw_extensions: vec![],
+        minify_extensions: vec![],
+        encrypt: false,
+        recovery_level: nexus_compress::api::RecoveryLevel::Low,
+    };
+    let invocation = nexus_compress::supreme_engine::CompressInvocation {
+        profile,
+        path: nxs6_src.clone(),
+        password: None,
+        output_dir: None,
+    };
+    let result = nexus_compress::supreme_engine::SupremeEngine::compress(
+        &invocation,
+        |_| {},
     )
     .expect("v6solid compress");
+    let archive_bytes = result.compressed_bytes.clone();
     let nxs6_path = std::env::temp_dir().join(format!("e2e_v3_solid_{}.nxs6", std::process::id()));
     let _ = std::fs::remove_file(&nxs6_path);
     std::fs::write(&nxs6_path, &archive_bytes).expect("write nxs6");

@@ -7,7 +7,11 @@ use std::time::Instant;
 
 #[test]
 fn v6solid_big_dir_with_progress() {
-    use nexus_compress::api::{self, CompressionBackend, ProgressEvent};
+    use nexus_compress::api::ProgressEvent;
+    use nexus_compress::supreme_engine::{
+        CompressInvocation, CompressionProfile, ProfileCodec, ProfileFidelity, ProfileMode,
+        PROFILE_SCHEMA_VERSION,
+    };
 
     let test_dir = std::path::PathBuf::from("/tmp/test_dir_big");
     if !test_dir.exists() {
@@ -16,10 +20,28 @@ fn v6solid_big_dir_with_progress() {
     let events: Mutex<Vec<(u64, u64, u64, String)>> = Mutex::new(Vec::new());
     let start = Instant::now();
 
-    let result = api::compress_directory_with_backend_with_progress(
-        &test_dir,
-        CompressionBackend::V6Solid,
-        1, // ultra-fast
+    // Sprint 5.7.10-E: drive the engine via a profile. The
+    // previous test called `compress_directory_with_backend_
+    // with_progress(V6Solid)` directly — that API is gone.
+    let profile = CompressionProfile {
+        schema_version: PROFILE_SCHEMA_VERSION,
+        mode: ProfileMode::Ultra,
+        codec: ProfileCodec::Lzma,
+        fidelity: ProfileFidelity::Lossy,
+        corpus_mode: nexus_compress::api::CorpusMode::Everything,
+        raw_extensions: vec![],
+        minify_extensions: vec![],
+        encrypt: false,
+        recovery_level: nexus_compress::api::RecoveryLevel::Low,
+    };
+    let invocation = CompressInvocation {
+        profile,
+        path: test_dir.clone(),
+        password: None,
+        output_dir: None,
+    };
+    let result = nexus_compress::supreme_engine::SupremeEngine::compress(
+        &invocation,
         |ev: ProgressEvent| {
             let wall_ms = start.elapsed().as_millis() as u64;
             events.lock().unwrap().push((
@@ -43,10 +65,11 @@ fn v6solid_big_dir_with_progress() {
             i, e.0, e.1, e.2, e.3);
     }
 
-    let (result, archive) = result.expect("compress should succeed");
+    let result = result.expect("compress should succeed");
+    let archive = result.compressed_bytes.clone();
     println!("\nOutput archive: {} bytes ({:.1} KB)", archive.len(), archive.len() as f64 / 1024.0);
-    println!("Original size: {} bytes ({:.1} KB)", result.total_original_size, result.total_original_size as f64 / 1024.0);
-    println!("Aggregate ratio: {:.2}x", result.aggregate_ratio);
+    println!("Original size: {} bytes ({:.1} KB)", result.original_size, result.original_size as f64 / 1024.0);
+    println!("Aggregate ratio: {:.2}x", result.ratio);
 
     // All events should have elapsed_ms > 0
     let zero_count = events.iter().filter(|e| e.1 == 0).count();

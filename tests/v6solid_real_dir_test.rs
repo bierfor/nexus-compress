@@ -13,7 +13,10 @@ use std::time::Instant;
 
 #[test]
 fn v6solid_full_path_with_progress() {
-    use nexus_compress::api::{self, CompressionBackend, ProgressEvent};
+    use nexus_compress::api::ProgressEvent;
+    use nexus_compress::supreme_engine::{
+        CompressInvocation, CompressionProfile, PROFILE_SCHEMA_VERSION,
+    };
 
     // The test dir is created by the calling test setup; if not,
     // create a minimal one.
@@ -31,10 +34,28 @@ fn v6solid_full_path_with_progress() {
     let events: Mutex<Vec<(u64, u64, u64, String, u64, u64)>> = Mutex::new(Vec::new());
     let start = Instant::now();
 
-    let result = api::compress_directory_with_backend_with_progress(
-        &test_dir,
-        CompressionBackend::V6Solid,
-        1, // ultra-fast LZMA level
+    // Sprint 5.7.10-E: drive the engine via a profile. The
+    // previous test called `compress_directory_with_backend_
+    // with_progress(V6Solid)` directly — that API is gone.
+    let profile = CompressionProfile {
+        schema_version: PROFILE_SCHEMA_VERSION,
+        mode: nexus_compress::supreme_engine::ProfileMode::Ultra,
+        codec: nexus_compress::supreme_engine::ProfileCodec::Lzma,
+        fidelity: nexus_compress::supreme_engine::ProfileFidelity::Lossy,
+        corpus_mode: nexus_compress::api::CorpusMode::Everything,
+        raw_extensions: vec![],
+        minify_extensions: vec![],
+        encrypt: false,
+        recovery_level: nexus_compress::api::RecoveryLevel::Low,
+    };
+    let invocation = CompressInvocation {
+        profile,
+        path: test_dir.clone(),
+        password: None,
+        output_dir: None,
+    };
+    let result = nexus_compress::supreme_engine::SupremeEngine::compress(
+        &invocation,
         |ev: ProgressEvent| {
             let wall_ms = start.elapsed().as_millis() as u64;
             events.lock().unwrap().push((
@@ -62,10 +83,11 @@ fn v6solid_full_path_with_progress() {
         println!("  {:?}", e);
     }
 
-    let (result, archive) = result.expect("compress should succeed");
+    let result = result.expect("compress should succeed");
+    let archive = result.compressed_bytes.clone();
     println!("\nOutput archive: {} bytes", archive.len());
-    println!("Original size: {} bytes", result.total_original_size);
-    println!("Aggregate ratio: {:.2}x", result.aggregate_ratio);
+    println!("Original size: {} bytes", result.original_size);
+    println!("Aggregate ratio: {:.2}x", result.ratio);
     println!("Files in archive: {}", result.n_files);
 
     // Sanity checks
@@ -92,8 +114,8 @@ fn v6solid_full_path_with_progress() {
     // Verify the output is valid (smaller than original because text
     // compresses well, but the PNG+ZIP stay at original size).
     println!("\nVerification:");
-    println!("  Original: {} bytes", result.total_original_size);
+    println!("  Original: {} bytes", result.original_size);
     println!("  Compressed: {} bytes", archive.len());
-    assert!(result.total_original_size > 0);
+    assert!(result.original_size > 0);
     assert!(archive.len() > 0);
 }

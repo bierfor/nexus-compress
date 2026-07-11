@@ -45,8 +45,6 @@ fn main() {
             commands::compress_bytes_cmd,
             commands::decompress_bytes_cmd,
             commands::compress_bytes_with_level_cmd,
-            commands::compress_bytes_with_backend_cmd,
-            commands::compress_directory_with_backend_cmd,
             commands::compress_target_cmd,
             commands::decompress_target_cmd,
             commands::peek_archive_target_cmd,

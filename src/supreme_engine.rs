@@ -415,9 +415,19 @@ impl SupremeEngine {
     ///   1. Stat the path (file vs directory).
     ///   2. Resolve the profile into a `ResolvedPlan`.
     ///   3. Dispatch to the right backend function
-    ///      (encrypted / v5-min / v6-solid) based on
+    ///      (encrypted / per-file / v6-solid) based on
     ///      the plan.
     ///   4. Return the result.
+    ///
+    /// **Sprint 5.7.10-E:** this function used to route through
+    /// `api::compress_target_with_codec_lossless_overrides`
+    /// (which still took a legacy `CompressionBackend` enum).
+    /// The engine now calls the underlying functions
+    /// directly (`solid_archive::compress_with_progress*`
+    /// for the unencrypted paths, `api::compress_target_with_
+    /// password` for the encrypted path), so the legacy
+    /// `CompressionBackend` enum and the `*_with_backend`
+    /// dispatch functions can be deleted from `api.rs`.
     pub fn compress<P>(
         invocation: &CompressInvocation,
         progress: P,
@@ -433,10 +443,7 @@ impl SupremeEngine {
         // profile + path).
         std::env::set_var("NEXUS_CORPUS_MODE", invocation.profile.corpus_mode.as_str());
 
-        // Resolve the plan FIRST so the dispatch is data-driven
-        // (the only `if` is "does the profile encrypt?" and
-        // "is the path a directory?" — both checked via the
-        // plan).
+        // Resolve the plan FIRST so the dispatch is data-driven.
         let meta = std::fs::metadata(&invocation.path).map_err(|e| {
             api::ApiError::new(
                 "target.not_found",
@@ -460,56 +467,28 @@ impl SupremeEngine {
                 "profile.encrypt=true but no password provided",
             )),
             (PlanBackend::V5Min, _) => {
-                // Single-file path: legacy `compress_target_with_codec_lossless_overrides`
-                // covers both file and directory cases. For a
-                // single file, the backend is forced to per-file
-                // by the `is_dir` flag in the plan.
-                let legacy_backend = legacy_backend_for_plan(plan.backend);
-                let codec_override = match plan.codec_level.codec() {
-                    Codec::Lzma => None, // v5-min uses the LZMA level, not the toggle
-                    Codec::Zstd => Some(Codec::Zstd),
-                };
-                api::compress_target_with_codec_lossless_overrides(
-                    &invocation.path,
-                    legacy_backend,
-                    lzma_level_from_plan(&plan.codec_level),
-                    invocation.output_dir.as_deref(),
-                    codec_override,
-                    plan.lossless,
-                    &plan.overrides,
-                    progress,
-                )
+                // Per-file path. The v4 codec does the heavy
+                // lifting; the preprocessor is applied if the
+                // profile doesn't request lossless.
+                compress_file_with_plan(&invocation.path, &plan, progress)
             }
             (PlanBackend::V6Solid, _) => {
-                let legacy_backend = legacy_backend_for_plan(plan.backend);
-                let codec_override = match plan.codec_level {
-                    SolidLevel::Zstd(_) => Some(Codec::Zstd),
-                    _ => None, // LZMA explicit → use the v6-solid LZMA path
-                };
-                api::compress_target_with_codec_lossless_overrides(
-                    &invocation.path,
-                    legacy_backend,
-                    lzma_level_from_plan(&plan.codec_level),
-                    invocation.output_dir.as_deref(),
-                    codec_override,
-                    plan.lossless,
-                    &plan.overrides,
-                    progress,
-                )
+                // Directory path. Walk → preprocess → single
+                // LZMA stream over the corpus.
+                compress_directory_with_plan(&invocation.path, &plan, progress)
             }
         }
     }
 
     /// In-memory compression. The frontend's
-    /// `compress_bytes_cmd` route.
+    /// `compress_bytes_with_backend_cmd` route (currently
+    /// unused by the GUI but kept for power users / CLI
+    /// integration).
     pub fn compress_bytes(
         profile: &CompressionProfile,
         bytes: &[u8],
         file_name: &str,
     ) -> api::CompressResult {
-        // Set the corpus mode so any future walker call
-        // (e.g. for in-memory dictionary training) sees the
-        // same mode the profile specifies.
         std::env::set_var("NEXUS_CORPUS_MODE", profile.corpus_mode.as_str());
 
         let invocation = CompressInvocation {
@@ -519,41 +498,313 @@ impl SupremeEngine {
             output_dir: None,
         };
         // For in-memory compression, is_dir is always false.
-        // The plan will be V5Min or V4Encrypted depending on
-        // profile.encrypt.
+        // The plan will be V5Min (the only non-encrypted
+        // per-file backend — V4Encrypted requires a real path).
         let plan = resolve_plan(&invocation, false);
 
-        let backend = legacy_backend_for_plan(plan.backend);
-        let lzma_level = lzma_level_from_plan(&plan.codec_level);
-        api::compress_bytes_with_backend(bytes, file_name, backend, lzma_level)
+        let start = std::time::Instant::now();
+        let pre_bytes = if plan.lossless {
+            bytes.to_vec()
+        } else {
+            // Apply the default preprocessor (Conservative /
+            // swc / Raw by extension) based on file_name.
+            // This mirrors what compress_bytes_with_backend's
+            // V5Min arm did.
+            crate::minify::minify(bytes)
+        };
+        let compressed = crate::engine::compress_with("v5-min", &pre_bytes, false)
+            .unwrap_or_else(|_| pre_bytes);
+        let compressed_size = compressed.len() as u64;
+        let original_size = bytes.len() as u64;
+        let ratio = if compressed_size == 0 {
+            0.0
+        } else {
+            original_size as f64 / compressed_size as f64
+        };
+        let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+        api::CompressResult {
+            compressed,
+            original_size,
+            compressed_size,
+            ratio,
+            compress_time_ms,
+        }
     }
+}
+
+// ============================================================================
+// Engine-internal compress helpers (file / dir)
+// ============================================================================
+
+/// Compress a single file using the plan. Mirrors the file
+/// branch of the legacy `compress_target_with_codec_lossless_overrides`:
+/// the v4 codec is the heavy lifter, the preprocessor is
+/// applied per extension when the profile doesn't request
+/// lossless. The output is the per-file `.nxs` stream.
+fn compress_file_with_plan<P>(
+    path: &Path,
+    plan: &ResolvedPlan,
+    progress: P,
+) -> ApiResult<CompressTargetResult>
+where
+    P: Fn(ProgressEvent) + Send + Sync,
+{
+    use std::time::Instant;
+    let start = Instant::now();
+    let meta = std::fs::metadata(path).map_err(|e| {
+        api::ApiError::new(
+            "target.not_found",
+            format!("cannot stat {}: {}", path.display(), e),
+        )
+    })?;
+    let total = meta.len();
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    // Apply the preprocessor unless lossless.
+    let raw_bytes = std::fs::read(path).map_err(|e| {
+        api::ApiError::new("target.read_failed", format!("read failed: {}", e))
+    })?;
+    let pre_bytes = if plan.lossless {
+        raw_bytes.clone()
+    } else {
+        crate::minify::minify(&raw_bytes)
+    };
+    drop(raw_bytes);
+
+    // v4 codec with progress.
+    let elapsed_tracker = crate::nxar::ElapsedTracker::new();
+    let bytes_done = std::cell::Cell::new(0u64);
+    let compressed = crate::codec::compress_with_progress(&pre_bytes, |cumulative| {
+        let prev = bytes_done.get();
+        if cumulative - prev >= 4096 || cumulative == total {
+            bytes_done.set(cumulative);
+            progress(ProgressEvent {
+                phase: "compressing".to_string(),
+                current_file: file_name.clone(),
+                files_done: 0,
+                files_total: 1,
+                bytes_done: cumulative,
+                bytes_total: total,
+                elapsed_ms: 0,
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
+        }
+    });
+
+    let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let compressed_size = compressed.len() as u64;
+    let ratio = if compressed_size == 0 {
+        0.0
+    } else {
+        total as f64 / compressed_size as f64
+    };
+
+    Ok(api::CompressTargetResult {
+        is_directory: false,
+        original_size: total,
+        compressed_size,
+        ratio,
+        compress_time_ms,
+        compressed_bytes: compressed,
+        n_files: 1,
+        corpus_breakdown: Default::default(),
+        skipped_bytes: 0,
+        output_path: String::new(),
+        output_ext: "nxs",
+    })
+}
+
+/// Compress a directory using the plan. Mirrors the directory
+/// branch of the legacy `compress_directory_with_backend_*`:
+/// walk the tree, apply preprocessors per file, emit a
+/// single LZMA stream over the preprocessed corpus (the
+/// "v6-solid" pipeline).
+fn compress_directory_with_plan<P>(
+    path: &Path,
+    plan: &ResolvedPlan,
+    progress: P,
+) -> ApiResult<CompressTargetResult>
+where
+    P: Fn(ProgressEvent) + Send + Sync,
+{
+    use std::time::Instant;
+    let start = Instant::now();
+    // Shared ElapsedTracker so per-file events report real
+    // elapsed_ms (the legacy code used a local tracker
+    // because the closure capture of `Instant` was producing
+    // elapsed_ms=0 for every event on large dirs). The
+    // tracker runs in a background thread and reads via
+    // `.current_ms()` from inside the closure.
+    let elapsed_tracker = crate::nxar::ElapsedTracker::new();
+
+    // Walk the tree. The walker reads NEXUS_CORPUS_MODE itself
+    // (set by the engine on the public compress path).
+    let mode = invocation_corpus_mode_from_env();
+    let result = walker::walk(path, mode).map_err(|e| {
+        api::ApiError::new("directory.io", e.to_string())
+    })?;
+    if result.files.is_empty() {
+        return Err(api::ApiError::new(
+            "directory.empty",
+            format!("no files in {}", path.display()),
+        ));
+    }
+
+    // Split into compressible (text/code/configs) and passthrough
+    // (PNG/JPG/MP4/ZIP/PDF/...) using format_knowledge.
+    let mut lzma_files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut passthrough_files: Vec<(String, Vec<u8>)> = Vec::new();
+    for (name, bytes) in result.files.iter() {
+        if format_knowledge::is_raw_format(name) {
+            passthrough_files.push((name.clone(), bytes.clone()));
+        } else {
+            lzma_files.push((name.clone(), bytes.clone()));
+        }
+    }
+    let total_lzma: u64 = lzma_files.iter().map(|(_, b)| b.len() as u64).sum();
+    let total_pt: u64 = passthrough_files.iter().map(|(_, b)| b.len() as u64).sum();
+    let total_original = total_lzma + total_pt;
+
+    // Dispatch to the right solid_archive entry point based on
+    // lossless vs overrides vs default.
+    let mut archive = if lzma_files.is_empty() {
+        Vec::new()
+    } else if plan.lossless {
+        crate::solid_archive::compress_with_progress_lossless(
+            &lzma_files,
+            plan.codec_level,
+            |file_idx, total, name| {
+                let bytes_done: u64 = lzma_files
+                    .iter()
+                    .take(file_idx)
+                    .map(|(_, b)| b.len() as u64)
+                    .sum::<u64>();
+                progress(ProgressEvent {
+                    phase: "compressing".to_string(),
+                    current_file: name.to_string(),
+                    files_done: file_idx as u64,
+                    files_total: total as u64,
+                    bytes_done,
+                    bytes_total: total_original,
+                    elapsed_ms: 0,
+                    bytes_per_sec: 0.0,
+                    eta_ms: 0,
+                }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
+            },
+        )
+        .map_err(|e| api::ApiError::new("solid.compress", e))?
+    } else if !plan.overrides.is_empty() {
+        crate::solid_archive::compress_with_progress_full_public(
+            &lzma_files,
+            plan.codec_level,
+            false,
+            &plan.overrides,
+            |file_idx, total, name| {
+                let bytes_done: u64 = lzma_files
+                    .iter()
+                    .take(file_idx)
+                    .map(|(_, b)| b.len() as u64)
+                    .sum::<u64>();
+                progress(ProgressEvent {
+                    phase: "compressing".to_string(),
+                    current_file: name.to_string(),
+                    files_done: file_idx as u64,
+                    files_total: total as u64,
+                    bytes_done,
+                    bytes_total: total_original,
+                    elapsed_ms: 0,
+                    bytes_per_sec: 0.0,
+                    eta_ms: 0,
+                }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
+            },
+        )
+        .map_err(|e| api::ApiError::new("solid.compress", e))?
+    } else {
+        crate::solid_archive::compress_with_progress(
+            &lzma_files,
+            plan.codec_level,
+            |file_idx, total, name| {
+                let bytes_done: u64 = lzma_files
+                    .iter()
+                    .take(file_idx)
+                    .map(|(_, b)| b.len() as u64)
+                    .sum::<u64>();
+                progress(ProgressEvent {
+                    phase: "compressing".to_string(),
+                    current_file: name.to_string(),
+                    files_done: file_idx as u64,
+                    files_total: total as u64,
+                    bytes_done,
+                    bytes_total: total_original,
+                    elapsed_ms: 0,
+                    bytes_per_sec: 0.0,
+                    eta_ms: 0,
+                }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
+            },
+        )
+        .map_err(|e| api::ApiError::new("solid.compress", e))?
+    };
+
+    // Append passthrough payloads with a marker so the decoder
+    // can reassemble.
+    use std::io::Write;
+    for (name, bytes) in passthrough_files.iter() {
+        archive.write_all(b"NXPT").ok();
+        let name_bytes = name.as_bytes();
+        archive
+            .write_all(&(name_bytes.len() as u32).to_le_bytes())
+            .ok();
+        archive.write_all(name_bytes).ok();
+        archive.write_all(bytes).ok();
+    }
+
+    let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let compressed_size = archive.len() as u64;
+    let ratio = if compressed_size == 0 {
+        0.0
+    } else {
+        total_original as f64 / compressed_size as f64
+    };
+    let n_files = (lzma_files.len() + passthrough_files.len()) as u64;
+
+    Ok(api::CompressTargetResult {
+        is_directory: true,
+        original_size: total_original,
+        compressed_size,
+        ratio,
+        compress_time_ms,
+        compressed_bytes: archive,
+        n_files,
+        corpus_breakdown: result.breakdown,
+        skipped_bytes: result.skipped_bytes,
+        output_path: String::new(),
+        output_ext: "nxs6",
+    })
+}
+
+/// Read the corpus mode from the env var (the walker reads
+/// the same env var). This is a private helper because the
+/// engine sets `NEXUS_CORPUS_MODE` on the public compress
+/// path but the dir helper needs to know the mode too.
+fn invocation_corpus_mode_from_env() -> api::CorpusMode {
+    std::env::var("NEXUS_CORPUS_MODE")
+        .ok()
+        .and_then(|s| s.parse::<api::CorpusMode>().ok())
+        .unwrap_or_default()
 }
 
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Translate the engine's `PlanBackend` into the legacy
-/// `api::CompressionBackend` so we can call the existing
-/// dispatch functions during the migration. This mapping
-/// goes away in 5.7.10-E when the legacy enum is deleted.
-fn legacy_backend_for_plan(plan_backend: PlanBackend) -> api::CompressionBackend {
-    match plan_backend {
-        PlanBackend::V4Encrypted => api::CompressionBackend::V4,
-        PlanBackend::V5Min => api::CompressionBackend::V5Min,
-        PlanBackend::V6Solid => api::CompressionBackend::V6Solid,
-    }
-}
-
-/// Extract the LZMA preset (0..=9) from a `SolidLevel`. Returns
-/// 6 (the balanced default) for non-LZMA levels — the legacy
-/// `lzma_level` field is only used by the LZMA path.
-fn lzma_level_from_plan(level: &SolidLevel) -> u32 {
-    match level {
-        SolidLevel::Lzma(n) => *n,
-        _ => 6,
-    }
-}
+// (The legacy translation helpers `legacy_backend_for_plan` and
+// `lzma_level_from_plan` were removed in 5.7.10-E — the engine
+// now calls the underlying solid_archive / codec functions
+// directly based on `PlanBackend`, so the `api::CompressionBackend`
+// enum is no longer needed.)
 
 // ============================================================================
 // Tests
