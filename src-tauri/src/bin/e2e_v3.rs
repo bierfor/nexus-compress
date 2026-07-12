@@ -330,6 +330,7 @@ async fn main() {
         minify_extensions: vec![],
         encrypt: false,
         recovery_level: nexus_compress::api::RecoveryLevel::Low,
+        skip_archive: false,
     };
     let invocation = nexus_compress::supreme_engine::CompressInvocation {
         profile,

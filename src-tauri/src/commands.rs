@@ -126,6 +126,20 @@ fn build_profile_from_legacy_req(
         .transpose()?
         .unwrap_or_default();
 
+    // Sprint 5.7.18: --skip-archive flag plumbing. The
+    // frontend sends `skipArchive` (camelCase) in the
+    // profile; we accept it directly from the request for
+    // the legacy flat-field shape (so old frontends can
+    // still set it). The `#[serde(default)]` on
+    // `CompressionProfile.skip_archive` means the nested
+    // path (Sprint 5.7.10-D) also handles a missing field
+    // gracefully.
+    let skip_archive: bool = req
+        .get("skip_archive")
+        .or_else(|| req.get("profile").and_then(|p| p.get("skipArchive")))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     Ok(CompressionProfile {
         schema_version: PROFILE_SCHEMA_VERSION,
         mode,
@@ -136,6 +150,7 @@ fn build_profile_from_legacy_req(
         minify_extensions,
         encrypt,
         recovery_level,
+        skip_archive,
     })
 }
 
