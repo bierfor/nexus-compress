@@ -847,19 +847,45 @@ where
             // overhead. We were paying 2s to throw the dict
             // away. Skipping is a pure win.
             //
-            // Lossless mode (force_raw=true) keeps the full
-            // pipeline because raw bytes are more diverse
-            // and the dict does help.
+            // Sprint 5.7.15: dict training is now re-enabled in
+            // Lossy mode for corpora ≥ 16 MiB. The sliding window
+            // (hotfix #51) makes training safe (no -72 srcSize_wrong
+            // crashes), the Format Oracle (hotfix #52) decides
+            // KEEP/DROP based on estimated gain, and the
+            // 16 MiB threshold avoids the 2-3 second training
+            // cost on small corpora where the dict is almost
+            // always DROP'd anyway. Empirically verified in
+            // Sprint 5.7.12: small repetitive corpora produce
+            // dicts of 0-1 KiB that the oracle drops. Large
+            // corpora (FlowNow 5.2 GiB) produce useful 44 KB
+            // dicts that the oracle KEEPs.
             let level_n = level_num;
-            let skip_dict_training = !force_raw;
+            // Lossless mode (force_raw=true): always train.
+            // Lossy mode: only train on corpora whose preprocessed
+            // bytes sum ≥ 16 MiB (where the dict has enough
+            // material to learn from and the Format Oracle has
+            // a real KEEP/DROP decision to make).
+            const LOSSY_DICT_TRAINING_MIN_BYTES: u64 = 16 * 1024 * 1024;
+            let total_pre_bytes_for_gate: u64 =
+                super_chunks.iter().map(|c| c.len() as u64).sum();
+            let skip_dict_training = !force_raw
+                && total_pre_bytes_for_gate < LOSSY_DICT_TRAINING_MIN_BYTES;
             if skip_dict_training {
-                eprintln!(
-                    "[SOLID-ZSTD] dict training SKIPPED (Lossy mode); \
-                     using zstd level {} directly",
-                    level_num
-                );
+                if !force_raw {
+                    eprintln!(
+                        "[SOLID-ZSTD] dict training SKIPPED (Lossy mode, \
+                         {} MiB < 16 MiB threshold); using zstd level {} directly",
+                        total_pre_bytes_for_gate / (1024 * 1024),
+                        level_num
+                    );
+                } else {
+                    eprintln!(
+                        "[SOLID-ZSTD] dict training SKIPPED (should not happen \
+                         — force_raw=true means we should train)"
+                    );
+                }
                 trained_dict = Vec::new();
-            } else { // skip_dict_training == false: full Lossless pipeline
+            } else { // skip_dict_training == false: full pipeline
             // Dictionary training: collect up to 512 MB of samples from
             // the corpus (1/32 of 16 GB). Training itself needs only
             // ~6 MB of working memory regardless of dict size.
