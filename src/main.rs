@@ -63,6 +63,7 @@ fn print_help() {
     eprintln!("                        (default: everything = no skip, full archive)");
     eprintln!("                    Overrides the default per-extension rule. --lossless implies all.");
     eprintln!("    --minify-ext EXT[,..]  pin extensions to Conservative minify. e.g. --minify-ext .md");
+    eprintln!("    --skip-archive    skip archive files (.zip, .tar, .gz, .rar, ...) during the walk.");
     eprintln!("                    Useful to opt a file OUT of swc AST (when the default is .ts).");
     eprintln!("    --password P    encrypt with AES-256-GCM (Sprint 5.7.2). Argon2id KDF");
     eprintln!("                    with the Interactive preset (~100 ms on a modern desktop).");
@@ -105,6 +106,9 @@ fn main() {
     // minify, no swc AST, no entropy flip on extension). The
     // archive is bit-exact reversible.
     let mut lossless: bool = false;
+    // Sprint 5.7.18: --skip-archive. Skip archive files
+    // (`.zip`, `.tar`, `.gz`, `.rar`, …) during the walk.
+    let mut skip_archive: bool = false;
     // Sprint 5.7.4 hotfix #50: --raw-ext / --minify-ext.
     // Per-extension override lists. Empty by default. When
     // populated, files whose extension matches the list are
@@ -169,6 +173,15 @@ fn main() {
             }
             "--lossless" | "--no-minify" => {
                 lossless = true;
+            }
+            // Sprint 5.7.18: --skip-archive flag. When set, the
+            // walker skips archive files (`.zip`, `.tar`,
+            // `.gz`, `.rar`, …) entirely. Useful for backing
+            // up source code without including 200 MB of
+            // release binaries you accidentally left in the
+            // repo. Default off to preserve current behavior.
+            "--skip-archive" => {
+                skip_archive = true;
             }
             "--raw-ext" => {
                 if let Some(v) = iter.next() {
@@ -540,7 +553,16 @@ fn walk_dir_with_skip(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
         .ok()
         .and_then(|s| s.parse::<nexus_compress::api::CorpusMode>().ok())
         .unwrap_or_default();
-    let result = nexus_compress::walker::walk(root, mode)?;
+    // Sprint 5.7.18: --skip-archive. When the flag is set, the
+    // walker filters out archive files (`.zip`, `.tar`, `.gz`,
+    // `.rar`, …) so they don't end up in the output. The flag
+    // is read from the same env-var convention as
+    // `NEXUS_CORPUS_MODE` so the engine and CLI stay in sync.
+    let skip_archive = std::env::var("NEXUS_SKIP_ARCHIVE")
+        .ok()
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let result = nexus_compress::walker::walk(root, mode, skip_archive)?;
     if result.skipped_bytes > 0 {
         eprintln!(
             "[WALK-SKIP] total skipped: {} MiB of dev cache / build artifacts",

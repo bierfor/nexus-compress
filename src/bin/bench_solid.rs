@@ -220,5 +220,5 @@ fn main() {
 /// `src/walker.rs`; this used to be a 22-line local recursive
 /// walker.
 fn walk_dir(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
-    Ok(nexus_compress::walker::walk(root, nexus_compress::api::CorpusMode::Everything)?.files)
+    Ok(nexus_compress::walker::walk(root, nexus_compress::api::CorpusMode::Everything, false)?.files)
 }

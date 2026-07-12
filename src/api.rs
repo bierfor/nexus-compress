@@ -914,7 +914,7 @@ where
         // `walker` module and run the v6-solid pipeline on the
         // file list. Same code path the GUI hits (just wrapped
         // with the encrypted pipeline afterwards).
-        let walk = crate::walker::walk(input_path, crate::api::CorpusMode::Everything)
+        let walk = crate::walker::walk(input_path, crate::api::CorpusMode::Everything, false)
             .map_err(|e| ApiError::new("directory.io", e.to_string()))?;
         if walk.files.is_empty() {
             return Err(ApiError::new(
@@ -1653,7 +1653,7 @@ fn walk_dir_for_solid(root: &Path) -> ApiResult<(Vec<(String, Vec<u8>)>, u64)> {
         .ok()
         .and_then(|s| s.parse::<CorpusMode>().ok())
         .unwrap_or_default();
-    let result = crate::walker::walk(root, mode)
+    let result = crate::walker::walk(root, mode, false)
         .map_err(|e| ApiError::new("directory.io", e.to_string()))?;
     if result.skipped_bytes > 0 {
         eprintln!(

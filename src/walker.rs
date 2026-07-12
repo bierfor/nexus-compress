@@ -104,10 +104,52 @@ pub const SKIP_FILES: &[&str] = &[
     "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
 ];
 
+/// Sprint 5.7.18: file **names** to skip in EVERY corpus mode
+/// (Everything, Source, Minimal). These are OS / IDE metadata
+/// that pollute a corpus without contributing anything the
+/// user wants backed up. The previous walker let them through
+/// in Everything mode, which inflated `original_size` and
+/// produced output archives containing useless 8 KB of
+/// `.DS_Store` and `._*` resource forks.
+///
+/// **Important**: this slice MUST be sorted in lexicographic
+/// order — `should_skip_file` uses `binary_search` and would
+/// silently miss entries that are out of order. The
+/// `sorted_skip_files_universal_is_sorted` test pins this.
+///
+/// `Thumbs.db` is the Windows thumbnail cache (often hundreds
+/// of KB per folder in heavy image directories).
+/// `.DS_Store` is the macOS Finder metadata (8 KB per folder).
+/// `._*` are macOS resource forks (8 KB per file) — handled
+/// by the prefix check in `should_skip_file` because the
+/// name pattern is `._<filename>`, not a fixed name.
+pub const SKIP_FILES_UNIVERSAL: &[&str] = &[
+    ".DS_Store",
+    "Desktop.ini",
+    "Thumbs.db",
+];
+
 /// File **name suffix** patterns to skip in Source / Minimal
 /// mode. A file is skipped if its name ends with any of these.
 pub const SKIP_SUFFIXES: &[&str] = &[
     ".bak", ".pid", ".sock", ".swp", ".tmp", ".tsbuildinfo", "~",
+];
+
+/// Sprint 5.7.18: archive file extensions to skip when
+/// `skip_archive` is set on the walk. We skip the FINAL
+/// extension only — for a `.tar.gz` the walker sees `.gz`
+/// and skips the whole file. This is the user-facing intent
+/// (skip the archive), and the alternative (parse tar.gz as
+/// a compound format) is way more work than it's worth for
+/// a corpus walk.
+///
+/// **Important**: this slice MUST be sorted in lexicographic
+/// order — `should_skip_file` uses `binary_search` and would
+/// silently miss entries that are out of order. The
+/// `sorted_skip_archive_exts_is_sorted` test pins this.
+pub const SKIP_ARCHIVE_EXTS: &[&str] = &[
+    "7z", "bz2", "gz", "lz", "lz4", "rar", "tar", "tgz", "txz",
+    "tzst", "xz", "zip", "zst",
 ];
 
 /// **Minimal** mode allow-list: file extensions that count as
@@ -202,6 +244,12 @@ pub struct WalkResult {
 /// skips dev caches and lock files. `mode = Minimal` keeps only
 /// source code + manifests.
 ///
+/// Sprint 5.7.18: `skip_archive` (default `false`) skips archive
+/// files (`.zip`, `.tar`, `.gz`, `.rar`, …) in ALL modes
+/// including `Everything`. The OS / IDE metadata filter
+/// (`.DS_Store`, `Thumbs.db`, `._*` resource forks) is always
+/// active regardless of this flag.
+///
 /// Symlinks are NOT followed (loop safety on weird filesystems).
 /// Unreadable entries are silently skipped (a permission error
 /// on one file shouldn't fail the whole walk).
@@ -212,9 +260,13 @@ pub struct WalkResult {
 /// bottleneck on large filesystems — for a 200k-file corpus
 /// the walk itself takes ~6 seconds on an M4 Pro (see sprint
 /// 5.7.2 hotfix #45 for the parallel-walk discussion).
-pub fn walk(root: &Path, mode: CorpusMode) -> io::Result<WalkResult> {
+pub fn walk(
+    root: &Path,
+    mode: CorpusMode,
+    skip_archive: bool,
+) -> io::Result<WalkResult> {
     let mut result = WalkResult::default();
-    walk_recursive(root, root, mode, &mut result)?;
+    walk_recursive(root, root, mode, skip_archive, &mut result)?;
     result
         .files
         .sort_by(|a, b| a.0.cmp(&b.0));
@@ -225,6 +277,7 @@ fn walk_recursive(
     root: &Path,
     dir: &Path,
     mode: CorpusMode,
+    skip_archive: bool,
     result: &mut WalkResult,
 ) -> io::Result<()> {
     let entries = match fs::read_dir(dir) {
@@ -250,9 +303,9 @@ fn walk_recursive(
                 result.skipped_bytes += dir_size_estimate(&path);
                 continue;
             }
-            walk_recursive(root, &path, mode, result)?;
+            walk_recursive(root, &path, mode, skip_archive, result)?;
         } else if file_type.is_file() {
-            if should_skip_file(&path, mode) {
+            if should_skip_file(&path, mode, skip_archive) {
                 if let Ok(md) = entry.metadata() {
                     result.skipped_bytes += md.len();
                 }
@@ -394,19 +447,53 @@ fn should_skip_dir(path: &Path, mode: CorpusMode) -> bool {
     false
 }
 
-/// True if `path` (a file) should be skipped for the given mode.
+/// True if `path` (a file) should be skipped for the given mode
+/// and `skip_archive` flag.
 ///
-/// `Everything` mode: never skip.
-/// `Source` mode: skip lock files and build-cache suffixes.
-/// `Minimal` mode: skip everything that isn't in `SOURCE_EXTS`
-/// (or `ALLOWED_NO_EXT` for no-extension files).
-fn should_skip_file(path: &Path, mode: CorpusMode) -> bool {
-    if matches!(mode, CorpusMode::Everything) {
-        return false;
-    }
+/// Skip precedence (highest first):
+///   1. Universal OS / IDE metadata (`.DS_Store`, `Thumbs.db`,
+///      `Desktop.ini`, `._*` macOS resource forks) — skipped
+///      in ALL modes including `Everything`.
+///   2. Archive files (`.zip`, `.tar`, `.gz`, `.rar`, …) when
+///      `skip_archive` is true — skipped in all modes.
+///   3. `Source` / `Minimal` mode rules:
+///      - lock files / build-cache suffixes.
+///      - `Minimal` only: keep only files in `SOURCE_EXTS` or
+///        `ALLOWED_NO_EXT`.
+fn should_skip_file(path: &Path, mode: CorpusMode, skip_archive: bool) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
+
+    // (1) Universal OS / IDE metadata — applies in every mode.
+    if SKIP_FILES_UNIVERSAL.binary_search(&name).is_ok() {
+        return true;
+    }
+    // macOS resource forks: `._foo.txt`, `._bar.pyc`, etc. The
+    // convention is that the actual file's name is `foo.txt` and
+    // the resource fork is `._foo.txt`. We strip the leading
+    // `._` and skip.
+    if name.starts_with("._") {
+        return true;
+    }
+
+    // (2) Archive files when --skip-archive is set. We match
+    // against the FINAL extension only (so `release.tar.gz`
+    // is matched as `.gz`). This is the user-facing intent:
+    // "skip the archive so I don't backup 50 MB of binaries".
+    if skip_archive {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let ext_lower = ext.to_ascii_lowercase();
+            if SKIP_ARCHIVE_EXTS.binary_search(&ext_lower.as_str()).is_ok() {
+                return true;
+            }
+        }
+    }
+
+    // (3) Source / Minimal mode rules.
+    if matches!(mode, CorpusMode::Everything) {
+        return false;
+    }
     // Lock files / package metadata (Source + Minimal).
     if SKIP_FILES.binary_search(&name).is_ok() {
         return true;
@@ -552,7 +639,7 @@ mod tests {
         let tmp = tempdir();
         write(&tmp.join("node_modules/foo.js"), b"x");
         write(&tmp.join("src/main.rs"), b"y");
-        let r = walk(&tmp, CorpusMode::Everything).unwrap();
+        let r = walk(&tmp, CorpusMode::Everything, false).unwrap();
         assert_eq!(r.files.len(), 2);
         assert_eq!(r.skipped_bytes, 0);
     }
@@ -562,7 +649,7 @@ mod tests {
         let tmp = tempdir();
         write(&tmp.join("node_modules/foo.js"), b"x");
         write(&tmp.join("src/main.rs"), b"y");
-        let r = walk(&tmp, CorpusMode::Source).unwrap();
+        let r = walk(&tmp, CorpusMode::Source, false).unwrap();
         assert_eq!(r.files.len(), 1);
         assert!(r.files[0].0.ends_with("main.rs"));
     }
@@ -572,7 +659,7 @@ mod tests {
         let tmp = tempdir();
         write(&tmp.join("package-lock.json"), b"x");
         write(&tmp.join("index.js"), b"y");
-        let r = walk(&tmp, CorpusMode::Source).unwrap();
+        let r = walk(&tmp, CorpusMode::Source, false).unwrap();
         assert_eq!(r.files.len(), 1);
         assert!(r.files[0].0.ends_with("index.js"));
     }
@@ -585,7 +672,7 @@ mod tests {
         write(&tmp.join("src/main.rs"), b"y");         // kept
         write(&tmp.join("README.md"), b"y");           // kept
         write(&tmp.join("Makefile"), b"y");            // kept
-        let r = walk(&tmp, CorpusMode::Minimal).unwrap();
+        let r = walk(&tmp, CorpusMode::Minimal, false).unwrap();
         let names: Vec<&str> = r.files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(r.files.len(), 3, "got: {:?}", names);
         assert!(names.iter().any(|n| n.ends_with("main.rs")));
@@ -613,7 +700,7 @@ mod tests {
         write(&tmp.join("video.mp4"), b"x");   // skipped
         write(&tmp.join("src/main.rs"), b"y"); // kept (rs extension)
         write(&tmp.join("Makefile"), b"y");    // kept (no-ext, allow-list)
-        let r = walk(&tmp, CorpusMode::Minimal).unwrap();
+        let r = walk(&tmp, CorpusMode::Minimal, false).unwrap();
         let names: Vec<&str> = r.files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(r.files.len(), 2, "got: {:?}", names);
         assert!(names.iter().any(|n| n.ends_with("main.rs")));
@@ -626,7 +713,7 @@ mod tests {
         write(&tmp.join("node_modules/foo.js"), b"x"); // build_artifact (dir)
         write(&tmp.join("src/main.rs"), b"y");         // source (rs ext)
         write(&tmp.join("dist/bundle.js"), b"z");      // build_artifact (dir wins)
-        let r = walk(&tmp, CorpusMode::Everything).unwrap();
+        let r = walk(&tmp, CorpusMode::Everything, false).unwrap();
         assert_eq!(r.breakdown.build_artifact_files, 2,
             "node_modules/foo.js + dist/bundle.js");
         assert_eq!(r.breakdown.source_files, 1, "src/main.rs");
@@ -640,7 +727,7 @@ mod tests {
         // build_artifact (dir wins over extension).
         let tmp = tempdir();
         write(&tmp.join("dist/bundle.js"), b"x");
-        let r = walk(&tmp, CorpusMode::Everything).unwrap();
+        let r = walk(&tmp, CorpusMode::Everything, false).unwrap();
         assert_eq!(r.breakdown.build_artifact_files, 1);
         assert_eq!(r.breakdown.source_files, 0);
     }

@@ -220,6 +220,16 @@ pub struct CompressionProfile {
     pub encrypt: bool,
     /// Reed-Solomon recovery level for the encrypted path.
     pub recovery_level: RecoveryLevel,
+    /// Sprint 5.7.18: when true, skip archive files
+    /// (`.zip`, `.tar`, `.gz`, `.rar`, `.7z`, …) during
+    /// the walk. Useful for "I want to backup my source
+    /// code, not the 200 MB of release binaries I
+    /// accidentally left in the repo". Default `false` to
+    /// preserve current behavior — most users have no
+    /// archives in their repo and don't expect files to
+    /// disappear.
+    #[serde(default)]
+    pub skip_archive: bool,
 }
 
 impl Default for CompressionProfile {
@@ -234,6 +244,7 @@ impl Default for CompressionProfile {
             minify_extensions: Vec::new(),
             encrypt: false,
             recovery_level: RecoveryLevel::default(),
+            skip_archive: false,
         }
     }
 }
@@ -442,6 +453,17 @@ impl SupremeEngine {
         // are guaranteed to behave identically on the same
         // profile + path).
         std::env::set_var("NEXUS_CORPUS_MODE", invocation.profile.corpus_mode.as_str());
+        // Sprint 5.7.18: same env-var pattern for the
+        // `--skip-archive` flag. The CLI sets this from
+        // `--skip-archive`; the Tauri command sets it from
+        // the profile's `skipArchive` field. The walker reads
+        // it directly. This avoids threading the flag through
+        // 4 function signatures and matches the existing
+        // NEXUS_CORPUS_MODE convention.
+        std::env::set_var(
+            "NEXUS_SKIP_ARCHIVE",
+            if invocation.profile.skip_archive { "1" } else { "0" },
+        );
 
         // Resolve the plan FIRST so the dispatch is data-driven.
         let meta = std::fs::metadata(&invocation.path).map_err(|e| {
@@ -633,6 +655,14 @@ where
 {
     use std::time::Instant;
     let start = Instant::now();
+    // Sprint 5.7.18: --skip-archive support. We read the
+    // NEXUS_SKIP_ARCHIVE env var here (set by the CLI/Tauri
+    // command from the profile) so the path from CLI → main
+    // → engine → walker is single-source-of-truth.
+    let skip_archive = std::env::var("NEXUS_SKIP_ARCHIVE")
+        .ok()
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     // Shared ElapsedTracker so per-file events report real
     // elapsed_ms (the legacy code used a local tracker
     // because the closure capture of `Instant` was producing
@@ -642,11 +672,19 @@ where
     let elapsed_tracker = crate::nxar::ElapsedTracker::new();
 
     // Walk the tree. The walker reads NEXUS_CORPUS_MODE itself
-    // (set by the engine on the public compress path).
+    // (set by the engine on the public compress path). Sprint
+    // 5.7.18: the profile's `skip_archive` flag is passed
+    // through to the walker so `--skip-archive` is honoured
+    // end-to-end (CLI → profile → walker).
     let mode = invocation_corpus_mode_from_env();
-    let result = walker::walk(path, mode).map_err(|e| {
-        api::ApiError::new("directory.io", e.to_string())
-    })?;
+    let result = walker::walk(
+        path,
+        mode,
+        skip_archive,
+    )
+    .map_err(|e| {
+            api::ApiError::new("directory.io", e.to_string())
+        })?;
     if result.files.is_empty() {
         return Err(api::ApiError::new(
             "directory.empty",
@@ -769,7 +807,24 @@ where
     // we get a free compression win on binary dev-caches. If
     // zstd makes the bytes larger (shouldn't happen but just
     // in case) we fall back to raw passthrough.
+    //
+    // Sprint 5.7.16: emit progress events through the
+    // passthrough loop too. Previously this loop wrote bytes
+    // to `archive` silently, so on a corpus dominated by
+    // passthroughs (e.g. FlowNow: 4 GB of .venv/.git/objects/
+    // .claude is passthrough) the UI's progress bar would
+    // freeze at the last lzma callback (~7-19% depending on
+    // corpus) and then jump to 100% with no in-between
+    // updates. The throttle in `throttle::ThrottledEmitter`
+    // (100ms) caps the event rate, so emitting per file is
+    // safe even with 47k passthroughs.
     use std::io::Write;
+    // Total bytes accounted for in the progress bar: lzma +
+    // passthrough. The lzma_files phase already reported
+    // bytes_done up to `total_lzma`; here we continue from
+    // there into the passthroughs.
+    let total_bytes_for_progress: u64 = total_lzma + total_pt;
+    let mut passthrough_bytes_done: u64 = 0;
     for (name, bytes) in passthrough_files.iter() {
         archive.write_all(b"NXPT").ok();
         let name_bytes = name.as_bytes();
@@ -777,6 +832,7 @@ where
             .write_all(&(name_bytes.len() as u32).to_le_bytes())
             .ok();
         archive.write_all(name_bytes).ok();
+        passthrough_bytes_done = passthrough_bytes_done.saturating_add(bytes.len() as u64);
         // zstd with level 1 is fast enough for large corpora
         // and produces output ≤ input on most "already
         // compressed" data (PNG, JPG, MP4, .pyc, .wasm, .so,
@@ -801,6 +857,25 @@ where
                 .ok();
             archive.write_all(bytes).ok();
         }
+        // Sprint 5.7.16: emit a progress event after each
+        // passthrough file. The throttle in
+        // `throttle::ThrottledEmitter` (100ms) caps the rate,
+        // so even on 47k passthroughs the IPC sees at most
+        // ~10 events/s. The frontend's progress bar now sees
+        // bytes_done climbing from `total_lzma` up to
+        // `total_lzma + total_pt` instead of jumping from
+        // ~7% (after lzma) to 100% (after passthroughs).
+        progress(ProgressEvent {
+            phase: "compressing".to_string(),
+            current_file: name.clone(),
+            files_done: 0, // ignored by frontend when bytes_total > 0
+            files_total: 0,
+            bytes_done: total_lzma + passthrough_bytes_done,
+            bytes_total: total_bytes_for_progress,
+            elapsed_ms: 0,
+            bytes_per_sec: 0.0,
+            eta_ms: 0,
+        }.with_estimates(start).with_elapsed_override(elapsed_tracker.current_ms()));
     }
 
     let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -866,6 +941,7 @@ mod tests {
             minify_extensions: Vec::new(),
             encrypt,
             recovery_level: RecoveryLevel::Low,
+            skip_archive: false,
         }
     }
 
