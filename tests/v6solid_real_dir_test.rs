@@ -47,6 +47,7 @@ fn v6solid_full_path_with_progress() {
         minify_extensions: vec![],
         encrypt: false,
         recovery_level: nexus_compress::api::RecoveryLevel::Low,
+        skip_archive: false,
     };
     let invocation = CompressInvocation {
         profile,

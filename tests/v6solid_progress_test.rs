@@ -6,6 +6,7 @@
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use nexus_compress::solid_archive::CompressionLevel;
 
 #[test]
 fn v6solid_emits_progress_during_lzma_encoding() {
@@ -27,7 +28,7 @@ fn v6solid_emits_progress_during_lzma_encoding() {
     let start = Instant::now();
     let archive = nexus_compress::solid_archive::compress_with_progress(
         &files,
-        1, // ultra-fast LZMA level for the test
+        CompressionLevel::Lzma(1), // ultra-fast LZMA level for the test
         move |file_idx, total, name| {
             progress_count_inner.fetch_add(1, Ordering::Relaxed);
             // Print progress events so we can see in --nocapture

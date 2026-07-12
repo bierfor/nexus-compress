@@ -1,11 +1,18 @@
 //! Like v6solid_full_path_with_progress but on a 219 MB directory
 //! (100 MB text + 100 MB random + 19 MB LZMA overhead). Verifies
 //! progress events fire DURING the LZMA encoding phase.
+//!
+//! Marked `#[ignore]` because the fixture (`/tmp/test_dir_big`,
+//! 219 MB) is not self-bootstrapping and the smaller
+//! `v6solid_progress_test` already covers the same invariant at
+//! 32 MB. Run manually with:
+//!   cargo test --test v6solid_big_dir_test -- --ignored
 
 use std::sync::Mutex;
 use std::time::Instant;
 
 #[test]
+#[ignore = "requires /tmp/test_dir_big (219 MB) fixture; use v6solid_progress_test for CI"]
 fn v6solid_big_dir_with_progress() {
     use nexus_compress::api::ProgressEvent;
     use nexus_compress::supreme_engine::{
@@ -33,6 +40,7 @@ fn v6solid_big_dir_with_progress() {
         minify_extensions: vec![],
         encrypt: false,
         recovery_level: nexus_compress::api::RecoveryLevel::Low,
+        skip_archive: false,
     };
     let invocation = CompressInvocation {
         profile,

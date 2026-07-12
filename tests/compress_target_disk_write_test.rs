@@ -51,6 +51,7 @@ fn build_profile() -> CompressionProfile {
         minify_extensions: vec![],
         encrypt: false,
         recovery_level: nexus_compress::api::RecoveryLevel::Low,
+        skip_archive: false,
     }
 }
 

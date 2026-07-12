@@ -73,6 +73,7 @@ fn make_profile(
         minify_extensions: vec![],
         encrypt,
         recovery_level: nexus_compress::api::RecoveryLevel::Low,
+        skip_archive: false,
     }
 }
 
