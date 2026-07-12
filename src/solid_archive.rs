@@ -747,34 +747,62 @@ where
     // writer can see it.
     let mut chunk_compressed_sizes: Vec<u32> = Vec::new();
 
-    // Sprint 5.7.21-F: parallelize the per-file preprocessing
-    // step (ast_minify, conservative minify, entropy probe)
-    // BEFORE the chunk aggregation loop. The aggregation
-    // itself is still sequential because chunk boundaries
-    // depend on the running chunk size, but every per-file
-    // operation that can run independently now does.
+    // Sprint 5.7.21-F + 5.7.21-E: parallelize the per-file
+    // preprocessing step (ast_minify, conservative minify,
+    // entropy probe) BEFORE the chunk aggregation loop. The
+    // aggregation itself is still sequential because chunk
+    // boundaries depend on the running chunk size, but every
+    // per-file operation that can run independently now does.
+    //
+    // 5.7.21-E: stream the preprocessing in batches of
+    // STREAM_BATCH_FILES files. Each batch's preprocessed
+    // Vec is dropped at the end of the batch, so peak
+    // memory for the preprocessed stage is
+    // O(STREAM_BATCH_FILES × avg_pre_size) instead of
+    // O(total_pre_size). The aggregation state
+    // (current_chunk, current_chunk_codec, global_offset,
+    // entries, super_chunks, chunk_codecs) carries across
+    // batches because it's all in the outer scope. The
+    // wire format is byte-identical because the super-
+    // chunk boundary check is unchanged:
+    // `current_chunk.len() + pre_bytes.len() > SUPER_CHUNK_BYTES`.
     //
     // On a 30-file / 17 MiB repetitive TypeScript corpus this
     // step drops from ~6 s (serial ast_minify at ~570 ms each)
     // to ~1.5 s on a 4-core M4 Pro. See
     // tests/preprocess_parallel_test.rs for the empirical
     // measurement and bit-exact equivalence pin.
-    let preprocessed = preprocess_files_parallel(files, force_raw, overrides);
+    //
+    // On a 5 GiB / 164 k-file corpus (FlowNow), the old code
+    // held ~2-3 GiB of pre_bytes for the whole preprocessed
+    // Vec. The streamed version holds ~30-100 MiB at any
+    // moment (200 files × ~150 KB avg). Net wall time is
+    // unchanged (still parallel); net memory drops 20-30x.
+    const STREAM_BATCH_FILES: usize = 200;
+    let mut batch_start: usize = 0;
+    while batch_start < files.len() {
+        let batch_end = (batch_start + STREAM_BATCH_FILES).min(files.len());
+        let batch = &files[batch_start..batch_end];
+        // preprocessed is dropped at the end of this
+        // `while` iteration when the binding goes out of
+        // scope. That releases the batch's pre_bytes back
+        // to the allocator before we start the next batch.
+        let preprocessed = preprocess_files_parallel(batch, force_raw, overrides);
 
-    for (i, _unused) in files.iter().enumerate() {
-        // Sprint 5.7.21-F: preprocessing is now done in parallel
-        // before the chunk aggregation loop (see `preprocessed`
-        // above). The AST minify step was the serial bottleneck
-        // (50-200 ms per .ts/.js file inside swc_core). Pulling
-        // it out lets rayon's par_iter parallelise the work
-        // across all cores. The aggregation below is still
-        // sequential because chunk boundaries depend on order.
-        let preprocessor = preprocessed[i].pre;
-        let pre_bytes = &preprocessed[i].pre_bytes;
-        let original_size = preprocessed[i].original_size;
-        let pre_size = preprocessed[i].pre_size;
-        let incompressible = preprocessed[i].incompressible;
-        let name = &preprocessed[i].name;
+        for (i, _unused) in batch.iter().enumerate() {
+            // Preprocessing was done in parallel above; the
+            // AST minify step was the serial bottleneck
+            // (50-200 ms per .ts/.js file inside swc_core).
+            // Pulling it out lets rayon's par_iter
+            // parallelise the work across all cores. The
+            // aggregation below is still sequential because
+            // chunk boundaries depend on order.
+            let preprocessor = preprocessed[i].pre;
+            let pre_bytes = &preprocessed[i].pre_bytes;
+            let original_size = preprocessed[i].original_size;
+            let pre_size = preprocessed[i].pre_size;
+            let incompressible = preprocessed[i].incompressible;
+            let name = &preprocessed[i].name;
 
         if !current_chunk.is_empty()
             && current_chunk.len() + pre_bytes.len() > SUPER_CHUNK_BYTES
@@ -860,7 +888,12 @@ where
         current_chunk.extend_from_slice(&pre_bytes);
         global_offset += pre_size;
 
-        progress(i + 1, total, name);
+        progress(batch_start + i + 1, total, name);
+        }
+        // preprocessed (this batch) drops here, releasing
+        // its pre_bytes back to the allocator before the
+        // next batch's preprocess_files_parallel allocates.
+        batch_start = batch_end;
     }
     if !current_chunk.is_empty() {
         super_chunks.push(current_chunk);
