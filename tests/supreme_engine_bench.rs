@@ -114,6 +114,20 @@ fn engine_rapido_mode_fastest() {
         return;
     }
 
+    // Sprint 5.7.21-F: the parallel preprocessor
+    // (preprocess_files_parallel) reads files in a
+    // multi-threaded pattern, so the FIRST call pays
+    // a much larger cold-file-cache penalty than the
+    // serial version did. We warm the OS file cache
+    // with a throwaway run before measuring, so the
+    // assertion actually tests the "rapido is fast"
+    // invariant and not "rapido benefits more from
+    // cache warmth than balanceado".
+    let _ = bench(
+        "warmup",
+        profile(ProfileMode::Balanceado, ProfileCodec::Auto, ProfileFidelity::Lossy),
+    );
+
     // Rapido + Zstd should be the fastest. Compare wall time
     // against the balanced run; rapido should be ≤ balanced.
     let (_, ms_fast, _) = bench(
