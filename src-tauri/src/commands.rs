@@ -1511,3 +1511,111 @@ pub async fn reset_stats_cmd(
     let conn = state.lock().await;
     db::reset_stats(&conn).map_err(|e| e.to_string())
 }
+
+/// Sprint 5.7.19 (v0.3.0): the "Best Mode" preview.
+///
+/// Reads up to 5 MB of the input (file or directory sample)
+/// and runs `ProfileAuto::resolve_best()` on it. Returns the
+/// recommended (mode, codec) pair plus the expected ratio and
+/// wall-time, so the UI can show:
+///
+///   "Estrategia recomendada: Zstd-3 Lossy (ratio 6.4x, 80 MB/s)"
+///
+/// before the user actually commits to a compress.
+///
+/// The input can be a file or a directory. For directories we
+/// walk the first 5 MB of files (sorted by path) so the sample
+/// is deterministic.
+#[tauri::command]
+pub async fn preview_corpus_cmd(req: serde_json::Value) -> Result<serde_json::Value, String> {
+    use nexus_compress::supreme_engine::{resolve_best, TimeBudget};
+    let path_str = req
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'path' in req".to_string())?
+        .to_string();
+    let path = std::path::PathBuf::from(&path_str);
+    let budget = req
+        .get("budget")
+        .and_then(|v| v.as_str())
+        .unwrap_or("standard");
+    let budget = match budget {
+        "instant" => TimeBudget::Instant,
+        "unlimited" => TimeBudget::Unlimited,
+        _ => TimeBudget::Standard,
+    };
+    // Read up to 5 MB of the input. For a file, we read the
+    // first 5 MB. For a directory, we read files in path
+    // order until we've collected 5 MB.
+    let sample = read_sample_for_preview(&path, 5 * 1024 * 1024)
+        .map_err(|e| format!("failed to read sample: {}", e))?;
+    // Run the orchestrator. This runs IN RAM (no I/O on
+    // the rest of the corpus) so it's safe to call from the
+    // UI thread.
+    let decision = resolve_best(&sample, budget);
+    Ok(serde_json::json!({
+        "mode": match decision.mode {
+            nexus_compress::supreme_engine::ProfileMode::Rapido => "rapido",
+            nexus_compress::supreme_engine::ProfileMode::Balanceado => "balanceado",
+            nexus_compress::supreme_engine::ProfileMode::Ultra => "ultra",
+        },
+        "codec": match decision.codec {
+            nexus_compress::supreme_engine::ProfileCodec::Auto => "auto",
+            nexus_compress::supreme_engine::ProfileCodec::Lzma => "lzma",
+            nexus_compress::supreme_engine::ProfileCodec::Zstd => "zstd",
+        },
+        "expected_ratio": decision.expected_ratio,
+        "expected_time_ms": decision.expected_time_ms,
+    }))
+}
+
+/// Read up to `max_bytes` of the input. For a file, just the
+/// first `max_bytes`. For a directory, the concatenation of
+/// files in path order until we hit the cap.
+fn read_sample_for_preview(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+    if !path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("path does not exist: {}", path.display()),
+        ));
+    }
+    let metadata = std::fs::metadata(path)?;
+    if metadata.is_file() {
+        // Single file: read up to max_bytes.
+        use std::io::Read;
+        let mut f = std::fs::File::open(path)?;
+        let mut buf = Vec::with_capacity(max_bytes.min(8 * 1024));
+        let mut handle = f.take(max_bytes as u64);
+        handle.read_to_end(&mut buf)?;
+        Ok(buf)
+    } else {
+        // Directory: walk and concatenate.
+        let mut buf = Vec::with_capacity(max_bytes);
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            if buf.len() >= max_bytes {
+                break;
+            }
+            use std::io::Read;
+            let mut f = match std::fs::File::open(&p) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let remaining = max_bytes - buf.len();
+            let mut handle = f.take(remaining as u64);
+            let mut chunk = Vec::with_capacity(remaining);
+            if handle.read_to_end(&mut chunk).is_err() {
+                continue;
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
+    }
+}

@@ -82,6 +82,13 @@ fn main() {
             commands::get_recent_events_cmd,
             commands::data_dir_cmd,
             commands::reset_stats_cmd,
+            // Sprint 5.7.19: "Best Mode" preview. The
+            // frontend calls this when the user clicks the
+            // "Mejor (Automático)" preset, before kicking off
+            // the actual compress. The engine returns the
+            // (mode, codec) tuple that resolve_best picked
+            // from the 5 MB sample.
+            commands::preview_corpus_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusRAR Tauri app");

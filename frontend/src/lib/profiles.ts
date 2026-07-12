@@ -100,6 +100,31 @@ export const BUILTIN_PRESETS: CompressionProfilePreset[] = [
     encrypt: false,
     recoveryLevel: "low",
   },
+  // Sprint 5.7.19 (v0.3.0): "Best" preset. The user clicks
+  // this once and the engine runs 4 micro-benchmarks on a
+  // 5 MB sample of the corpus, picks the best (mode, codec)
+  // combination, and applies it. Like WinRAR's "Best" mode.
+  // The frontend shows the resolution: "Estrategia
+  // recomendada: Zstd-3 Lossy (ratio 6.4x, 80 MB/s)".
+  //
+  // The mode and codec fields are placeholders — they get
+  // overwritten by the engine's `resolve_best` call when
+  // the user actually compresses. The UI displays "Best" as
+  // the active preset until that resolution happens.
+  {
+    id: "best",
+    icon: "🎯",
+    builtIn: true,
+    schemaVersion: 1,
+    mode: "balanceado",
+    codec: "auto",
+    fidelity: "lossy",
+    corpusMode: "everything",
+    rawExtensions: "",
+    minifyExtensions: "",
+    encrypt: false,
+    recoveryLevel: "low",
+  },
   {
     id: "source",
     icon: "📝",

@@ -1069,6 +1069,7 @@ export function CompressView({
                               key={m.id}
                               onClick={() => updateProfile({ mode: m.id })}
                               disabled={busy}
+                              title={t(`compress.mode.${m.id}.tooltip`)}
                               className={`text-left p-3 rounded-xl border transition-all disabled:opacity-50 ${
                                 active
                                   ? "border-cyan-500/40 bg-cyan-500/[0.06]"
@@ -1104,6 +1105,7 @@ export function CompressView({
                               key={c.id}
                               onClick={() => updateProfile({ codec: c.id })}
                               disabled={busy}
+                              title={t(`compress.codec.${c.id}.tooltip`)}
                               className={`p-3 rounded-xl border transition-all disabled:opacity-50 ${
                                 active
                                   ? "border-violet-500/40 bg-violet-500/[0.06]"
@@ -1535,6 +1537,39 @@ export function CompressView({
                     : t("compress.best.files")
                 }
               />
+            </div>
+            {/* Sprint 5.7.19: el "Estrategia" muestra el códec
+                que el motor va a usar, según el profile actual.
+                Es el momento de "transparencia radical" del
+                roadmap v0.3.0 — el usuario entiende qué va a
+                pasar antes de hacer clic. */}
+            <div className="mt-4 px-4 py-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
+              <div className="text-zinc-500 text-[10px] tracking-[0.15em] uppercase mb-1">
+                {t("compress.estimate.strategy")}
+              </div>
+              <div className="text-white text-[12px] font-mono">
+                {(() => {
+                  // Resolver el códec efectivo según el profile.
+                  // Esta lógica MIRA la misma tabla que
+                  // ProfileMode::resolve_plan() en el engine
+                  // (Sprint 5.7.10-C). Si cambia el engine,
+                  // cambiar aquí también.
+                  const codec = profile.codec === "auto"
+                    ? (profile.mode === "ultra" ? "LZMA-9" : "Zstd-3")
+                    : profile.codec === "lzma"
+                    ? `LZMA-${profile.mode === "rapido" ? 3 : profile.mode === "balanceado" ? 6 : 9}`
+                    : "Zstd-3";
+                  const preproc = profile.fidelity === "lossless"
+                    ? "Raw (bit-exact)"
+                    : profile.mode === "ultra"
+                    ? "swc AST + Conservative"
+                    : "swc AST";
+                  const dict = profile.fidelity === "lossy" && profile.mode === "balanceado"
+                    ? " + dict (≥16 MiB)"
+                    : "";
+                  return `${codec} + ${preproc}${dict}`;
+                })()}
+              </div>
             </div>
           </div>
         )}
