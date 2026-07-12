@@ -147,56 +147,13 @@ const FIDELITY: { id: FidelityChoice; icon: string }[] = [
 
 // Only backend/static data — titles and descriptions come from t()
 //
-// Sprint 5.7.21-A: each mode surfaces its DEFAULT codec
-// (the codec the engine picks when `codec === "auto"`).
-// This mirrors the backend's `resolve_plan` table exactly:
-//   rapido + auto    → zstd-3
-//   balanceado + auto → zstd-3 (5.7.9 default; 22x speedup)
-//   ultra + auto     → lzma-9
-//
-// Previously this array carried `backend: "v4" | "v6-solid"`
-// and `version: "v4" | "v6"` strings that were never sent
-// to the backend (the dispatch is driven by the `profile`
-// object the user selected). The display badges said "v4"
-// for rapido but the actual archive was zstd-3. This
-// cleanup makes the chip badge match what the engine emits.
-const MODES: {
-  id: Mode;
-  icon: string;
-  stars: number;
-  defaultCodec: string; // displayed as a chip badge; mirrors resolve_plan
-}[] = [
-  {
-    id: "rapido",
-    icon: "⚡",
-    stars: 4,
-    defaultCodec: "zstd-3",
-  },
-  {
-    id: "balanceado",
-    icon: "⚖",
-    stars: 5,
-    // Sprint 5.7.9 part 4: balanceado used v5-min (per-file
-    // archive with full v5-min preprocessor) which gave a
-    // 1.6x ratio on corpora like the user's 'content
-    // facebook' (197 MB venv + code). The new default
-    // (post-5.7.10 SupremeEngine) uses the solid pipeline:
-    // LZMA stream with the Sonic Scheduler for parallel
-    // chunk compression and the full passthrough filter
-    // (Python bytecode, RocksDB, SQLite, etc.). 22x faster
-    // than v5-min on mixed corpora, 1.5-2x better ratio on
-    // bin-heavy corpora. The default codec is zstd-3 for
-    // the 22x speedup; the user can override with `codec:
-    // lzma` for higher ratio.
-    defaultCodec: "zstd-3",
-  },
-  {
-    id: "ultra",
-    icon: "💎",
-    stars: 3,
-    defaultCodec: "lzma-9",
-  },
-];
+// Sprint 5.7.21-G: the MODES array is now in
+// `src/lib/modes.ts` so it can be unit-tested without
+// pulling in React + Tauri runtime. The contract: the
+// chip badge displayed in the UI must match what the
+// backend's `resolve_plan` actually emits for
+// `codec === "auto"`. See modes.ts for the full table.
+import { MODES } from "../lib/modes";
 
 export function CompressView({
   onComplete,
