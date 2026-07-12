@@ -97,6 +97,22 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # xz-sys), battle-tested by every Linux distro and used by `xz`.
 # Pure-Rust alternative would be `xz = "0.4"`.
 xz2 = "0.1"
+# Sprint 5.7.21: external archive format support for the
+# `decompress_target_with_progress` dispatch. Adds a
+# second branch to the magic-byte sniffer that handles
+# the four most common third-party formats: .zip, .tar,
+# .tar.gz, and standalone .gz files.
+# - zip 2 (deflate-only): powers the .zip branch. RAR/7Z
+#   are intentionally NOT in this set — they need proprietary
+#   decoders and a different licensing story.
+# - tar 0.4: pure-Rust TAR reader, no compression; we compose
+#   it with flate2 for .tar.gz.
+# - flate2 1: stream gzip decode. Already a transitive dep
+#   via xz2, but we declare it directly so the .gz branch
+#   is in our public API surface.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
 # Sprint 5.7.2 hotfix #32: zstd for fast V6Solid encoding.
 # zstd ~300-500 MB/s on Apple Silicon vs LZMA9 ~20-50 MB/s.
 # Streaming API supports concatenated frames (multi-chunk = no problem).

@@ -709,6 +709,70 @@ where
                 1,
                 false,
             )
+        } else if let Some(fmt) = crate::external_decompress::detect_format(&head) {
+            // Sprint 5.7.21-EXT: route to the new
+            // external-format dispatcher for ZIP / TAR /
+            // TAR.GZ / GZ. The dispatch handles magic
+            // detection and progress events; we just
+            // unpack the stats it returns into the same
+            // `(kind, output_path, restored_size, n_files,
+            // is_dir)` tuple the NXS branches use.
+            //
+            // For .tar we also need the file extension
+            // (TAR has no magic). The dispatch accepts
+            // `fmt` as a string and we override with the
+            // extension when the magic-only detection is
+            // ambiguous.
+            let ext_lower = input_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            // Resolve the format as a `&'static str` so it
+            // matches the tuple type. Only 4 cases, so a
+            // match is cleanest (and avoids `Box::leak`).
+            let fmt_resolved: &'static str = if fmt == "tar" || (ext_lower == "tar") {
+                "tar"
+            } else if fmt == "gz" && ext_lower == "gz" {
+                "gz"
+            } else if ext_lower == "gz"
+                && input_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.ends_with(".tar"))
+                    .unwrap_or(false)
+            {
+                "tar.gz"
+            } else {
+                fmt
+            };
+            let stats = crate::external_decompress::extract_external(
+                input_path,
+                output_dir,
+                fmt_resolved,
+                |event: ProgressEvent| {
+                    // The dispatch already has a `start: Instant`
+                    // in scope. We forward the event with
+                    // elapsed/eta estimates so the GUI bar
+                    // stays consistent.
+                    progress(event.with_estimates(start));
+                },
+            )
+            .map_err(|e| {
+                // Re-wrap the error so it includes the
+                // format tag for the user-facing message.
+                ApiError::new(
+                    e.code,
+                    format!("{}: {}", fmt_resolved, e.message),
+                )
+            })?;
+            (
+                fmt_resolved,
+                stats.output_dir.to_string_lossy().into_owned(),
+                stats.restored_size,
+                stats.n_files,
+                true,
+            )
         } else {
             return Err(ApiError::new(
                 "decompress.unknown_format",

@@ -40,6 +40,7 @@ pub mod dedup;
 pub mod dict_codec;
 pub mod dictionary;
 pub mod engine;
+pub mod external_decompress;
 pub mod format;
 /// Sprint 5.7.10-A: single source of truth for which file
 /// extensions should bypass preprocessing. Replaces the
