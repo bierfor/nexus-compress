@@ -404,9 +404,15 @@ export function DecompressView({
       });
       if (typeof result === "string") acceptPath(result);
     } catch (e) {
-      console.error("file picker:", e);
+      // Sprint 5.7.21-B cleanup: surface the picker error
+      // to the user via the existing `error` state. User-
+      // cancelled dialog is silent.
+      const msg = String((e as Error)?.message ?? e);
+      if (!/cancel/i.test(msg)) {
+        setError(t("decompress.error.file_picker") + ": " + msg);
+      }
     }
-  }, [acceptPath]);
+  }, [acceptPath, t]);
 
   const onAddPath = useCallback(() => {
     const trimmed = pathInput.trim();
@@ -422,9 +428,13 @@ export function DecompressView({
       const result = await open({ multiple: false, directory: true });
       if (typeof result === "string") setDestDir(result);
     } catch (e) {
-      console.error(e);
+      // Sprint 5.7.21-B cleanup: surface the picker error.
+      const msg = String((e as Error)?.message ?? e);
+      if (!/cancel/i.test(msg)) {
+        setError(t("decompress.error.dest_picker") + ": " + msg);
+      }
     }
-  }, []);
+  }, [t]);
 
   const toggleEntry = useCallback((name: string) => {
     setSelected((prev) => {

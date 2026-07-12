@@ -306,10 +306,9 @@ function CompressionSection() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Section: Transporte P2P — informational now (real config
-//  still lives inside ConfigPanel.TunnelPanel). The sidebar entry
-//  exists so the user can find the config; in v0.1.2 we'll split
-//  TunnelPanel out so each section has its own panel.
+//  Section: Transporte P2P — real config lives inside
+//  ConfigPanel.TunnelPanel. The sidebar entry exists so the
+//  user can find the config from the dedicated tab.
 // ─────────────────────────────────────────────────────────────
 
 function TransportSection() {

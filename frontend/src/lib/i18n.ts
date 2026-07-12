@@ -123,6 +123,14 @@ const ES = {
   "compress.fidelity.lossy.desc": "Minify inteligente: ratio 5-7x, semántica intacta",
   "compress.fidelity.lossless": "Lossless (bit-exact)",
   "compress.fidelity.lossless.desc": "Cero minify: 1.5-2x ratio, archivos bit-exact reversibles",
+  // Sprint 5.7.21-B cleanup: file/folder picker error
+  // messages. The picker throws on platform errors
+  // (Tauri runtime not initialised, sandbox blocked the
+  // dialog, etc.) — we surface the message instead of
+  // logging to console.
+  "compress.error.file_picker": "No se pudo abrir el selector de archivos",
+  "compress.error.folder_picker": "No se pudo abrir el selector de carpetas",
+  "compress.error.dest_picker": "No se pudo abrir el selector de destino",
   "compress.advanced": "Avanzado",
   "compress.advanced.desc": "Reglas por extensión. Se aplican al perder la pastilla Lossy.",
   // Sprint 5.7.7 hotfix #55: corpus mode 3-pill.
@@ -227,6 +235,9 @@ const ES = {
   "decompress.drop": "Arrastra un archivo .tar o .nxs6",
   "decompress.drop.active": "Suelta el archivo",
   "decompress.drop.hint": "o escribe la ruta absoluta",
+  // Sprint 5.7.21-B cleanup: file/dest picker error messages.
+  "decompress.error.file_picker": "No se pudo abrir el selector de archivos",
+  "decompress.error.dest_picker": "No se pudo abrir el selector de destino",
   "decompress.browse": "Explorar",
   "decompress.load": "Cargar",
   "decompress.placeholder": "/Users/usuario/Downloads/archivo.nxs6",
@@ -406,6 +417,9 @@ const ES = {
   "settings.transport.desc": "Cómo se establece la conexión entre dispositivos.",
   "settings.storage.desc": "Dónde se guardan las estadísticas y el estado.",
   "settings.about.desc": "Versión, motor y enlaces del proyecto.",
+  // Sprint 5.7.21-B: theme toggle aria labels (i18n).
+  "theme.toggle.toLight": "Cambiar a tema claro",
+  "theme.toggle.toDark": "Cambiar a tema oscuro",
   "settings.tunnel.mode.quick.desc": "Anónimo. Funciona sin configurar nada. Ideal para probar. Limitado por rate-limits de Cloudflare (~3-5 conexiones antes de errores).",
   "settings.tunnel.mode.quick.badge": "Sin config",
   "settings.tunnel.mode.named.desc": "Requiere cuenta Cloudflare gratuita + tunnel propio. Sin rate-limits, dominio fijo (ej. p2p.tu-dominio.com).",
@@ -504,6 +518,9 @@ const EN: Record<keyof typeof ES, string> = {
   "settings.transport.desc": "How devices connect when sharing files.",
   "settings.storage.desc": "Where stats and app state are stored.",
   "settings.about.desc": "Version, engine and project links.",
+  // Sprint 5.7.21-B: theme toggle aria labels (i18n).
+  "theme.toggle.toLight": "Switch to light theme",
+  "theme.toggle.toDark": "Switch to dark theme",
   "settings.tunnel.mode.quick.desc": "Anonymous. No setup needed. Ideal for trying. Limited by Cloudflare rate-limits (~3-5 connections before errors).",
   "settings.tunnel.mode.quick.badge": "No setup",
   "settings.tunnel.mode.named.desc": "Requires a free Cloudflare account + your own tunnel. No rate-limits, fixed domain (e.g. p2p.your-domain.com).",
@@ -634,6 +651,11 @@ const EN: Record<keyof typeof ES, string> = {
   "compress.fidelity.lossy.desc": "Smart minify: 5-7x ratio, semantics preserved",
   "compress.fidelity.lossless": "Lossless (bit-exact)",
   "compress.fidelity.lossless.desc": "No minify: 1.5-2x ratio, files are bit-exact reversible",
+  // Sprint 5.7.21-B cleanup: file/folder picker error
+  // messages (mirror the ES block).
+  "compress.error.file_picker": "Could not open the file picker",
+  "compress.error.folder_picker": "Could not open the folder picker",
+  "compress.error.dest_picker": "Could not open the destination picker",
   "compress.advanced": "Advanced",
   "compress.advanced.desc": "Per-extension rules. Apply under the Lossy toggle.",
   // Sprint 5.7.7 hotfix #55: corpus mode 3-pill.
@@ -728,6 +750,9 @@ const EN: Record<keyof typeof ES, string> = {
   "decompress.drop": "Drop a .tar or .nxs6 file",
   "decompress.drop.active": "Release the file",
   "decompress.drop.hint": "or type the absolute path",
+  // Sprint 5.7.21-B cleanup: file/dest picker error messages.
+  "decompress.error.file_picker": "Could not open the file picker",
+  "decompress.error.dest_picker": "Could not open the destination picker",
   "decompress.browse": "Browse",
   "decompress.load": "Load",
   "decompress.placeholder": "/Users/user/Downloads/archive.nxs6",
@@ -1067,6 +1092,11 @@ const IT: Record<keyof typeof ES, string> = {
   "compress.fidelity.lossy.desc": "Minify intelligente: rapporto 5-7x, semantica intatta",
   "compress.fidelity.lossless": "Lossless (bit-exact)",
   "compress.fidelity.lossless.desc": "Nessun minify: rapporto 1.5-2x, file bit-exact reversibili",
+  // Sprint 5.7.21-B cleanup: file/folder picker error
+  // messages (Italian).
+  "compress.error.file_picker": "Impossibile aprire il selettore di file",
+  "compress.error.folder_picker": "Impossibile aprire il selettore di cartelle",
+  "compress.error.dest_picker": "Impossibile aprire il selettore di destinazione",
   "compress.advanced": "Avanzato",
   "compress.advanced.desc": "Regole per estensione. Si applicano sotto la pastiglia Lossy.",
   // Sprint 5.7.7 hotfix #55: corpus mode 3-pill.
@@ -1163,6 +1193,9 @@ const IT: Record<keyof typeof ES, string> = {
   "decompress.drop": "Trascina un file .tar o .nxs6",
   "decompress.drop.active": "Rilascia il file",
   "decompress.drop.hint": "oppure digita il percorso assoluto",
+  // Sprint 5.7.21-B cleanup: file/dest picker error messages.
+  "decompress.error.file_picker": "Impossibile aprire il selettore di file",
+  "decompress.error.dest_picker": "Impossibile aprire il selettore di destinazione",
   "decompress.browse": "Sfoglia",
   "decompress.load": "Carica",
   "decompress.placeholder": "/Users/utente/Downloads/archivio.nxs6",
@@ -1342,6 +1375,9 @@ const IT: Record<keyof typeof ES, string> = {
   "settings.transport.desc": "Come i dispositivi si connettono quando condividono file.",
   "settings.storage.desc": "Dove sono salvate le statistiche e lo stato.",
   "settings.about.desc": "Versione, motore e link del progetto.",
+  // Sprint 5.7.21-B: theme toggle aria labels (i18n).
+  "theme.toggle.toLight": "Passa al tema chiaro",
+  "theme.toggle.toDark": "Passa al tema scuro",
   "settings.tunnel.mode.quick.desc": "Anonimo. Funziona senza configurazione. Ideale per provare. Limitato dai rate-limit di Cloudflare (~3-5 connessioni prima di errori).",
   "settings.tunnel.mode.quick.badge": "No config",
   "settings.tunnel.mode.named.desc": "Richiede account Cloudflare gratuito + tunnel proprio. Nessun rate-limit, dominio fisso (es. p2p.tuo-dominio.com).",

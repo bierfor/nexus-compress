@@ -243,9 +243,15 @@ export function CompressView({
   // Tauri call; if `password` is set, the backend routes to
   // the encrypted pipeline (v4 + AES-256-GCM + optional
   // Reed-Solomon).
-  const [encrypt, setEncrypt] = useState(false);
+  //
+  // Sprint 5.7.21 (Option B cleanup): `encrypt` and
+  // `recoveryLevel` are now part of the `profile` state
+  // (5.7.8 single-source-of-truth refactor). Only the
+  // `password` stays as local state because it's a runtime
+  // secret and intentionally NOT saved to the profile
+  // (otherwise it would leak into localStorage and into
+  // every Tauri command invocation).
   const [password, setPassword] = useState<string>("");
-  const [recoveryLevel, setRecoveryLevel] = useState<"off" | "low" | "high">("low");
   const [showPwd, setShowPwd] = useState(false);
   // FolderOpen + Plus icons for the new btn-ghost / btn-primary buttons
   // are imported at the top of the file.
@@ -420,9 +426,17 @@ export function CompressView({
       if (Array.isArray(result)) acceptPaths(result);
       else if (typeof result === "string") acceptPaths([result]);
     } catch (e) {
-      console.error("file picker:", e);
+      // Sprint 5.7.21-B cleanup: surface the picker error
+      // to the user via the existing `error` state instead
+      // of silently logging to console. The most common
+      // case is the user closing the dialog (we treat that
+      // as a soft cancel and don't show anything).
+      const msg = String((e as Error)?.message ?? e);
+      if (!/cancel/i.test(msg)) {
+        setError(t("compress.error.file_picker") + ": " + msg);
+      }
     }
-  }, [acceptPaths]);
+  }, [acceptPaths, t]);
 
   const onBrowseFolders = useCallback(async () => {
     if (!isTauri) return;
@@ -435,9 +449,16 @@ export function CompressView({
       if (Array.isArray(result)) acceptPaths(result);
       else if (typeof result === "string") acceptPaths([result]);
     } catch (e) {
-      console.error("folder picker:", e);
+      // Sprint 5.7.21-B cleanup: surface the picker error
+      // to the user via the existing `error` state. The
+      // user closing the dialog is treated as a soft
+      // cancel (no error shown).
+      const msg = String((e as Error)?.message ?? e);
+      if (!/cancel/i.test(msg)) {
+        setError(t("compress.error.folder_picker") + ": " + msg);
+      }
     }
-  }, [acceptPaths]);
+  }, [acceptPaths, t]);
 
   // Path input
   const onAddPath = useCallback(() => {
@@ -456,9 +477,15 @@ export function CompressView({
       const result = await open({ multiple: false, directory: true });
       if (typeof result === "string") setDestDir(result);
     } catch (e) {
-      console.error("folder picker:", e);
+      // Sprint 5.7.21-B cleanup: surface the destination
+      // picker error to the user (the existing `error`
+      // state). User-cancelled dialog is silent.
+      const msg = String((e as Error)?.message ?? e);
+      if (!/cancel/i.test(msg)) {
+        setError(t("compress.error.dest_picker") + ": " + msg);
+      }
     }
-  }, []);
+  }, [t]);
 
   // Apply a built-in or custom preset: replace the
   // current profile with the preset's settings, mark
@@ -577,7 +604,7 @@ export function CompressView({
       const durationMs = Date.now() - startTime;
       const savings = lastResult.compressed_size / lastResult.original_size;
       const savingsPct = Math.round((1 - savings) * 100);
-      const lockEmoji = encrypt ? "🔒 " : "";
+      const lockEmoji = profile.encrypt ? "🔒 " : "";
       setToast({
         kind: "ok",
         msg: `✓ ${lockEmoji}${inputFilename} → ${prettyBytes(lastResult.compressed_size)} (${savingsPct}% más pequeño) en ${(durationMs / 1000).toFixed(1)}s`,
@@ -602,7 +629,7 @@ export function CompressView({
             originalSize: lastResult.original_size,
             compressedSize: compressedBytes,
             durationMs,
-            encrypted: encrypt,
+            encrypted: profile.encrypt,
             // Sprint 5.7.2 hotfix #44: carry the dev-cache skip
             // bytes into the success card so the UI can show the
             // "skipped X MiB" diagnostic.
