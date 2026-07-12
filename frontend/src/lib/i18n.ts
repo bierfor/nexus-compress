@@ -232,7 +232,7 @@ const ES = {
   // Decompress view
   "decompress.title": "Descomprimir",
   "decompress.desc": "Arrastra un archivo .tar o .nxs6 — la app lee el directorio central sin descomprimir nada.",
-  "decompress.drop": "Arrastra un archivo .tar o .nxs6",
+  "decompress.drop": "Arrastra un archivo .nxs6 / .zip / .tar / .tar.gz",
   "decompress.drop.active": "Suelta el archivo",
   "decompress.drop.hint": "o escribe la ruta absoluta",
   // Sprint 5.7.21-B cleanup: file/dest picker error messages.
@@ -240,7 +240,7 @@ const ES = {
   "decompress.error.dest_picker": "No se pudo abrir el selector de destino",
   "decompress.browse": "Explorar",
   "decompress.load": "Cargar",
-  "decompress.placeholder": "/Users/usuario/Downloads/archivo.nxs6",
+  "decompress.placeholder": "/Users/usuario/Downloads/archivo.zip",
   "decompress.detected": "Archivo detectado",
   "decompress.change": "Cambiar archivo",
   "decompress.format": "Formato",
@@ -747,7 +747,7 @@ const EN: Record<keyof typeof ES, string> = {
 
   "decompress.title": "Decompress",
   "decompress.desc": "Drop a .tar or .nxs6 file — the app reads the central directory without extracting anything.",
-  "decompress.drop": "Drop a .tar or .nxs6 file",
+  "decompress.drop": "Drop a .nxs6 / .zip / .tar / .tar.gz file",
   "decompress.drop.active": "Release the file",
   "decompress.drop.hint": "or type the absolute path",
   // Sprint 5.7.21-B cleanup: file/dest picker error messages.
@@ -755,7 +755,7 @@ const EN: Record<keyof typeof ES, string> = {
   "decompress.error.dest_picker": "Could not open the destination picker",
   "decompress.browse": "Browse",
   "decompress.load": "Load",
-  "decompress.placeholder": "/Users/user/Downloads/archive.nxs6",
+  "decompress.placeholder": "/Users/user/Downloads/archive.zip",
   "decompress.detected": "File detected",
   "decompress.change": "Change file",
   "decompress.format": "Format",
@@ -1198,7 +1198,7 @@ const IT: Record<keyof typeof ES, string> = {
   "decompress.error.dest_picker": "Impossibile aprire il selettore di destinazione",
   "decompress.browse": "Sfoglia",
   "decompress.load": "Carica",
-  "decompress.placeholder": "/Users/utente/Downloads/archivio.nxs6",
+  "decompress.placeholder": "/Users/utente/Downloads/archivio.zip",
   "decompress.detected": "File rilevato",
   "decompress.change": "Cambia file",
   "decompress.format": "Formato",

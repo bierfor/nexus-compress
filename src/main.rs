@@ -510,6 +510,49 @@ fn main() {
                     "{} -> {} ({} files, {:.2}x)",
                     positional[1], positional[2], result.n_files, result.aggregate_ratio
                 );
+            } else if let Some(fmt) = nexus_compress::external_decompress::detect_format(&input[..8.min(input.len())]) {
+                // Sprint 5.7.21-EXT: third-party archive
+                // formats (ZIP / TAR / TAR.GZ / GZ). The
+                // dispatch writes the extracted contents
+                // into a directory at `positional[2]`.
+                let out_path = Path::new(&positional[2]);
+                // Re-resolve the format using the file
+                // extension too (TAR has no magic, .tar.gz
+                // shares the gz magic).
+                let ext_lower = positional[1]
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let stem_ends_with_tar = Path::new(&positional[1])
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.ends_with(".tar"))
+                    .unwrap_or(false);
+                let fmt_resolved = if fmt == "tar" || ext_lower == "tar" {
+                    "tar"
+                } else if fmt == "gz" && ext_lower == "gz" && stem_ends_with_tar {
+                    "tar.gz"
+                } else if fmt == "gz" && ext_lower == "gz" {
+                    "gz"
+                } else {
+                    fmt
+                };
+                let stats = nexus_compress::external_decompress::extract_external(
+                    Path::new(&positional[1]),
+                    Some(out_path),
+                    fmt_resolved,
+                    |_ev| {},
+                )
+                .expect("external extract");
+                eprintln!(
+                    "{} -> {} ({} files, {} bytes, {})",
+                    positional[1],
+                    positional[2],
+                    stats.n_files,
+                    stats.restored_size,
+                    fmt_resolved
+                );
             } else {
                 let out = engine::decompress_any(&input).expect("decompress");
                 fs::write(&positional[2], &out).expect("write output");

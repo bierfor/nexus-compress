@@ -399,7 +399,15 @@ export function DecompressView({
         directory: false,
         filters: [
           { name: "All files", extensions: ["*"] },
+          // Sprint 5.7.21-EXT: include the third-party
+          // formats the backend can now extract. The list
+          // is mirrored from src/external_decompress.rs::
+          // detect_format + the extension overrides for
+          // TAR (no magic).
           { name: "NexusCompress archives", extensions: ["nxs", "nxs6", "nxe", "nxr", "lz", "nxar"] },
+          { name: "ZIP archives", extensions: ["zip"] },
+          { name: "TAR archives", extensions: ["tar"] },
+          { name: "Compressed archives", extensions: ["tar.gz", "tgz", "gz"] },
         ],
       });
       if (typeof result === "string") acceptPath(result);
