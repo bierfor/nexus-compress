@@ -1,6 +1,6 @@
 [package]
 name = "nexus-rar"
-version = "0.1.2"
+version = "0.3.0"
 edition = "2021"
 description = "NexusRAR — Tauri 2.x desktop GUI for NexusCompress"
 license = "MIT"
