@@ -55,6 +55,149 @@ pub struct DecompressStats {
     pub output_dir: PathBuf,
 }
 
+/// Peek at an external archive WITHOUT extracting. Reads
+/// only the central directory (ZIP) or the manifest (TAR)
+/// and returns the file list. Used by `api::peek_archive_target`
+/// to populate the ArchivePreview before the user commits
+/// to extracting. The peek is cheap (no payload decoding)
+/// but for huge archives (100K+ entries) we cap the
+/// returned list at 5000 entries to keep the IPC payload
+/// small.
+pub fn peek_external(path: &Path, format: &str) -> ApiResult<(Vec<PeekEntry>, u64)> {
+    match format {
+        "zip" => peek_zip(path),
+        "tar" | "tar.gz" => peek_tar(path, format == "tar.gz"),
+        "gz" => peek_gz(path),
+        other => Err(ApiError::new(
+            "peek.unknown_format",
+            format!("unknown external format: {}", other),
+        )),
+    }
+}
+
+/// Lightweight entry returned by `peek_external`. Mirrors
+/// the fields the frontend needs (path, size, is_dir).
+pub struct PeekEntry {
+    pub path: String,
+    pub size: u64,
+    pub is_dir: bool,
+}
+
+/// Cap on peek entries returned to the frontend. Archives
+/// with more than this many entries are still extractable
+/// (the per-entry iteration in `extract_external` doesn't
+/// have a cap) but the preview shows the first 5000 with a
+/// "..." marker.
+const PEEK_MAX_ENTRIES: usize = 5000;
+
+fn peek_zip(path: &Path) -> ApiResult<(Vec<PeekEntry>, u64)> {
+    let file = fs::File::open(path).map_err(|e| {
+        ApiError::new(
+            "peek.open_failed",
+            format!("open {}: {}", path.display(), e),
+        )
+    })?;
+    let mut archive = zip::ZipArchive::new(BufReader::new(file)).map_err(|e| {
+        ApiError::new(
+            "peek.zip_failed",
+            format!("zip open {}: {}", path.display(), e),
+        )
+    })?;
+    let mut entries: Vec<PeekEntry> = Vec::with_capacity(archive.len().min(PEEK_MAX_ENTRIES));
+    let mut total: u64 = 0;
+    for i in 0..archive.len().min(PEEK_MAX_ENTRIES) {
+        let entry = archive.by_index(i).map_err(|e| {
+            ApiError::new(
+                "peek.zip_entry_failed",
+                format!("zip entry {}: {}", i, e),
+            )
+        })?;
+        let entry_path = match entry.enclosed_name() {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => continue, // skip zip-slip entries
+        };
+        let is_dir = entry.is_dir();
+        let size = entry.size();
+        total += size;
+        entries.push(PeekEntry {
+            path: entry_path,
+            size,
+            is_dir,
+        });
+    }
+    Ok((entries, total))
+}
+
+fn peek_tar(path: &Path, gzipped: bool) -> ApiResult<(Vec<PeekEntry>, u64)> {
+    let file = fs::File::open(path).map_err(|e| {
+        ApiError::new(
+            "peek.open_failed",
+            format!("open {}: {}", path.display(), e),
+        )
+    })?;
+    let reader: Box<dyn Read> = if gzipped {
+        Box::new(flate2::read::GzDecoder::new(BufReader::new(file)))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+    let mut archive = tar::Archive::new(reader);
+    let entries_iter = archive.entries().map_err(|e| {
+        ApiError::new(
+            "peek.tar_entries_failed",
+            format!("tar entries: {}", e),
+        )
+    })?;
+    let mut entries: Vec<PeekEntry> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in entries_iter {
+        let entry = entry.map_err(|e| {
+            ApiError::new(
+                "peek.tar_entry_failed",
+                format!("tar entry: {}", e),
+            )
+        })?;
+        let path_str = match entry.path() {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(_) => continue,
+        };
+        if entries.len() >= PEEK_MAX_ENTRIES {
+            break;
+        }
+        let size = entry.header().size().unwrap_or(0);
+        let is_dir = entry.header().entry_type().is_dir();
+        total += size;
+        entries.push(PeekEntry {
+            path: path_str,
+            size,
+            is_dir,
+        });
+    }
+    Ok((entries, total))
+}
+
+fn peek_gz(path: &Path) -> ApiResult<(Vec<PeekEntry>, u64)> {
+    // Standalone .gz: peek returns a single synthetic entry
+    // (we don't decompress to know the inner size).
+    let meta = fs::metadata(path).map_err(|e| {
+        ApiError::new(
+            "peek.open_failed",
+            format!("stat {}: {}", path.display(), e),
+        )
+    })?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    Ok((
+        vec![PeekEntry {
+            path: stem,
+            size: meta.len(),
+            is_dir: false,
+        }],
+        meta.len(),
+    ))
+}
+
 /// Detect a third-party archive format by magic bytes. Returns
 /// the format tag (lowercased, no leading dot) if the magic
 /// matches one of the formats this module handles, `None`
@@ -704,6 +847,67 @@ mod tests {
         // of the archive minus .gz).
         let extracted = fs::read(extract_to.join("hello.txt")).unwrap();
         assert_eq!(extracted, payload);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Build a minimal valid ZIP archive on disk using the
+    /// `zip` crate, then peek via `peek_external` and
+    /// assert the file list matches what we put in.
+    /// This is the same as extract_external's roundtrip
+    /// test but exercises the ArchivePreview path (read
+    /// only, no payload decode).
+    #[test]
+    fn peek_zip_returns_file_list_without_extracting() {
+        let dir = tempdir();
+        let archive = dir.join("test.zip");
+        let file = fs::File::create(&archive).unwrap();
+        let mut zip_writer = zip::ZipWriter::new(file);
+        let options: zip::write::SimpleFileOptions =
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+        zip_writer
+            .start_file("a.txt", options.clone())
+            .unwrap();
+        zip_writer.write_all(&vec![0xAA_u8; 1024]).unwrap();
+        zip_writer.start_file("nested/b.txt", options).unwrap();
+        zip_writer.write_all(&vec![0xBB_u8; 2048]).unwrap();
+        zip_writer.finish().unwrap();
+        let (entries, total) = peek_external(&archive, "zip").expect("peek zip");
+        assert_eq!(entries.len(), 2, "2 entries (no folder row)");
+        assert_eq!(total, 3072, "1024 + 2048");
+        assert!(entries.iter().any(|e| e.path == "a.txt" && e.size == 1024));
+        assert!(entries.iter().any(|e| e.path == "nested/b.txt" && e.size == 2048));
+        // No output dir created by peek.
+        assert!(!dir.join("out").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn peek_tar_returns_file_list_without_extracting() {
+        let dir = tempdir();
+        let archive = dir.join("test.tar");
+        let file = fs::File::create(&archive).unwrap();
+        let mut tar_writer = tar::Builder::new(file);
+        let payload_a = vec![0xCC_u8; 512];
+        let payload_b = vec![0xDD_u8; 1024];
+        let mut h = tar::Header::new_gnu();
+        h.set_path("a.bin").unwrap();
+        h.set_size(512);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar_writer.append(&h, &payload_a[..]).unwrap();
+        let mut h2 = tar::Header::new_gnu();
+        h2.set_path("nested/b.bin").unwrap();
+        h2.set_size(1024);
+        h2.set_mode(0o644);
+        h2.set_cksum();
+        tar_writer.append(&h2, &payload_b[..]).unwrap();
+        tar_writer.finish().unwrap();
+        let (entries, total) = peek_external(&archive, "tar").expect("peek tar");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(total, 1536);
+        assert!(entries.iter().any(|e| e.path == "a.bin" && e.size == 512));
+        assert!(entries.iter().any(|e| e.path == "nested/b.bin" && e.size == 1024));
         let _ = fs::remove_dir_all(&dir);
     }
 

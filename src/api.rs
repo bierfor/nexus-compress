@@ -1404,6 +1404,53 @@ pub fn peek_archive_target(input_path: &Path) -> ApiResult<PeekResult> {
             files: vec![], // populated only after password + decrypt
         })
     } else {
+        // Sprint 5.7.21-EXT: peek support for the new
+        // external formats. The peek only reads the
+        // central directory (ZIP) or the manifest (TAR)
+        // — it does NOT decompress anything, so it's
+        // cheap. The frontend uses the returned file list
+        // to render the ArchivePreview (file count, total
+        // size, individual file rows).
+        if let Some(fmt) = crate::external_decompress::detect_format(&bytes) {
+            let ext_lower = input_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            let stem_ends_with_tar = input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.ends_with(".tar"))
+                .unwrap_or(false);
+            let fmt_resolved = if fmt == "tar" || ext_lower == "tar" {
+                "tar"
+            } else if fmt == "gz" && ext_lower == "gz" && stem_ends_with_tar {
+                "tar.gz"
+            } else if fmt == "gz" && ext_lower == "gz" {
+                "gz"
+            } else {
+                fmt
+            };
+            let (files, total) = crate::external_decompress::peek_external(
+                input_path,
+                fmt_resolved,
+            )?;
+            let n = files.len() as u64;
+            return Ok(PeekResult {
+                archive_kind: fmt_resolved,
+                n_files: n,
+                total_uncompressed: total,
+                compressed_size,
+                files: files
+                    .into_iter()
+                    .map(|e| ArchivePreviewEntry {
+                        path: e.path,
+                        size: e.size,
+                        is_dir: e.is_dir,
+                    })
+                    .collect(),
+            });
+        }
         Err(ApiError::new(
             "peek.unknown_format",
             format!(
