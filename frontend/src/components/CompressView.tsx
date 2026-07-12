@@ -147,27 +147,30 @@ const FIDELITY: { id: FidelityChoice; icon: string }[] = [
 
 // Only backend/static data — titles and descriptions come from t()
 //
-// Sprint 5.7.5: each mode surfaces its backend version
-// (`version`) so the user can SEE which engine they're
-// picking. v4 = fast LZ77+rANS, v5 = balanced LZMA, v5-min
-// = LZMA + Conservative minify, v6 = LZMA + swc AST, v6-solid
-// = the SOLID pipeline we built in sprint 5.7.2 (the
-// per-chunk-codec hybrid with the Format Oracle).
+// Sprint 5.7.21-A: each mode surfaces its DEFAULT codec
+// (the codec the engine picks when `codec === "auto"`).
+// This mirrors the backend's `resolve_plan` table exactly:
+//   rapido + auto    → zstd-3
+//   balanceado + auto → zstd-3 (5.7.9 default; 22x speedup)
+//   ultra + auto     → lzma-9
+//
+// Previously this array carried `backend: "v4" | "v6-solid"`
+// and `version: "v4" | "v6"` strings that were never sent
+// to the backend (the dispatch is driven by the `profile`
+// object the user selected). The display badges said "v4"
+// for rapido but the actual archive was zstd-3. This
+// cleanup makes the chip badge match what the engine emits.
 const MODES: {
   id: Mode;
   icon: string;
   stars: number;
-  backend: string;
-  version: string; // Sprint 5.7.5: displayed as a badge in the pastille
-  lzma: number;
+  defaultCodec: string; // displayed as a chip badge; mirrors resolve_plan
 }[] = [
   {
     id: "rapido",
     icon: "⚡",
     stars: 4,
-    backend: "v4",
-    version: "v4",
-    lzma: 0,
+    defaultCodec: "zstd-3",
   },
   {
     id: "balanceado",
@@ -176,28 +179,22 @@ const MODES: {
     // Sprint 5.7.9 part 4: balanceado used v5-min (per-file
     // archive with full v5-min preprocessor) which gave a
     // 1.6x ratio on corpora like the user's 'content
-    // facebook' (197 MB venv + code). v5-min does NOT
-    // route through the solid LZMA stream and falls
-    // through to nxar::compress_directory_with_progress
-    // which — even with the recent passthrough fix —
-    // produces 2x the output of v6-solid on the same
-    // input. The new default uses v6-solid: the solid
+    // facebook' (197 MB venv + code). The new default
+    // (post-5.7.10 SupremeEngine) uses the solid pipeline:
     // LZMA stream with the Sonic Scheduler for parallel
     // chunk compression and the full passthrough filter
-    // (Python bytecode, RocksDB, SQLite, etc.). 22x
-    // faster than v5-min on mixed corpora, 1.5-2x better
-    // ratio on bin-heavy corpora.
-    backend: "v6-solid",
-    version: "v6",
-    lzma: 6,
+    // (Python bytecode, RocksDB, SQLite, etc.). 22x faster
+    // than v5-min on mixed corpora, 1.5-2x better ratio on
+    // bin-heavy corpora. The default codec is zstd-3 for
+    // the 22x speedup; the user can override with `codec:
+    // lzma` for higher ratio.
+    defaultCodec: "zstd-3",
   },
   {
     id: "ultra",
     icon: "💎",
     stars: 3,
-    backend: "v6-solid",
-    version: "v6",
-    lzma: 9,
+    defaultCodec: "lzma-9",
   },
 ];
 
@@ -572,7 +569,6 @@ export function CompressView({
     setError(null);
     setProgress(null);
     const startTime = Date.now();
-    const m = MODES.find((x) => x.id === profile.mode)!;
     const inputPath = files[0];
     const inputFilename = inputPath.split("/").pop() || "archivo";
     // Guard: encryption requires a non-empty password. We don't
@@ -1082,7 +1078,7 @@ export function CompressView({
                                   {getModeTitle(m.id)}
                                 </span>
                                 <span className="ml-auto text-[9px] text-zinc-500 font-mono">
-                                  {m.version}
+                                  {m.defaultCodec}
                                 </span>
                               </div>
                               <div className="text-zinc-500 text-[10.5px] leading-snug">
