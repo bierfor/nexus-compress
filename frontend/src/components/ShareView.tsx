@@ -32,6 +32,7 @@ import {
   KeyRound,
   Eye,
   EyeOff,
+  Plus,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useAppStats, useRecentEvents } from "@/lib/useAppData";
@@ -189,7 +190,15 @@ function SendPanel({
   onRespChange?: (resp: SendStartResp | null) => void;
 }) {
   const { t } = useLocale();
+  // Sprint 5.7.21-B-Share-Improve: track whether the selected
+  // path is a file or a folder so the UI shows the right icon
+  // + label. Set by the explicit browse buttons (file vs
+  // folder); for typed paths the kind is "unknown" and we use
+  // a generic FileText icon.
   const [filePath, setFilePath] = useState<string | null>(null);
+  const [pathKind, setPathKind] = useState<"file" | "folder" | "unknown">(
+    "unknown"
+  );
   const [resp, setResp] = useState<SendStartResp | null>(null);
   const [busy, setBusy] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -197,20 +206,33 @@ function SendPanel({
   const [pathInput, setPathInput] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [copied, setCopied] = useState<"code" | "token" | null>(null);
+  // Sprint 5.7.21-B-Share-Improve: when the user drops multiple
+  // paths, the backend only takes the first. We surface a quiet
+  // warning so they know.
+  const [multiWarning, setMultiWarning] = useState(false);
 
   // Sprint 5.6.29: bubble `resp` up to ShareView so LinkPanel can render.
   useEffect(() => {
     onRespChange?.(resp);
   }, [resp, onRespChange]);
 
-  const acceptPath = useCallback((p: string | null) => {
-    if (p) {
-      setFilePath(p);
-      setError(null);
-      setResp(null);
-      setPathInput("");
-    }
-  }, []);
+  // Sprint 5.7.21-B-Share-Improve: acceptPath takes an explicit
+  // kind so the preview can render the right icon (File vs
+  // FolderOpen). The drop handler passes "unknown" since we
+  // can't tell from a path string alone.
+  const acceptPath = useCallback(
+    (p: string | null, kind: "file" | "folder" | "unknown" = "unknown") => {
+      if (p) {
+        setFilePath(p);
+        setPathKind(kind);
+        setError(null);
+        setResp(null);
+        setPathInput("");
+        setMultiWarning(false);
+      }
+    },
+    []
+  );
 
   // drag-drop
   const onDragOver = useCallback((e: React.DragEvent) => {
@@ -223,7 +245,15 @@ function SendPanel({
       e.preventDefault();
       setDragOver(false);
       const paths: string[] = (e as any).detail?.paths ?? [];
-      if (paths.length) acceptPath(paths[0]);
+      if (paths.length === 0) return;
+      // Sprint 5.7.21-B-Share-Improve: if the user dropped more
+      // than one item, the backend (p2p_send_start_cmd) only
+      // takes a single path. We use the first and show a quiet
+      // warning so they know the rest were dropped silently.
+      if (paths.length > 1) {
+        setMultiWarning(true);
+      }
+      acceptPath(paths[0], "unknown");
     },
     [acceptPath]
   );
@@ -238,19 +268,32 @@ function SendPanel({
         if (!ev?.listen) return;
         unlisten = await ev.listen("tauri://drag-drop", (e: any) => {
           const paths: string[] = e?.payload?.paths ?? [];
-          if (paths.length) acceptPath(paths[0]);
+          if (paths.length === 0) return;
+          if (paths.length > 1) {
+            setMultiWarning(true);
+          }
+          acceptPath(paths[0], "unknown");
         });
       } catch {}
     })();
     return () => unlisten?.();
   }, [acceptPath]);
 
+  // Sprint 5.7.21-B-Share-Improve: two explicit browse buttons
+  // — "Choose file" and "Choose folder" — so the user can pick
+  // the kind they want. The previous version only had a file
+  // picker; onBrowseFolder was defined but never called (dead
+  // code from a pre-refactor).
   const onBrowseFile = useCallback(async () => {
     if (!isTauri) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const r = await open({ multiple: false, directory: false, filters: [{ name: "All files", extensions: ["*"] }] });
-      if (typeof r === "string") acceptPath(r);
+      const r = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "All files", extensions: ["*"] }],
+      });
+      if (typeof r === "string") acceptPath(r, "file");
     } catch {}
   }, [acceptPath]);
 
@@ -259,9 +302,19 @@ function SendPanel({
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const r = await open({ multiple: false, directory: true });
-      if (typeof r === "string") acceptPath(r);
+      if (typeof r === "string") acceptPath(r, "folder");
     } catch {}
   }, [acceptPath]);
+
+  // Sprint 5.7.21-B-Share-Improve: text path input. The user
+  // can type a path directly (useful when the native picker
+  // is flaky, e.g. macOS Sequoia — see share.send.drop.hint).
+  // The kind is "unknown" because we can't tell from the path
+  // string alone.
+  const onAddPath = useCallback(() => {
+    const trimmed = pathInput.trim();
+    if (trimmed) acceptPath(trimmed, "unknown");
+  }, [pathInput, acceptPath]);
 
   const onSend = useCallback(async () => {
     if (!filePath) return;
@@ -291,10 +344,12 @@ function SendPanel({
 
   const onReset = useCallback(() => {
     setFilePath(null);
+    setPathKind("unknown");
     setResp(null);
     setError(null);
     setPathInput("");
     setCopied(null);
+    setMultiWarning(false);
   }, []);
 
   const onCopy = useCallback(async (text: string, which: "code" | "token") => {
@@ -304,6 +359,15 @@ function SendPanel({
   }, []);
 
   const filename = filePath ? filePath.split("/").pop() : null;
+
+  // The preview icon depends on pathKind. Three states:
+  //   file    → FileText
+  //   folder  → FolderOpen
+  //   unknown → FileText (generic — the user might have typed
+  //             the path or dropped it; the backend will tell
+  //             us on the response)
+  const PreviewIcon =
+    pathKind === "folder" ? FolderOpen : FileText;
 
   return (
     <div
@@ -361,32 +425,89 @@ function SendPanel({
             <p className="text-zinc-500 text-[12px] mb-5">
               {t("share.send.drop.hint")}
             </p>
-            {/* Solid cyan button (matches mockup — no gradient) */}
-            <button
-              onClick={onBrowseFile}
-              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-blue-500 hover:bg-blue-400 text-white text-[13px] font-semibold transition-all duration-150 hover:-translate-y-px shadow-[0_4px_20px_-6px_rgba(59,130,246,0.55)]"
-            >
-              <File size={14} />
-              {t("share.send.choose")}
-            </button>
+            {/* Sprint 5.7.21-B-Share-Improve: two browse buttons
+                side by side — "Choose file" + "Choose folder".
+                The previous version only had a file picker. */}
+            <div className="inline-flex items-center gap-2">
+              <button
+                onClick={onBrowseFile}
+                data-testid="send-browse-file"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-white text-[13px] font-semibold transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+              >
+                <File size={14} />
+                {t("share.send.browse.file")}
+              </button>
+              <button
+                onClick={onBrowseFolder}
+                data-testid="send-browse-folder"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-200 text-[13px] font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+              >
+                <FolderOpen size={14} />
+                {t("share.send.browse.folder")}
+              </button>
+            </div>
           </div>
 
-          {/* Selected file preview — matches mockup: gray icon, simple card */}
+          {/* Path text input — alternative to the picker / drop.
+              The user can paste a path (Cmd+Opt+C in Finder). */}
+          {!filePath && (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={pathInput}
+                onChange={(e) => setPathInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && onAddPath()}
+                placeholder={t("share.send.placeholder")}
+                className="flex-1 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white text-[12.5px] placeholder:text-zinc-600 focus:outline-none focus:border-cyan-400/40 focus:bg-white/[0.06] transition-all font-mono"
+              />
+              <button
+                onClick={onAddPath}
+                disabled={!pathInput.trim()}
+                className="px-3 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[12.5px] font-medium transition-all flex items-center gap-1.5 disabled:opacity-30 disabled:hover:bg-cyan-500/15"
+              >
+                <Plus size={13} />
+                {t("share.send.add")}
+              </button>
+            </div>
+          )}
+
+          {/* Multi-drop warning (shown when user dropped >1 file) */}
+          {multiWarning && (
+            <div className="text-amber-300/80 text-[12px] px-3 py-2 rounded-lg bg-amber-500/[0.06] border border-amber-500/20">
+              {t("share.send.multi.warning")}
+            </div>
+          )}
+
+          {/* Selected path preview — the icon switches between
+              File and FolderOpen based on pathKind. */}
           {filePath && (
             <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex items-center gap-3 animate-scale-in">
-              <div className="w-10 h-10 rounded-lg bg-white/[0.05] flex items-center justify-center text-zinc-400 shrink-0">
-                <FileText size={18} />
+              <div
+                className={
+                  "w-10 h-10 rounded-lg flex items-center justify-center shrink-0 " +
+                  (pathKind === "folder"
+                    ? "bg-amber-500/15 text-amber-300"
+                    : "bg-cyan-500/15 text-cyan-300")
+                }
+              >
+                <PreviewIcon size={18} />
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-white text-[13px] truncate font-medium">
                   {filename}
                 </p>
                 <p className="text-zinc-500 text-[10.5px] mt-0.5">
-                  Listo para compartir
+                  {pathKind === "folder"
+                    ? t("share.send.ready.folder")
+                    : t("share.send.ready.file")}
                 </p>
               </div>
               <button
-                onClick={() => setFilePath(null)}
+                onClick={() => {
+                  setFilePath(null);
+                  setPathKind("unknown");
+                  setMultiWarning(false);
+                }}
                 className="text-zinc-500 hover:text-white transition-colors p-1.5 rounded-md hover:bg-white/[0.05]"
                 aria-label={t("share.send.remove")}
               >
@@ -461,33 +582,29 @@ function SendPanel({
             </details>
           )}
 
-          {/* Big gradient CTA */}
+          {/* Sprint 5.7.21-B-Share-Improve: replaced the big
+              gradient CTA with a single-accent abstract button,
+              consistent with the rest of the app. The previous
+              version had a 3-color gradient (emerald-cyan-emerald)
+              with a heavy shadow. The new design uses a flat
+              cyan button. */}
           <button
             onClick={onSend}
             disabled={!filePath || busy}
-            className="w-full py-4 rounded-2xl font-semibold text-[14.5px] text-white relative overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 hover:scale-[1.01] active:scale-[0.99] disabled:hover:scale-100"
-            style={{
-              background: busy
-                ? "linear-gradient(135deg, #34d399 0%, #22d3ee 100%)"
-                : "linear-gradient(135deg, #34d399 0%, #10b981 35%, #22d3ee 100%)",
-              boxShadow: !busy && filePath
-                ? "0 8px 32px -8px rgba(34,211,238,0.55), 0 0 0 1px rgba(255,255,255,0.08) inset"
-                : "none",
-            }}
+            data-testid="send-cta"
+            className="w-full py-3 rounded-xl font-semibold text-[14px] text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-800 disabled:text-zinc-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
           >
-            <span className="relative z-10 flex items-center justify-center gap-2">
-              {busy ? (
-                <>
-                  <RefreshCw size={16} className="animate-spin-slow" />
-                  {t("share.send.btn.busy")}
-                </>
-              ) : (
-                <>
-                  <LinkIcon size={16} />
-                  {t("share.send.cta")}
-                </>
-              )}
-            </span>
+            {busy ? (
+              <>
+                <RefreshCw size={15} className="animate-spin" />
+                {t("share.send.btn.busy")}
+              </>
+            ) : (
+              <>
+                <LinkIcon size={15} />
+                {t("share.send.cta")}
+              </>
+            )}
           </button>
           <p className="text-zinc-500 text-[11.5px] text-center -mt-2">
             {t("share.send.cta.sub")}
