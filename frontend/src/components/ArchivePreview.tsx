@@ -46,6 +46,19 @@ const KIND_LABEL: Record<string, string> = {
   "v5-v6-single": "single-file v5/v6 (LZMA)",
   "nxe-encrypted": "NXE — encrypted (no recovery)",
   "nxr-encrypted": "NXR — encrypted + Reed-Solomon recovery",
+  // Sprint 5.7.21-EXT: third-party formats now reach this
+  // component via peek_archive_target_cmd. The label
+  // mirrors the format tag (uppercased for visual weight).
+  zip: "ZIP archive",
+  tar: "TAR archive",
+  "tar.gz": "TAR.GZ (gzipped tar)",
+  gz: "GZIP single file",
+  // Sprint 5.7.21-EXT2: bz2 and xz added to the supported
+  // formats. Both are single-file compressed streams;
+  // ArchivePreview shows the synthetic single-file entry
+  // and the user clicks Extract to restore.
+  bz2: "BZIP2 single file",
+  xz: "XZ single file",
 };
 
 interface ArchivePreviewProps {

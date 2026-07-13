@@ -88,6 +88,35 @@ function isInspectable(name: string | null): "tar" | "solid" | null {
   return null;
 }
 
+/// Sprint 5.7.21-EXT: the new external formats (zip / tar.gz /
+/// gz / bz2 / xz) ALSO support peek (via the new external_decompress
+/// module) but they don't go through the legacy
+/// `p2p_archive_list_cmd` path that the .tar / .nxs6
+/// archives use. They go through `peek_archive_target_cmd`
+/// instead, which is the same Tauri command the catch-all
+/// "single file" archives use today. This function returns
+/// `true` for any format the backend can peek, so the
+/// ArchivePreview renders the file list for ZIP / TAR.GZ
+/// / GZ too (not just TAR / NXS6).
+function isPeekable(name: string | null): boolean {
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  return (
+    lower.endsWith(".zip") ||
+    lower.endsWith(".tar") ||
+    lower.endsWith(".tar.gz") ||
+    lower.endsWith(".tgz") ||
+    lower.endsWith(".gz") ||
+    lower.endsWith(".bz2") ||
+    lower.endsWith(".xz") ||
+    lower.endsWith(".nxs6") ||
+    lower.endsWith(".nxs") ||
+    lower.endsWith(".nxar") ||
+    lower.endsWith(".nxe") ||
+    lower.endsWith(".nxr")
+  );
+}
+
 export function DecompressView({
   onComplete,
   onNavigate,
@@ -407,7 +436,7 @@ export function DecompressView({
           { name: "NexusCompress archives", extensions: ["nxs", "nxs6", "nxe", "nxr", "lz", "nxar"] },
           { name: "ZIP archives", extensions: ["zip"] },
           { name: "TAR archives", extensions: ["tar"] },
-          { name: "Compressed archives", extensions: ["tar.gz", "tgz", "gz"] },
+          { name: "Compressed archives", extensions: ["tar.gz", "tgz", "gz", "bz2", "xz"] },
         ],
       });
       if (typeof result === "string") acceptPath(result);
@@ -738,7 +767,22 @@ export function DecompressView({
                       unlockError={unlockError}
                       onUnlock={onUnlock}
                     />
-                  ) : null}
+                  ) : (
+                    // Sprint 5.7.21-EXT: show the file list
+                    // for the new external formats (zip /
+                    // tar.gz / gz) too. The peek already
+                    // populated legacyInfo.files via
+                    // peek_archive_target_cmd; we just
+                    // hand it to ArchivePreview. Skip when
+                    // the file list is empty (single-file
+                    // archive like .nxs without TOC) so
+                    // the user doesn't see an empty list.
+                    legacyInfo.files && legacyInfo.files.length > 0 ? (
+                      <ArchivePreview
+                        preview={legacyToPreview(legacyInfo)}
+                      />
+                    ) : null
+                  )}
                 </>
               ) : peeking ? (
                 <div className="text-zinc-500 text-[13px] py-4 flex items-center gap-2">

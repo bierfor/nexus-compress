@@ -26,7 +26,12 @@ async function tauriInvoke<T>(
   args: Record<string, unknown> = {}
 ): Promise<T> {
   if (!isTauri) {
-    console.log(`[stub] invoke ${cmd}`, args);
+    // Dev-mode fallback: the browser preview doesn't have a
+    // Tauri runtime, so the call is a no-op. We log to
+    // devtools so engineers can see which commands the UI
+    // would have issued (useful for testing layout in
+    // isolation).
+    console.debug(`[dev] invoke ${cmd}`, args);
     return {} as T;
   }
   const invoke = (window as any).__TAURI_INTERNALS__.invoke;

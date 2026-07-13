@@ -110,9 +110,12 @@ xz2 = "0.1"
 # - flate2 1: stream gzip decode. Already a transitive dep
 #   via xz2, but we declare it directly so the .gz branch
 #   is in our public API surface.
+# - bzip2-rs 0.1: pure-Rust BZ2 decoder. ~7k LoC, no C deps.
+#   Powers the .bz2 extract path.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
+bzip2-rs = "0.1"
 # Sprint 5.7.2 hotfix #32: zstd for fast V6Solid encoding.
 # zstd ~300-500 MB/s on Apple Silicon vs LZMA9 ~20-50 MB/s.
 # Streaming API supports concatenated frames (multi-chunk = no problem).
