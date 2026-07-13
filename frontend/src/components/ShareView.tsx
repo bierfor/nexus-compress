@@ -93,6 +93,13 @@ export function ShareView({
   // state without prop-drilling or context.
   const [shareResp, setShareResp] = useState<SendStartResp | null>(null);
 
+  // Sprint 5.7.21-B-Abstract: tabs at the top so the user
+  // picks ONE flow (Send or Receive) instead of seeing both
+  // flows + a "selling points" header competing for attention.
+  // Default to "send" because that's the more common path
+  // (the user has a file they want to share).
+  const [tab, setTab] = useState<"send" | "receive">("send");
+
   // Sprint 5.7: real share stats + recent share events so the
   // LinkPanel Actividad section shows actual past transfers,
   // not hardcoded placeholder text.
@@ -101,55 +108,65 @@ export function ShareView({
   const recentShareEvents = recentShares.filter((o) => o.kind === "share").slice(0, 3);
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-7xl mx-auto px-8 pt-8 pb-16">
-        {/* Header — title + 3 selling-point pills on the right */}
-        <div className="flex items-start justify-between mb-8 gap-6">
-          <div>
-            <h1 className="text-white text-[32px] font-semibold tracking-tight leading-tight">
-              {t("share.title")}
-            </h1>
-            <p className="text-zinc-500 text-[14px] mt-1.5">
-              {t("share.desc")}
-            </p>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <span className="chip chip-cyan">
-              <InfinityIcon size={11} />
-              {t("share.feature.unlimited")}
-            </span>
-            <span className="chip">{t("share.feature.nostorage")}</span>
-            <span className="chip chip-cyan">
-              <Shield size={11} />
-              {t("share.feature.e2e")}
-            </span>
-          </div>
+      <div className="max-w-3xl mx-auto px-8 pt-8 pb-16">
+        {/* Sprint 5.7.21-B-Abstract: the big page header
+            (h1 + 3 selling-point chips) is gone. The TopBar
+            already provides global nav; the per-page title
+            and the "Unlimited / No storage / E2E" marketing
+            chips were visual noise. The tabs below + the
+            panel content is the only thing the user needs. */}
+
+        {/* Tabs: Send | Receive */}
+        <div className="mb-8 inline-flex items-center gap-1 p-1 rounded-2xl border border-white/[0.06] bg-white/[0.02]">
+          <button
+            onClick={() => setTab("send")}
+            data-testid="share-tab-send"
+            data-active={tab === "send"}
+            className={
+              "px-5 py-2 rounded-xl text-[13px] font-medium transition-all " +
+              (tab === "send"
+                ? "bg-cyan-500/15 text-cyan-200 border border-cyan-500/30"
+                : "text-zinc-400 hover:text-zinc-200 border border-transparent")
+            }
+          >
+            {t("share.tab.send")}
+          </button>
+          <button
+            onClick={() => setTab("receive")}
+            data-testid="share-tab-receive"
+            data-active={tab === "receive"}
+            className={
+              "px-5 py-2 rounded-xl text-[13px] font-medium transition-all " +
+              (tab === "receive"
+                ? "bg-cyan-500/15 text-cyan-200 border border-cyan-500/30"
+                : "text-zinc-400 hover:text-zinc-200 border border-transparent")
+            }
+          >
+            {t("share.tab.receive")}
+          </button>
         </div>
 
-        {/* 2-column layout: Send flow | Link preview.
-            Sprint 5.7: fixed 3-col card-balanced layout (was 2-col).
-            SendPanel gets 5/12 cols, LinkPanel gets 7/12 cols. */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 mb-8">
-          <div className="lg:col-span-5">
+        {/* Active panel. The 2-col layout (Send | Link) is gone —
+            the LinkPanel renders as a sub-section below the
+            SendPanel once a share is active. The ReceivePanel
+            renders alone when the receive tab is active. */}
+        {tab === "send" ? (
+          <div className="space-y-5">
             <SendPanel onComplete={onComplete} onRespChange={setShareResp} />
+            {shareResp && (
+              <LinkPanel
+                resp={shareResp}
+                stats={stats}
+                recentShareEvents={recentShareEvents}
+                locale={locale}
+                t={t as (k: string, vars?: Record<string, string | number>) => string}
+                onNavigate={onNavigate}
+              />
+            )}
           </div>
-          <div className="lg:col-span-7">
-            <LinkPanel
-              resp={shareResp}
-              stats={stats}
-              recentShareEvents={recentShareEvents}
-              locale={locale}
-              t={t as (k: string, vars?: Record<string, string | number>) => string}
-              onNavigate={onNavigate}
-            />
-          </div>
-        </div>
-
-        {/* Receive panel below (full width on lg, single col on mobile) */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          <div className="lg:col-span-12">
-            <ReceivePanel />
-          </div>
-        </div>
+        ) : (
+          <ReceivePanel />
+        )}
       </div>
     </div>
   );
@@ -1139,29 +1156,15 @@ function LinkPanel({
             </div>
           )}
 
-          {/* Feature pills row */}
-          <div className="grid grid-cols-3 gap-2">
-            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex flex-col items-center gap-1.5 text-center">
-              <Clock size={16} className="text-amber-400" />
-              <p className="text-zinc-300 text-[11px] leading-tight">
-                {t("share.link.feature.expires")}
-              </p>
-            </div>
-            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex flex-col items-center gap-1.5 text-center">
-              <InfinityIcon size={16} className="text-cyan-400" />
-              <p className="text-zinc-300 text-[11px] leading-tight">
-                {t("share.link.feature.unlimited")}
-              </p>
-            </div>
-            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex flex-col items-center gap-1.5 text-center">
-              <Shield size={16} className="text-emerald-400" />
-              <p className="text-zinc-300 text-[11px] leading-tight">
-                {t("share.link.feature.e2e")}
-              </p>
-            </div>
-          </div>
+          {/* Feature pills row removed in 5.7.21-B-Abstract —
+              the 3 pills (Expiración / Ilimitado / E2E) just
+              repeated the selling points that used to live in
+              the page header. The user already knows the share
+              is encrypted + direct; no need to remind them. */}
 
-          {/* Vista previa */}
+          {/* Vista previa — kept: the user wants to confirm the
+              file is the one they sent (especially for transfers
+              that take >1 minute to connect). */}
           <div>
             <h3 className="text-zinc-400 text-[10px] tracking-[0.2em] uppercase font-medium mb-3">
               {t("share.link.preview")}
@@ -1181,53 +1184,45 @@ function LinkPanel({
             </div>
           </div>
 
-          {/* Actividad — Sprint 5.7: real past transfers from db.rs */}
+          {/* Actividad — Sprint 5.7: real past transfers from db.rs.
+              Kept compact (single column, no card per row) so it
+              doesn't compete with the link/token/QR above for
+              visual attention. */}
           <div>
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-zinc-400 text-[10px] tracking-[0.2em] uppercase font-medium">
                 {t("share.link.activity")}
               </h3>
-              <button
-                onClick={() => onNavigate && onNavigate("recent")}
-                className="text-zinc-500 hover:text-cyan-400 text-[10.5px] transition-colors flex items-center gap-1"
-              >
-                {t("share.link.activity.seeall")}
-                <ArrowRight size={10} />
-              </button>
+              {recentShareEvents.length > 0 && (
+                <button
+                  onClick={() => onNavigate && onNavigate("recent")}
+                  className="text-zinc-500 hover:text-cyan-400 text-[10.5px] transition-colors flex items-center gap-1"
+                >
+                  {t("share.link.activity.seeall")}
+                  <ArrowRight size={10} />
+                </button>
+              )}
             </div>
             {recentShareEvents.length === 0 ? (
-              <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-5 flex items-center gap-3">
-                <div className="w-9 h-9 rounded-full bg-white/[0.04] flex items-center justify-center text-zinc-500 shrink-0">
-                  <Clock size={16} />
-                </div>
-                <div>
-                  <p className="text-zinc-300 text-[12.5px] font-medium">
-                    {t("share.link.activity.empty")}
-                  </p>
-                  <p className="text-zinc-600 text-[11px] mt-0.5">
-                    {t("share.link.activity.hint")}
-                  </p>
-                </div>
-              </div>
+              <p className="text-zinc-600 text-[12px] italic">
+                {t("share.link.activity.empty")}
+              </p>
             ) : (
-              <div className="space-y-2">
+              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] divide-y divide-white/[0.04]">
                 {recentShareEvents.map((ev) => (
                   <div
                     key={ev.id}
-                    className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex items-center gap-3 hover:bg-white/[0.04] transition-colors"
+                    className="px-3 py-2 flex items-center gap-3"
                   >
-                    <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-                      <Send size={14} />
-                    </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-zinc-200 text-[12.5px] truncate font-medium">
+                      <p className="text-zinc-200 text-[12.5px] truncate">
                         {ev.filename}
                       </p>
-                      <p className="text-zinc-500 text-[10.5px] mt-0.5 font-mono">
+                      <p className="text-zinc-600 text-[10.5px] mt-0.5 font-mono">
                         {formatBytes(ev.originalBytes, locale)}
                       </p>
                     </div>
-                    <span className="text-zinc-500 text-[10.5px] shrink-0">
+                    <span className="text-zinc-500 text-[10.5px] shrink-0 tabular-nums">
                       {formatTimestampMs(ev.timestamp, t)}
                     </span>
                   </div>

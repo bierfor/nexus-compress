@@ -325,6 +325,12 @@ const ES = {
   // Share view
   "share.title": "Compartir",
   "share.desc": "Cifrado punto a punto · sin servidor · directo entre dispositivos.",
+  // Sprint 5.7.21-B-Abstract: tabs at the top of the share
+  // view. The user picks ONE flow (Send or Receive) instead of
+  // seeing both flows + a "selling points" header competing
+  // for attention.
+  "share.tab.send": "Enviar",
+  "share.tab.receive": "Recibir",
   "share.send.title": "Enviar",
   "share.feature.unlimited": "Sin límite de tamaño",
   "share.feature.nostorage": "Sin almacenamiento",
@@ -892,6 +898,8 @@ const EN: Record<keyof typeof ES, string> = {
 
   "share.title": "Share",
   "share.desc": "End-to-end encrypted · no server · direct device to device.",
+  "share.tab.send": "Send",
+  "share.tab.receive": "Receive",
   "share.send.title": "Send",
   "share.feature.unlimited": "No size limit",
   "share.feature.nostorage": "No storage",
@@ -1389,6 +1397,8 @@ const IT: Record<keyof typeof ES, string> = {
   // Share
   "share.title": "Condividi",
   "share.desc": "Cifrato end-to-end · senza server · diretto tra dispositivi.",
+  "share.tab.send": "Invia",
+  "share.tab.receive": "Ricevi",
   "share.send.title": "Invia",
   "share.feature.unlimited": "Nessun limite di dimensione",
   "share.feature.nostorage": "Nessuno storage",
