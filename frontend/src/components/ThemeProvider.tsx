@@ -33,7 +33,7 @@ const Ctx = createContext<ThemeCtx>({
   toggle: () => {},
 });
 
-const STORAGE_KEY = "nexusrar.theme";
+const STORAGE_KEY = "nexuscompress.theme";
 
 function applyTheme(t: Theme) {
   if (typeof document === "undefined") return;

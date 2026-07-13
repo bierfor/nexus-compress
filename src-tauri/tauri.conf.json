@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "NexusRAR",
+  "productName": "NexusCompress",
   "version": "0.3.0",
-  "identifier": "com.nexuscompress.nexusrar",
+  "identifier": "com.nexuscompress.app",
   "build": {
     "frontendDist": "../frontend/out",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "NexusRAR — Hybrid Compressor",
+        "title": "NexusCompress — Hybrid Compressor",
         "label": "main",
         "width": 1100,
         "height": 720,
@@ -45,6 +45,6 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "Hybrid compressor GUI (LZ77 + rANS + dict codec)",
-    "longDescription": "NexusRAR is the desktop GUI for NexusCompress, a hybrid compressor combining LZ77 lazy matching with a 5-stream rANS entropy coder and a per-block dictionary codec. Sprint 4.0 ships a Next.js + Tailwind dark-cyberpunk UI on top of the Tauri 2.x runtime."
+    "longDescription": "NexusCompress is a hybrid compressor combining LZ77 lazy matching with a 5-stream rANS entropy coder and a per-block dictionary codec. This Tauri 2.x desktop app is the GUI for the engine — Next.js + Tailwind dark cyberpunk UI on top of a Rust runtime."
   }
 }

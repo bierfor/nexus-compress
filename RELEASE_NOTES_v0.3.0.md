@@ -78,16 +78,16 @@ Best-in-class: LZMA-6 sweet spot for "I don't know what to pick".
 ## 📦 Installation
 
 ### macOS (Apple Silicon + Intel)
-- `NexusRAR-x.y.z-mac.zip` (DMG build is broken — see issue tracker)
+- `NexusCompress-x.y.z-mac.zip` (DMG build is broken — see issue tracker)
 - Drag `.app` to Applications
 
 ### Windows
-- `NexusRAR-x.y.z-x64.msi` — built on Windows runners (CI)
-- `NexusRAR-x.y.z-x64.exe` — alternative NSIS installer (CI)
+- `NexusCompress-x.y.z-x64.msi` — built on Windows runners (CI)
+- `NexusCompress-x.y.z-x64.exe` — alternative NSIS installer (CI)
 
 ### Linux
-- `nexus-rar_x.y.z_amd64.deb` (Debian/Ubuntu) — built on Linux runners (CI)
-- `nexus-rar-x.y.z.x86_64.rpm` (Fedora/RHEL) — TBD
+- `nexus-compress_x.y.z_amd64.deb` (Debian/Ubuntu) — built on Linux runners (CI)
+- `nexus-compress-x.y.z.x86_64.rpm` (Fedora/RHEL) — TBD
 - `AppImage` (universal) — TBD
 
 > **CI status**: The .msi / .deb / .rpm builds require their native

@@ -48,7 +48,7 @@ export function NeoTopBar({
           <Hexagon size={18} strokeWidth={2.5} fill="currentColor" />
         </div>
         <span className="text-white font-semibold text-[14px] tracking-tight">
-          NexusRAR
+          NexusCompress
         </span>
       </div>
 

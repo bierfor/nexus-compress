@@ -994,7 +994,7 @@ function LinkPanel({
   // Build a pretty URL for display. The token from the backend
   // already encodes the slug; we wrap it in a friendly URL.
   const linkUrl = resp
-    ? `https://nexusrar.app/d/${resp.code.toLowerCase()}`
+    ? `https://nexuscompress.dev/d/${resp.code.toLowerCase()}`
     : null;
 
   const onCopy = useCallback(async (text: string, which: "link" | "token") => {

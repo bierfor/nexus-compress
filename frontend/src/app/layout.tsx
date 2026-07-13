@@ -3,7 +3,7 @@ import "./globals.css";
 import { Providers } from "./Providers";
 
 export const metadata: Metadata = {
-  title: "NexusRAR",
+  title: "NexusCompress",
   description: "Hybrid compressor — LZ77 + rANS + dict codec",
 };
 

@@ -308,7 +308,7 @@ export function RecentView({ ops, onNavigate, onClear }: RecentViewProps) {
               <div className="flex items-center gap-2">
                 <HardDrive size={12} className="text-zinc-600" />
                 <span>{t("recent.footer.default")}</span>
-                <span className="text-zinc-300 font-mono">~/NexusRAR</span>
+                <span className="text-zinc-300 font-mono">~/NexusCompress</span>
                 <button className="ml-1 text-zinc-500 hover:text-white transition-colors">
                   <Pencil size={11} />
                 </button>

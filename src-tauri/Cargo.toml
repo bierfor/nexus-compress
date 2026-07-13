@@ -1,15 +1,15 @@
 [package]
-name = "nexus-rar"
+name = "nexus-compress-app"
 version = "0.3.0"
 edition = "2021"
-description = "NexusRAR — Tauri 2.x desktop GUI for NexusCompress"
+description = "NexusCompress — Tauri 2.x desktop GUI for the engine"
 license = "MIT"
-default-run = "nexus-rar"
+default-run = "nexus-compress"
 
 # The library is consumed by path: the engine is in the workspace
-# root (`../`), so `nexus-compress` resolves to the existing crate
+# root (`../`), so `nexus_compress` resolves to the existing crate
 # without duplication. Any local change to the engine is picked up
-# by `cargo build -p nexus-rar` automatically.
+# by `cargo build -p nexus-compress-app` automatically.
 [dependencies]
 nexus-compress = { path = "..", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -77,7 +77,7 @@ tauri-app = []  # marker feature; kept for forward compat
 # measuring handshake latency, throughput, and drop behavior
 # against the real Cloudflare Quick Tunnel.
 [[bin]]
-name = "nexus-rar"
+name = "nexus-compress"
 path = "src/main.rs"
 
 [[bin]]

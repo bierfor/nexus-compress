@@ -1,4 +1,4 @@
-//! Tauri 2.x entry point for NexusRAR.
+//! Tauri 2.x entry point for NexusCompress.
 //!
 //! The Tauri runtime is loaded here. The window config is in
 //! `tauri.conf.json`. The IPC commands are registered from
@@ -91,5 +91,5 @@ fn main() {
             commands::preview_corpus_cmd,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running NexusRAR Tauri app");
+        .expect("error while running NexusCompress Tauri app");
 }

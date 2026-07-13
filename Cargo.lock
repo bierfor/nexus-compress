@@ -609,6 +609,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bzip2-rs"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "beeb59e7e4c811ab37cc73680c798c7a5da77fc9989c62b09138e31ee740f735"
+dependencies = [
+ "crc32fast",
+ "tinyvec",
+]
+
+[[package]]
 name = "cairo-rs"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3053,7 +3063,9 @@ dependencies = [
  "aead",
  "aes-gcm",
  "argon2",
+ "bzip2-rs",
  "filetime",
+ "flate2",
  "fs2",
  "getrandom 0.2.17",
  "libc",
@@ -3064,6 +3076,7 @@ dependencies = [
  "serde_json",
  "swc_core",
  "sysinfo",
+ "tar",
  "tempfile",
  "thiserror 1.0.69",
  "xattr",
@@ -3074,7 +3087,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nexus-rar"
+name = "nexus-compress-app"
 version = "0.3.0"
 dependencies = [
  "aes-gcm",
