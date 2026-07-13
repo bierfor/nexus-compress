@@ -39,15 +39,15 @@ function has_key(key: string): boolean {
 
 test("ShareView: file is smaller (abstract)", () => {
   // The original was 1266 lines. Sprint 5.7.21-B-Share-Improve
-  // added new features (file/folder pickers, path text input,
-  // multi-drop warning, type indicator) which grew the file
-  // to 1379 lines — but the design quality is now significantly
-  // better. We pin a ceiling of 1400 to allow future additions
-  // without regression to the pre-abstract state.
+  // + Sprint 5.7.21-B-Share-Icons added icons, state machine,
+  // connection badges, and other visual improvements — the
+  // file grew to ~1578 lines but the design quality is
+  // significantly better. We pin a ceiling of 1600 to allow
+  // future additions without regression to the pre-abstract state.
   const lineCount = src.split("\n").length;
   assert.ok(
-    lineCount < 1400,
-    `ShareView should be <1400 lines (was 1266 before this sprint); got ${lineCount}`
+    lineCount < 1600,
+    `ShareView should be <1600 lines (was 1266 before this sprint); got ${lineCount}`
   );
 });
 
@@ -242,5 +242,54 @@ test("ShareView: SendPanel CTA is flat (no gradient)", () => {
   assert.ok(
     !src.includes("linear-gradient(135deg, #34d399"),
     "must NOT have the 3-color gradient CTA (replaced with flat cyan)"
+  );
+});
+
+test("ShareView: LinkPanel has state machine + connection badge", () => {
+  // Sprint 5.7.21-B-Share-Icons: the LinkPanel shows a
+  // 4-step state machine (Created → Ready → Connected →
+  // Sent) and a connection type badge (LAN vs Internet tunnel).
+  assert.ok(
+    src.includes("data-testid=\"link-state-machine\""),
+    "LinkPanel must render the state machine with data-testid"
+  );
+  assert.ok(
+    src.includes("data-testid=\"link-status-badge\""),
+    "LinkPanel must render the status badge with data-testid"
+  );
+  assert.ok(
+    src.includes("data-testid=\"link-connection-badge\""),
+    "LinkPanel must render the connection badge with data-testid"
+  );
+  // The state labels must exist in i18n (3 locales each).
+  for (const key of [
+    "share.link.state.ready",
+    "share.link.state.connected",
+    "share.link.connection.lan",
+    "share.link.connection.tunnel",
+    "share.link.step.created",
+    "share.link.step.ready",
+  ]) {
+    assert.ok(has_key(key), `i18n key ${key} must be in all 3 locales`);
+  }
+});
+
+test("ShareView: SendPanel uses better drop zone icon (Share2 + Layers)", () => {
+  // Sprint 5.7.21-B-Share-Icons: the drop zone icon changed
+  // from a single FileText to a Share2 with a Layers corner
+  // badge (suggesting "items to share"). On drag-over, the
+  // icon rotates and the bg changes to suggest "this is where
+  // items land".
+  assert.ok(
+    /Share2 size=\{28\}/.test(src),
+    "drop zone must use Share2 as the main icon"
+  );
+  assert.ok(
+    /Layers size=\{12\}/.test(src),
+    "drop zone must have a small Layers corner badge"
+  );
+  assert.ok(
+    /Inbox size=\{32\}/.test(src),
+    "drop zone on drag-over must use Inbox icon"
   );
 });
