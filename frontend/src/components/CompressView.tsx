@@ -24,10 +24,8 @@ import {
   AlertCircle,
   File as FileIcon,
   FilePlus,
-  ChevronDown,
-  ChevronRight,
-  Save,
-  Trash2,
+  Settings as SettingsIcon,
+  Sliders,
 } from "lucide-react";
 import {
   type CompressionProfile,
@@ -39,16 +37,19 @@ import {
   saveCustomProfiles,
   profilesEqual,
 } from "@/lib/profiles";
-// Sprint 5.7.21-B-Remodel: extracted sub-components for
-// the new Compress flow. The stepper (4 steps with
-// checkmarks) replaces the implicit "figure it out from
-// the layout" pattern; the PresetCard grid replaces the
-// old chip bar (easier to compare options); the StickyBar
-// replaces the in-flow button so the Compress action is
-// always visible regardless of scroll position.
+// Sprint 5.7.21-B-Abstract: the Compress page is now
+// abstract — the configuration UI (5-section accordion +
+// 7-card preset grid + savings preview) is gone from the
+// main view. The user sees: drop zone + active preset chip
+// + Compress action. All fine-tuning lives behind a single
+// "Configure" button that opens the SettingsDrawer (slide-in
+// from the right). The PresetPicker is the chip + popover
+// that replaces the old PresetCard grid.
 import { CompressStepper } from "./CompressStepper";
-import { PresetCard } from "./PresetCard";
 import { CompressStickyBar } from "./CompressStickyBar";
+import { CompressSuccess } from "./CompressSuccess";
+import { SettingsDrawer } from "./SettingsDrawer";
+import { PresetPicker } from "./PresetPicker";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -121,11 +122,13 @@ type Mode = "rapido" | "balanceado" | "ultra";
 type CodecChoice = "auto" | "lzma" | "zstd";
 
 // Static data — titles and descriptions come from t()
-const CODECS: { id: CodecChoice; icon: string }[] = [
-  { id: "auto", icon: "🪄" },
-  { id: "lzma", icon: "💎" },
-  { id: "zstd", icon: "⚡" },
-];
+//
+// Sprint 5.7.21-B-Abstract: the CODECS, FIDELITY, and
+// CORPUS_MODES arrays now live in SettingsDrawer.tsx
+// (where the chips are actually rendered). The type
+// aliases below are still useful as TS type-level
+// documentation of the choices, so we keep them but
+// drop the runtime arrays.
 
 // Sprint 5.7.3 hotfix #49: fidelity toggle. The codec toggle
 // (Auto | LZMA | Zstd) decides WHICH entropy coder to use; the
@@ -143,17 +146,6 @@ type FidelityChoice = "lossy" | "lossless";
 // backups). "minimal" = only source code + manifests,
 // highest ratio but cannot rebuild.
 type CorpusModeChoice = "everything" | "source" | "minimal";
-
-const CORPUS_MODES: { id: CorpusModeChoice; icon: string; desc: string }[] = [
-  { id: "everything", icon: "📦", desc: "compress.corpus.everything.desc" },
-  { id: "source",     icon: "📝", desc: "compress.corpus.source.desc" },
-  { id: "minimal",    icon: "✨", desc: "compress.corpus.minimal.desc" },
-];
-
-const FIDELITY: { id: FidelityChoice; icon: string }[] = [
-  { id: "lossy", icon: "✨" },
-  { id: "lossless", icon: "🔒" },
-];
 
 // Only backend/static data — titles and descriptions come from t()
 //
@@ -197,23 +189,13 @@ export function CompressView({
   useEffect(() => {
     saveCustomProfiles(customProfiles);
   }, [customProfiles]);
-  // Which sections of the accordion are open. The
-  // active preset pre-opens relevant sections so the
-  // user can see what the preset changes.
-  const [openSections, setOpenSections] = useState<Set<string>>(
-    new Set(["presets"])
-  );
-  const toggleSection = (id: string) => {
-    setOpenSections((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-  // Editable name for the "save as custom" dialog.
-  const [saveAsName, setSaveAsName] = useState("");
-  const [showSaveAs, setShowSaveAs] = useState(false);
+  // Sprint 5.7.21-B-Abstract: settings drawer open state
+  // (closed by default). The "Configure" button toggles
+  // it. The drawer is rendered as a z-50 overlay at the
+  // end of the JSX tree. The previous `openSections`
+  // accordion state is gone — the drawer is for users
+  // who want to fine-tune, not a default UI.
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // Legacy individual setters removed in 5.7.8 —
   // the profile is the single source of truth. The
   // invoke and the renders below read directly from
@@ -515,14 +497,12 @@ export function CompressView({
     };
     setProfile(next);
     setActivePresetId(p.id);
-    // Pre-open the Advanced and Security sections if
-    // the preset touches them. Keeps the default
-    // collapsed view tidy for users who only want
-    // the preset's defaults.
-    const open = new Set<string>(["presets"]);
-    if (p.rawExtensions || p.minifyExtensions) open.add("advanced");
-    if (p.encrypt) open.add("security");
-    setOpenSections(open);
+    // Sprint 5.7.21-B-Abstract: the previous implementation
+    // pre-opened accordion sections based on the preset.
+    // The accordion is gone now — every preset's settings
+    // are immediately available in the SettingsDrawer
+    // (and the drawer is closed by default, so it doesn't
+    // matter). Nothing to pre-open here.
   }, []);
 
   // Save the current profile as a custom preset.
@@ -737,21 +717,10 @@ export function CompressView({
     return t("compress.btn");
   }, [busy, progress, progressPct, lastSuccess, t]);
 
-  // Mode title/desc helpers
-  const getModeTitle = (id: Mode) => {
-    if (id === "rapido") return t("mode.fast.title");
-    if (id === "balanceado") return t("mode.balanced.title");
-    return t("mode.ultra.title");
-  };
-  const getModeDesc = (id: Mode) => {
-    if (id === "rapido") return t("mode.fast.desc");
-    if (id === "balanceado") return t("mode.balanced.desc");
-    return t("mode.ultra.desc");
-  };
-
-  // Estimated savings for the preview
-  const estSavings =
-    profile.mode === "rapido" ? 0.15 : profile.mode === "balanceado" ? 0.35 : 0.5;
+  // Sprint 5.7.21-B-Abstract: getModeTitle/getModeDesc/estSavings
+  // are gone — the savings preview card is removed (the user
+  // gets the real number on the success screen, no need for
+  // a noisy estimate in the main flow).
 
   return (
     <div
@@ -780,217 +749,134 @@ export function CompressView({
         </div>
       )}
 
-      <div className="max-w-4xl mx-auto px-8 pt-12 pb-20">
-        {/* Header */}
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[12px] tracking-wide mb-2">
-            <button
-              onClick={() => onNavigate("landing")}
-              className="hover:text-zinc-300 transition-colors"
-            >
-              {t("back")}
-            </button>
-          </div>
-          <h1 className="text-white text-[36px] font-semibold tracking-tight mb-3">
-            {t("compress.title")}
-          </h1>
-          <p className="text-zinc-400 text-[14px] leading-relaxed max-w-2xl">
-            {t("compress.desc")}
-          </p>
-        </div>
+      <div className="max-w-5xl mx-auto px-8 pt-8 pb-20">
+        {/* Sprint 5.7.21-B-Cleanup: the page header is gone.
+            The TopBar already provides global nav; a per-page
+            "Comprimir" title + "Arrastra archivos..." description
+            on top of that was visual noise. The stepper (right
+            below) tells the user WHERE they are; the drop zone
+            (the next section) tells them WHAT to do. */}
 
-        {/* Sprint 5.7.21-B-Remodel: 4-step flow indicator.
-            Active step is computed from state: if no files
-            yet → step 0 (Files). Files picked but no preset
-            yet → step 1 (Profile). Preset picked but no dest
-            → step 2 (Output). Ready → step 3 (Compress). */}
-        <CompressStepper
-          steps={[
-            { id: "files", labelKey: "compress.step.files", hintKey: "compress.step.files.hint" },
-            { id: "profile", labelKey: "compress.step.profile", hintKey: "compress.step.profile.hint" },
-            { id: "output", labelKey: "compress.step.output", hintKey: "compress.step.output.hint" },
-            { id: "compress", labelKey: "compress.step.compress", hintKey: "compress.step.compress.hint" },
-          ]}
-          activeIndex={
-            files.length === 0
-              ? 0
-              : activePresetId === null && !profilesEqual(profile, DEFAULT_PROFILE)
-                ? 1
-                : !destDir
-                  ? 2
-                  : 3
-          }
-        />
+        {/* Sprint 5.7.21-B-Cleanup: when lastSuccess is set
+            AND the user is not actively compressing, the
+            whole screen becomes a "success takeover" view.
+            The CompressSuccess component owns the layout —
+            no stepper, no drop zone, no preset grid, no
+            accordion. The user just sees the result and two
+            clear actions. They click "Compress another" to
+            come back to the configuration flow. */}
 
-        {/* Sprint 5.7.2 hotfix #24: success card. Shows WHERE the
-            output file was saved and gives the user a way to
-            reveal it in Finder or kick off another compression
-            without leaving the view. Replaces the old behavior
-            of silently clearing everything the moment the
-            toast fired. */}
-        {lastSuccess && !busy && (
-          <div className="mb-10 p-6 rounded-2xl bg-gradient-to-br from-emerald-500/[0.08] to-cyan-500/[0.04] border border-emerald-500/20">
-            <div className="flex items-start gap-4">
-              <div className="flex-shrink-0 w-12 h-12 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400 text-[24px]">
-                ✓
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-emerald-300 text-[15px] font-semibold tracking-tight mb-1">
-                  {t("compress.success.title")} {lastSuccess.encrypted && "🔒"}
-                </div>
-                <div className="text-zinc-300 text-[13px] mb-3">
-                  <span className="font-mono">{lastSuccess.inputFilename}</span>
-                  {" → "}
-                  <span className="text-emerald-300 font-medium">
-                    {prettyBytes(lastSuccess.compressedSize)}
-                  </span>
-                  <span className="text-zinc-500">
-                    {" "}({Math.round((1 - lastSuccess.compressedSize / lastSuccess.originalSize) * 100)}% {t("compress.success.smaller")}){" "}
-                    {t("compress.success.in")} {(lastSuccess.durationMs / 1000).toFixed(1)}s
-                  </span>
-                </div>
-                <div className="text-zinc-500 text-[11px] mb-4 font-mono break-all">
-                  📁 {lastSuccess.outputPath}
-                </div>
-
-                {/* Sprint 5.7.2 hotfix #44: show the user how many bytes
-                    were skipped by the dev-cache filter, so a low
-                    ratio on a corpus like secretaria/ (50% .next cache)
-                    doesn't look like a bug. */}
-                {lastSuccess.skippedBytes && lastSuccess.skippedBytes > 0 && (
-                  <div className="text-amber-300/90 text-[11.5px] mb-3 flex items-start gap-2 bg-amber-500/[0.06] border border-amber-500/15 rounded-lg px-3 py-2">
-                    <span className="flex-shrink-0 text-[14px] leading-none">ℹ️</span>
-                    <span>
-                      <span className="font-semibold">{t("compress.success.skipped.title")}</span>{" "}
-                      {t("compress.success.skipped.body").replace(
-                        "{bytes}",
-                        prettyBytes(lastSuccess.skippedBytes)
-                      )}
-                    </span>
-                  </div>
-                )}
-                {/* Sprint 5.7.9 part 6: corpus breakdown by category.
-                    Shown when the build-artifact share is high (the
-                    most common case where compression ratio is
-                    honestly low because the corpus is mostly
-                    already-compressed binaries). The user is
-                    pointed at Source mode which skips build
-                    artifacts. */}
-                {lastSuccess.corpusBreakdown && (() => {
-                  const b = lastSuccess.corpusBreakdown!;
-                  const total = b.sourceBytes + b.buildArtifactBytes + b.otherBytes;
-                  if (total === 0) return null;
-                  const buildPct = (b.buildArtifactBytes / total) * 100;
-                  if (buildPct < 50) return null;
-                  return (
-                    <div className="text-amber-300/90 text-[11.5px] mb-3 flex items-start gap-2 bg-amber-500/[0.06] border border-amber-500/15 rounded-lg px-3 py-2">
-                      <span className="flex-shrink-0 text-[14px] leading-none">💡</span>
-                      <span>
-                        <span className="font-semibold">
-                          {t("compress.success.breakdown.title").replace(
-                            "{pct}",
-                            buildPct.toFixed(0)
-                          )}
-                        </span>{" "}
-                        {t("compress.success.breakdown.bytes").replace(
-                          "{bytes}",
-                          prettyBytes(b.buildArtifactBytes)
-                        )}{" "}
-                        {t("compress.success.breakdown.explainer")}{" "}
-                        {t("compress.success.breakdown.suggest")}
-                      </span>
-                    </div>
-                  );
-                })()}
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={async () => {
-                      if (!isTauri) return;
-                      try {
-                        const { invoke } = await import("@tauri-apps/api/core");
-                        await invoke("reveal_in_finder_cmd", { path: lastSuccess.outputPath });
-                      } catch (e) {
-                        console.error("reveal failed:", e);
-                        // Sprint 5.7.21-B-Cleanup: show a generic
-                        // error message to the user and log the
-                        // raw exception to console. The user
-                        // doesn't need to see "Error: spawn EBADF"
-                        // — they need to know "reveal in Finder
-                        // didn't work".
-                        setToast({ kind: "err", msg: t("compress.error.reveal_failed") });
-                      }
-                    }}
-                    className="px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[12.5px] font-medium transition-colors"
-                  >
-                    📂 {t("compress.success.reveal")}
-                  </button>
-                  <button
-                    onClick={() => setLastSuccess(null)}
-                    className="px-4 py-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-300 text-[12.5px] font-medium transition-colors"
-                  >
-                    🔄 {t("compress.success.another")}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
+        {/* Sprint 5.7.21-B-Cleanup: hide the stepper when the
+            success takeover is active (CompressSuccess has its
+            own visual). The stepper only makes sense in the
+            configuration flow. */}
+        {!lastSuccess && (
+          <CompressStepper
+            steps={[
+              { id: "files", labelKey: "compress.step.files", hintKey: "compress.step.files.hint" },
+              { id: "profile", labelKey: "compress.step.profile", hintKey: "compress.step.profile.hint" },
+              { id: "output", labelKey: "compress.step.output", hintKey: "compress.step.output.hint" },
+              { id: "compress", labelKey: "compress.step.compress", hintKey: "compress.step.compress.hint" },
+            ]}
+            activeIndex={
+              files.length === 0
+                ? 0
+                : activePresetId === null && !profilesEqual(profile, DEFAULT_PROFILE)
+                  ? 1
+                  : !destDir
+                    ? 2
+                    : 3
+            }
+          />
         )}
+        {lastSuccess && !busy ? (
+          <CompressSuccess
+            info={lastSuccess}
+            isTauri={isTauri}
+            onAnother={() => setLastSuccess(null)}
+            onReveal={async (path) => {
+              if (!isTauri) return "Tauri only";
+              try {
+                const { invoke } = await import("@tauri-apps/api/core");
+                await invoke("reveal_in_finder_cmd", { path });
+                return null;
+              } catch (e) {
+                console.error("reveal failed:", e);
+                return String((e as Error)?.message ?? e);
+              }
+            }}
+          />
+        ) : null}
 
-        {/* Big drop zone */}
-        <div className="mb-10">
+        {/* Sprint 5.7.21-B-Cleanup: the entire configuration
+            flow (drop zone, preset grid, accordion, savings
+            preview) is hidden when the success takeover is
+            active. The user sees ONLY the success state and
+            two clear actions — the configuration UI is not
+            visible until they click "Compress another". */}
+        {!lastSuccess && (
+          <>
+        {/* Sprint 5.7.21-B-Abstract: hero drop zone. The
+            abstract design reduces the icon size (80 → 36)
+            and tightens the padding (py-20 → py-12) so the
+            drop zone is a calm container, not a "look at
+            me" callout. The user reads the title, types a
+            path or drops a file, moves on. No fanfare. */}
+        <div className="mb-8">
           {files.length === 0 ? (
             <div
-              className={`relative p-16 text-center ${
-                dragOver ? "dropzone is-dragover" : "dropzone"
+              className={`relative rounded-2xl border-2 border-dashed transition-all duration-200 px-8 py-12 text-center ${
+                dragOver
+                  ? "border-cyan-400/60 bg-cyan-500/[0.04]"
+                  : "border-white/[0.08] hover:border-white/[0.16] bg-white/[0.015]"
               }`}
+              onDragOver={onDragOver}
+              onDragLeave={onDragLeave}
+              onDrop={onDrop}
             >
-              <div className="text-cyan-400 mb-6 select-none inline-block transition-transform duration-300" style={{ transform: dragOver ? "scale(1.15) rotate(-6deg)" : "scale(1)" }}>
-                <Archive size={64} strokeWidth={1.4} />
+              <div
+                className="text-cyan-400/70 mb-5 select-none inline-block transition-transform duration-300"
+                style={{ transform: dragOver ? "scale(1.1) rotate(-4deg)" : "scale(1)" }}
+              >
+                <Archive size={36} strokeWidth={1.3} />
               </div>
-              <h3 className="text-white text-[20px] font-medium mb-2">
+              <h3 className="text-white text-[20px] font-medium tracking-tight mb-1.5">
                 {dragOver ? t("compress.drop.active") : t("compress.drop")}
               </h3>
-              <p className="text-zinc-500 text-[13px] mb-6">
+              <p className="text-zinc-500 text-[13px] mb-6 max-w-md mx-auto">
                 {t("compress.drop.hint")}
               </p>
-              <div className="flex items-center gap-2 max-w-2xl mx-auto flex-wrap">
+              <div className="flex items-center gap-2 max-w-xl mx-auto flex-wrap justify-center">
                 <input
                   type="text"
                   value={pathInput}
                   onChange={(e) => setPathInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && onAddPath()}
                   placeholder={t("compress.placeholder")}
-                  className="input flex-1 min-w-[200px]"
+                  className="flex-1 min-w-[180px] px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white text-[13px] placeholder:text-zinc-600 focus:outline-none focus:border-cyan-400/40 focus:bg-white/[0.06] transition-all"
                 />
-                {/* Archivos — multi-select file picker with no
-                    extension filter (the previous `["*"]` filter
-                    was restricting on macOS). */}
                 <button
                   onClick={onBrowseFiles}
-                  className="btn btn-ghost"
+                  className="px-3 py-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-300 hover:text-white text-[12.5px] font-medium transition-all flex items-center gap-1.5"
                   title={t("compress.browse.files")}
                 >
-                  <FilePlus size={14} />
+                  <FilePlus size={13} />
                   {t("compress.browse.files")}
                 </button>
-                {/* Carpetas — multi-select directory picker.
-                    The pipeline (`compress_target_cmd`) walks
-                    folders recursively, so any directory just
-                    works. */}
                 <button
                   onClick={onBrowseFolders}
-                  className="btn btn-ghost"
+                  className="px-3 py-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-300 hover:text-white text-[12.5px] font-medium transition-all flex items-center gap-1.5"
                   title={t("compress.browse.folders")}
                 >
-                  <FolderOpen size={14} />
+                  <FolderOpen size={13} />
                   {t("compress.browse.folders")}
                 </button>
                 <button
                   onClick={onAddPath}
                   disabled={!pathInput.trim()}
-                  className="btn btn-primary"
+                  className="px-3 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[12.5px] font-medium transition-all flex items-center gap-1.5 disabled:opacity-30 disabled:hover:bg-cyan-500/15"
                 >
-                  <Plus size={14} />
+                  <Plus size={13} />
                   {t("compress.add")}
                 </button>
               </div>
@@ -1031,456 +917,49 @@ export function CompressView({
         </div>
 
 
-        {/* Sprint 5.7.8: profile + accordion UI.
-            Replaces the 5 separate horizontal selector
-            blocks (Mode / Codec / Fidelity / Corpus /
-            Advanced / Encryption) with:
-              1. A horizontal preset bar at the top
-                 (chips: built-in presets + custom).
-              2. An accordion of 5 sections: Speed,
-                 Quality, Corpus, Advanced, Security.
-                 Each section is collapsed by default;
-                 clicking the header toggles it.
-            The active preset is highlighted. When the
-            user edits a field inside the accordion, the
-            chip loses its active state and a "Save as
-            custom" button appears. */}
+        {/* Sprint 5.7.21-B-Abstract: the configuration UI is
+            now a single chip + a "Configure" button. The
+            previous 3-column PresetCard grid + 5-section
+            accordion + savings preview are all gone from
+            the main view. The user sees:
+              - the active preset (chip, with chevron for
+                the popover that lists all presets)
+              - a small "Configure" button that opens the
+                settings drawer (slide-in panel)
+            That's it. The Compress action lives in the
+            sticky bar at the bottom. */}
 
-        {/* Preset bar */}
-        <div className="mb-6">
-          <div className="flex items-baseline gap-3 mb-3">
-            <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase">
-              {t("compress.profile.title")}
-            </div>
-            <div className="text-zinc-600 text-[11px]">
-              {t("compress.profile.desc")}
-            </div>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {BUILTIN_PRESETS.map((p) => (
-              <PresetCard
-                key={p.id}
-                preset={p}
-                active={activePresetId === p.id}
-                onApply={(q) => applyPreset(q)}
-                disabled={busy}
-              />
-            ))}
-            {customProfiles.map((p) => {
-              const active = activePresetId === p.id;
-              return (
-                <div key={p.id} className="relative group">
-                  <button
-                    onClick={() => applyPreset(p)}
-                    disabled={busy}
-                    className={`pl-3.5 pr-7 py-2 rounded-full border text-[12px] transition-all disabled:opacity-50 ${
-                      active
-                        ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-100 shadow-[0_0_0_1px_rgba(52,211,153,0.15)]"
-                        : "border-white/[0.08] bg-white/[0.02] text-zinc-300 hover:border-white/[0.16] hover:bg-white/[0.04]"
-                    }`}
-                  >
-                    <span className="mr-1.5">⭐</span>
-                    <span className="font-medium">{p.name}</span>
-                  </button>
-                  <button
-                    onClick={() => deleteCustom(p.id)}
-                    disabled={busy}
-                    aria-label={t("compress.profile.delete")}
-                    className="absolute right-1 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center"
-                  >
-                    <Trash2 size={11} />
-                  </button>
-                </div>
-              );
-            })}
-            {/* Save current as custom */}
-            {profileIsCustom && (
-              <button
-                onClick={() => {
-                  setSaveAsName("");
-                  setShowSaveAs(true);
-                }}
-                disabled={busy}
-                className="px-3 py-2 rounded-full border border-dashed border-amber-400/40 bg-amber-400/[0.04] text-amber-200 hover:bg-amber-400/[0.08] text-[12px] transition-all disabled:opacity-50 flex items-center gap-1.5"
-              >
-                <Save size={12} />
-                {t("compress.profile.save_as_custom")}
-              </button>
-            )}
-          </div>
+        {/* Preset + Configure row */}
+        <div className="mb-6 flex items-center justify-center gap-2">
+          <PresetPicker
+            activePreset={
+              activePresetId
+                ? BUILTIN_PRESETS.find((p) => p.id === activePresetId) ??
+                  customProfiles.find((p) => p.id === activePresetId)
+                : undefined
+            }
+            customProfiles={customProfiles}
+            applyPreset={applyPreset}
+            profileIsCustom={profileIsCustom}
+            saveAsCustom={saveAsCustom}
+            deleteCustom={deleteCustom}
+            onOpenSettings={() => setSettingsOpen(true)}
+            busy={busy}
+          />
+          <button
+            onClick={() => setSettingsOpen(true)}
+            disabled={busy}
+            aria-label={t("compress.configure.tooltip")}
+            title={t("compress.configure.tooltip")}
+            data-testid="configure-button"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-white/[0.08] bg-white/[0.02] text-zinc-400 hover:text-white hover:bg-white/[0.05] hover:border-white/[0.16] text-[12px] font-medium transition-all disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+          >
+            <Sliders size={12} />
+            {t("compress.configure")}
+          </button>
         </div>
 
-        {/* Accordion of detailed controls */}
-        <div className="mb-10 rounded-2xl border border-white/[0.06] bg-white/[0.015] divide-y divide-white/[0.06] overflow-hidden">
-          {(
-            [
-              {
-                id: "speed",
-                title: t("compress.section.speed"),
-                desc: t("compress.section.speed.desc"),
-                icon: "⚡",
-                body: (
-                  <div className="space-y-5">
-                    <div>
-                      <div className="text-zinc-400 text-[11px] uppercase tracking-wider mb-2">
-                        {t("compress.mode")}
-                      </div>
-                      <div className="grid grid-cols-3 gap-2">
-                        {MODES.map((m) => {
-                          const active = profile.mode === m.id;
-                          return (
-                            <button
-                              key={m.id}
-                              onClick={() => updateProfile({ mode: m.id })}
-                              disabled={busy}
-                              title={t(`compress.mode.${m.id}.tooltip`)}
-                              className={`text-left p-3 rounded-xl border transition-all disabled:opacity-50 ${
-                                active
-                                  ? "border-cyan-500/40 bg-cyan-500/[0.06]"
-                                  : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
-                              }`}
-                            >
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="text-[15px]">{m.icon}</span>
-                                <span className="text-white text-[13px] font-medium">
-                                  {getModeTitle(m.id)}
-                                </span>
-                                <span className="ml-auto text-[9px] text-zinc-500 font-mono">
-                                  {m.defaultCodec}
-                                </span>
-                              </div>
-                              <div className="text-zinc-500 text-[10.5px] leading-snug">
-                                {t(`compress.mode.${m.id}.desc`)}
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-zinc-400 text-[11px] uppercase tracking-wider mb-2">
-                        {t("compress.codec")}
-                      </div>
-                      <div className="grid grid-cols-3 gap-2">
-                        {CODECS.map((c) => {
-                          const active = profile.codec === c.id;
-                          return (
-                            <button
-                              key={c.id}
-                              onClick={() => updateProfile({ codec: c.id })}
-                              disabled={busy}
-                              title={t(`compress.codec.${c.id}.tooltip`)}
-                              className={`p-3 rounded-xl border transition-all disabled:opacity-50 ${
-                                active
-                                  ? "border-violet-500/40 bg-violet-500/[0.06]"
-                                  : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
-                              }`}
-                            >
-                              <div className="flex items-center gap-2">
-                                <span className="text-[15px]">{c.icon}</span>
-                                <span className="text-white text-[13px] font-medium">
-                                  {t(`compress.codec.${c.id}`)}
-                                </span>
-                              </div>
-                              <div className="text-zinc-500 text-[10.5px] leading-snug mt-1">
-                                {t(`compress.codec.${c.id}.desc`)}
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>
-                ),
-              },
-              {
-                id: "quality",
-                title: t("compress.section.quality"),
-                desc: t("compress.section.quality.desc"),
-                icon: "✨",
-                body: (
-                  <div className="space-y-4">
-                    <div className="text-zinc-400 text-[11px] uppercase tracking-wider mb-2">
-                      {t("compress.fidelity")}
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      {FIDELITY.map((f) => {
-                        const active = profile.fidelity === f.id;
-                        return (
-                          <button
-                            key={f.id}
-                            onClick={() => updateProfile({ fidelity: f.id })}
-                            disabled={busy}
-                            className={`text-left p-3 rounded-xl border transition-all disabled:opacity-50 ${
-                              active
-                                ? "border-amber-500/40 bg-amber-500/[0.06]"
-                                : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-[15px]">{f.icon}</span>
-                              <span className="text-white text-[13px] font-medium">
-                                {t(`compress.fidelity.${f.id}`)}
-                              </span>
-                            </div>
-                            <div className="text-zinc-500 text-[10.5px] leading-snug">
-                              {t(`compress.fidelity.${f.id}.desc`)}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ),
-              },
-              {
-                id: "corpus",
-                title: t("compress.section.corpus"),
-                desc: t("compress.section.corpus.desc"),
-                icon: "📂",
-                body: (
-                  <div className="space-y-3">
-                    {CORPUS_MODES.map((m) => {
-                      const active = profile.corpusMode === m.id;
-                      return (
-                        <button
-                          key={m.id}
-                          onClick={() => updateProfile({ corpusMode: m.id })}
-                          disabled={busy}
-                          className={`w-full text-left p-3 rounded-xl border transition-all disabled:opacity-50 ${
-                            active
-                              ? "border-emerald-500/40 bg-emerald-500/[0.06]"
-                              : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
-                          }`}
-                        >
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-[15px]">{m.icon}</span>
-                            <span className="text-white text-[13px] font-medium">
-                              {t(`compress.corpus.${m.id}`)}
-                            </span>
-                            {active && (
-                              <span className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                            )}
-                          </div>
-                          <div className="text-zinc-500 text-[10.5px] leading-snug">
-                            {t(`compress.corpus.${m.id}.desc`)}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                ),
-              },
-              {
-                id: "advanced",
-                title: t("compress.section.advanced"),
-                desc: t("compress.section.advanced.desc"),
-                icon: "🛠",
-                body: (
-                  <div className="space-y-3">
-                    <div>
-                      <label className="block text-zinc-400 text-[11px] uppercase tracking-wider mb-1.5">
-                        {t("compress.advanced.raw.label")}
-                      </label>
-                      <input
-                        type="text"
-                        value={profile.rawExtensions}
-                        onChange={(e) =>
-                          updateProfile({ rawExtensions: e.target.value })
-                        }
-                        placeholder={t("compress.advanced.raw.placeholder")}
-                        disabled={busy || profile.fidelity === "lossless"}
-                        className="w-full bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 text-[12px] font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500 disabled:opacity-40"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-zinc-400 text-[11px] uppercase tracking-wider mb-1.5">
-                        {t("compress.advanced.minify.label")}
-                      </label>
-                      <input
-                        type="text"
-                        value={profile.minifyExtensions}
-                        onChange={(e) =>
-                          updateProfile({ minifyExtensions: e.target.value })
-                        }
-                        placeholder={t("compress.advanced.minify.placeholder")}
-                        disabled={busy || profile.fidelity === "lossless"}
-                        className="w-full bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 text-[12px] font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500 disabled:opacity-40"
-                      />
-                    </div>
-                    {profile.fidelity === "lossless" && (
-                      <div className="text-zinc-500 text-[10.5px] italic">
-                        {t("compress.advanced.disabled_lossless")}
-                      </div>
-                    )}
-                  </div>
-                ),
-              },
-              {
-                id: "security",
-                title: t("compress.section.security"),
-                desc: t("compress.section.security.desc"),
-                icon: "🔐",
-                body: (
-                  <div className="space-y-3">
-                    <label className="flex items-center justify-between p-3 rounded-xl border border-white/[0.06] bg-white/[0.02] cursor-pointer">
-                      <div>
-                        <div className="text-white text-[12.5px] font-medium">
-                          {t("compress.encrypt.label")}
-                        </div>
-                        <div className="text-zinc-500 text-[10.5px] leading-snug">
-                          {t("compress.encrypt.desc")}
-                        </div>
-                      </div>
-                      <input
-                        type="checkbox"
-                        checked={profile.encrypt}
-                        onChange={(e) =>
-                          updateProfile({ encrypt: e.target.checked })
-                        }
-                        disabled={busy}
-                        className="w-4 h-4 accent-cyan-500 cursor-pointer disabled:opacity-50"
-                      />
-                    </label>
-                    {profile.encrypt && (
-                      <>
-                        <div>
-                          <label className="block text-zinc-400 text-[11px] uppercase tracking-wider mb-1.5">
-                            {t("compress.password.label")}
-                          </label>
-                          <div className="relative">
-                            <input
-                              type={showPwd ? "text" : "password"}
-                              value={password}
-                              onChange={(e) => setPassword(e.target.value)}
-                              placeholder={t("compress.password.placeholder")}
-                              autoComplete="new-password"
-                              spellCheck={false}
-                              disabled={busy}
-                              className="w-full bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 pr-9 text-[12px] font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setShowPwd((s) => !s)}
-                              tabIndex={-1}
-                              disabled={busy}
-                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200 text-[10px] uppercase tracking-wider px-1.5 py-0.5"
-                            >
-                              {showPwd ? t("compress.password.hide") : t("compress.password.show")}
-                            </button>
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-zinc-400 text-[11px] uppercase tracking-wider mb-1.5">
-                            {t("compress.recovery.label")}
-                          </div>
-                          <div className="grid grid-cols-3 gap-1.5">
-                            {(
-                              [
-                                { v: "off", label: "off", desc: "0% overhead" },
-                                { v: "low", label: "low", desc: "1 / 10 files" },
-                                { v: "high", label: "high", desc: "2-3 / 8 files" },
-                              ] as const
-                            ).map((opt) => {
-                              const active = profile.recoveryLevel === opt.v;
-                              return (
-                                <button
-                                  key={opt.v}
-                                  onClick={() =>
-                                    updateProfile({ recoveryLevel: opt.v })
-                                  }
-                                  disabled={busy}
-                                  className={`p-2.5 rounded-lg border transition-all disabled:opacity-50 ${
-                                    active
-                                      ? "border-cyan-500/40 bg-cyan-500/[0.06]"
-                                      : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
-                                  }`}
-                                >
-                                  <div className="text-white text-[12px] font-medium">
-                                    {opt.label}
-                                  </div>
-                                  <div className="text-zinc-500 text-[10px]">
-                                    {opt.desc}
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ),
-              },
-            ] as const
-          ).map((section) => {
-            const isOpen = openSections.has(section.id);
-            return (
-              <div key={section.id}>
-                <button
-                  onClick={() => toggleSection(section.id)}
-                  className="w-full flex items-center gap-3 px-5 py-3.5 text-left hover:bg-white/[0.02] transition-colors"
-                >
-                  <span className="text-[15px]">{section.icon}</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-zinc-200 text-[13px] font-medium">
-                      {section.title}
-                    </div>
-                    <div className="text-zinc-500 text-[10.5px] truncate">
-                      {section.desc}
-                    </div>
-                  </div>
-                  {isOpen ? (
-                    <ChevronDown size={14} className="text-zinc-500" />
-                  ) : (
-                    <ChevronRight size={14} className="text-zinc-500" />
-                  )}
-                </button>
-                {isOpen && (
-                  <div className="px-5 pb-5">{section.body}</div>
-                )}
-              </div>
-            );
-          })}
-        </div>
 
-        {/* Save-as-custom modal (inline, not a real modal — simpler
-            than building a portal) */}
-        {showSaveAs && (
-          <div className="mb-6 p-4 rounded-xl border border-amber-400/30 bg-amber-400/[0.04] flex items-center gap-3">
-            <input
-              type="text"
-              value={saveAsName}
-              onChange={(e) => setSaveAsName(e.target.value)}
-              placeholder={t("compress.profile.save_as_placeholder")}
-              autoFocus
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  saveAsCustom(saveAsName);
-                  setShowSaveAs(false);
-                } else if (e.key === "Escape") {
-                  setShowSaveAs(false);
-                }
-              }}
-              className="flex-1 bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 text-[12.5px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-400"
-            />
-            <button
-              onClick={() => {
-                saveAsCustom(saveAsName);
-                setShowSaveAs(false);
-              }}
-              className="px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-100 text-[12px] font-medium hover:bg-amber-500/30"
-            >
-              {t("compress.profile.save")}
-            </button>
-            <button
-              onClick={() => setShowSaveAs(false)}
-              className="px-3 py-2 rounded-lg text-zinc-400 hover:text-zinc-200 text-[12px]"
-            >
-              {t("compress.profile.cancel")}
-            </button>
-          </div>
-        )}
 
         {/* Progress (only when compressing) */}
         {busy && progress && (
@@ -1573,81 +1052,26 @@ export function CompressView({
           </div>
         )}
 
-        {/* Estimated savings preview (when files are loaded and not busy) */}
-        {files.length > 0 && !busy && (
-          <div className="mb-10 p-6 rounded-2xl bg-gradient-to-br from-cyan-500/[0.06] to-emerald-500/[0.04] border border-white/[0.08]">
-            <div className="text-zinc-400 text-[11px] tracking-[0.2em] uppercase mb-4">
-              {t("compress.estimate.title")} ({getModeTitle(profile.mode)})
-            </div>
-            <div className="grid grid-cols-3 gap-6">
-              <Stat label={t("compress.estimate.saving")} value={`${(estSavings * 100).toFixed(0)}%`} />
-              <Stat
-                label={t("compress.estimate.speed")}
-                value={
-                  profile.mode === "rapido"
-                    ? t("compress.speed.fast")
-                    : profile.mode === "balanceado"
-                    ? t("compress.speed.medium")
-                    : t("compress.speed.slow")
-                }
-              />
-              <Stat
-                label={t("compress.estimate.best")}
-                value={
-                  profile.mode === "rapido"
-                    ? t("compress.best.video")
-                    : profile.mode === "balanceado"
-                    ? t("compress.best.general")
-                    : t("compress.best.files")
-                }
-              />
-            </div>
-            {/* Sprint 5.7.19: el "Estrategia" muestra el códec
-                que el motor va a usar, según el profile actual.
-                Es el momento de "transparencia radical" del
-                roadmap v0.3.0 — el usuario entiende qué va a
-                pasar antes de hacer clic. */}
-            <div className="mt-4 px-4 py-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
-              <div className="text-zinc-500 text-[10px] tracking-[0.15em] uppercase mb-1">
-                {t("compress.estimate.strategy")}
-              </div>
-              <div className="text-white text-[12px] font-mono">
-                {(() => {
-                  // Resolver el códec efectivo según el profile.
-                  // Esta lógica MIRA la misma tabla que
-                  // ProfileMode::resolve_plan() en el engine
-                  // (Sprint 5.7.10-C). Si cambia el engine,
-                  // cambiar aquí también.
-                  const codec = profile.codec === "auto"
-                    ? (profile.mode === "ultra" ? "LZMA-9" : "Zstd-3")
-                    : profile.codec === "lzma"
-                    ? `LZMA-${profile.mode === "rapido" ? 3 : profile.mode === "balanceado" ? 6 : 9}`
-                    : "Zstd-3";
-                  const preproc = profile.fidelity === "lossless"
-                    ? t("compress.coachmark.preprocessor_lossless")
-                    : profile.mode === "ultra"
-                      ? t("compress.coachmark.preprocessor_ultra")
-                      : t("compress.coachmark.preprocessor_default");
-                  const dict = profile.fidelity === "lossy" && profile.mode === "balanceado"
-                    ? t("compress.coachmark.dict_suffix")
-                    : "";
-                  return `${codec} + ${preproc}${dict}`;
-                })()}
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Sprint 5.7.21-B-Abstract: the savings preview is
+            gone. The user already saw the configuration UI
+            (the chip + the drawer); the real ratio number
+            comes from CompressSuccess after the run. Showing
+            a "65% smaller" estimate in the main flow was
+            visual noise. */}
 
         {/* Action button — moved to the sticky bar below */}
         {/* Sprint 5.7.21-B-Remodel: error message is now
             shown as a toast (not a permanent red banner).
             The StickyBar handles the error state internally
             (button shows disabled + tooltip explains why). */}
+        </>
+        )}
 
-        {/* Sticky bottom action bar — always visible
-            regardless of scroll position. The Compress
-            button + destination picker + estimated output
-            all live here. */}
+        {/* Sticky bottom action bar — hidden in the success
+            takeover (no compress needed in that state).
+            The Compress button + destination picker +
+            estimated output live here. */}
+        {!lastSuccess && (
         <CompressStickyBar
           destDir={destDir}
           onPickDest={onBrowseDest}
@@ -1660,29 +1084,40 @@ export function CompressView({
           buttonLabel={compressButtonLabel}
           onCompress={onCompress}
         />
+        )}
       </div>
+
+      {/* Sprint 5.7.21-B-Abstract: settings drawer. Slide-in
+          panel from the right that contains the 5 sections
+          (Speed / Quality / Content / Advanced / Security)
+          plus a compact preset picker. Rendered at the root
+          level (z-50 overlay) so it covers the page while
+          the user is fine-tuning. */}
+      <SettingsDrawer
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        profile={profile}
+        updateProfile={updateProfile}
+        customProfiles={customProfiles}
+        applyPreset={applyPreset}
+        activePresetId={activePresetId}
+        profileIsCustom={profileIsCustom}
+        password={password}
+        setPassword={setPassword}
+        showPwd={showPwd}
+        setShowPwd={setShowPwd}
+        saveAsCustom={saveAsCustom}
+        deleteCustom={deleteCustom}
+        busy={busy}
+      />
     </div>
   );
 }
 
-function Stat({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <div>
-      <div className="text-zinc-500 text-[11px] uppercase tracking-wider mb-1">
-        {label}
-      </div>
-      <div className="text-[20px] font-semibold tabular-nums tracking-tight text-white">
-        {value}
-      </div>
-    </div>
-  );
-}
+// Sprint 5.7.21-B-Abstract: the local `Stat` helper was
+// only used by the savings preview (now removed). The
+// preset stats live in the success screen (CompressSuccess)
+// and the sticky bar's estimated size uses prettyBytes.
 
 function prettyBytes(n: number): string {
   if (n < 1024) return `${n} B`;

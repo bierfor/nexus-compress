@@ -646,38 +646,26 @@ export function DecompressView({
         dragOver ? "bg-amber-500/[0.04]" : ""
       }`}
     >
-      <div className="max-w-4xl mx-auto px-8 pt-12 pb-20">
-        {/* Header */}
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[12px] tracking-wide mb-2">
-            <button
-              onClick={() => onNavigate("landing")}
-              className="hover:text-zinc-300 transition-colors"
-            >
-              {t("back")}
-            </button>
-          </div>
-          <h1 className="text-white text-[36px] font-semibold tracking-tight mb-3">
-            {t("decompress.title")}
-          </h1>
-          <p className="text-zinc-400 text-[14px] leading-relaxed max-w-2xl">
-            {t("decompress.desc")}
-          </p>
-        </div>
+      <div className="max-w-4xl mx-auto px-8 pt-8 pb-20">
+        {/* Sprint 5.7.21-B-Abstract: the Decompress page no
+            longer has a big header. The TopBar already
+            provides global nav; the per-page title + back
+            link was visual noise. The drop zone (right
+            below) is the only thing the user needs to see. */}
 
         {/* Drop zone or archive info */}
         {!archivePath ? (
           <div
-            className={`relative rounded-3xl border-2 border-dashed transition-all p-16 text-center mb-10 ${
+            className={`relative rounded-2xl border-2 border-dashed transition-all px-8 py-12 text-center mb-8 ${
               dragOver
                 ? "border-amber-400 bg-amber-500/[0.08]"
                 : "border-white/[0.08] bg-white/[0.02]"
             }`}
           >
-            <div className="text-7xl mb-6 select-none">
+            <div className="text-amber-400/70 mb-5 select-none">
               {dragOver ? "⤓" : "📂"}
             </div>
-            <h3 className="text-white text-[20px] font-medium mb-2">
+            <h3 className="text-white text-[20px] font-medium tracking-tight mb-1.5">
               {dragOver ? t("decompress.drop.active") : t("decompress.drop")}
             </h3>
             <p className="text-zinc-500 text-[13px] mb-6">
