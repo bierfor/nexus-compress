@@ -27,10 +27,11 @@
  *   5. Keyboard shortcuts (1 row of kbd chips)
  */
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocale } from "@/components/LocaleProvider";
 import { type View } from "./NeoTopBar";
 import { type RecentOp } from "@/components/RecentView";
+import { useRecentEvents } from "@/lib/useAppData";
 import {
   Archive,
   FolderOpen,
@@ -94,7 +95,35 @@ export function LandingPage({
   ops: RecentOp[];
 }) {
   const { t } = useLocale();
-  const recent5 = useMemo(() => ops.slice(0, 5), [ops]);
+  // Sprint 5.7.21-B-Abstract fix: previous version of the
+  // abstract home only read `ops` from props (in-memory list
+  // for the current session). The old LandingPage used
+  // useRecentEvents to fetch persisted events from db.rs
+  // (SQLite), which surfaces activity across app restarts.
+  // The home now merges both: persistent events from db.rs
+  // + in-memory ops from the current session (fallback when
+  // the Tauri runtime isn't available, e.g. `next dev`).
+  const { ops: persistedOps, refresh } = useRecentEvents(10, ops);
+  // Manual refresh trigger: the hook refreshes on window focus
+  // but navigating to the home after a compress doesn't always
+  // fire a focus event. We force a refresh on mount + whenever
+  // a new op lands in the in-memory list (current session).
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [lastSeenCount, setLastSeenCount] = useState(ops.length);
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey, lastSeenCount]);
+  useEffect(() => {
+    if (ops.length !== lastSeenCount) {
+      setLastSeenCount(ops.length);
+    }
+  }, [ops.length, lastSeenCount]);
+  const recent5 = useMemo(
+    () => persistedOps.slice(0, 5),
+    [persistedOps],
+  );
+  const hasMore = persistedOps.length > 5;
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -144,7 +173,7 @@ export function LandingPage({
             <h2 className="text-zinc-400 text-[11px] tracking-[0.2em] uppercase">
               {t("home.recent.title")}
             </h2>
-            {ops.length > 5 && (
+            {persistedOps.length > 5 && (
               <button
                 onClick={() => onNavigate("recent")}
                 className="text-zinc-500 hover:text-cyan-400 text-[11.5px] transition-colors"

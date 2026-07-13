@@ -152,6 +152,21 @@ test("LandingPage: single recent activity section (not duplicated)", () => {
   );
 });
 
+test("LandingPage: uses useRecentEvents hook for persistent activity", () => {
+  // Sprint 5.7.21-B-Abstract fix: the home must fetch
+  // persistent activity from db.rs (SQLite) so the recent
+  // list survives app restarts. The pure in-memory `ops`
+  // prop is the fallback for `next dev` only.
+  assert.ok(
+    src.includes("useRecentEvents"),
+    "must use the useRecentEvents hook for persistent activity"
+  );
+  assert.ok(
+    src.includes("persistedOps"),
+    "must name the persistent ops variable 'persistedOps'"
+  );
+});
+
 test("LandingPage: trilingual i18n keys exist in all 3 locales", () => {
   // Every user-visible string must come from t(). Pin a few
   // critical keys to make sure they exist in ES, EN, IT.
