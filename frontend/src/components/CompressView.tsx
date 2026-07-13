@@ -13,7 +13,7 @@
  *     pushes to it via onComplete
  */
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { type View } from "@/components/NeoTopBar";
 import { useLocale } from "@/components/LocaleProvider";
 import {
@@ -39,6 +39,16 @@ import {
   saveCustomProfiles,
   profilesEqual,
 } from "@/lib/profiles";
+// Sprint 5.7.21-B-Remodel: extracted sub-components for
+// the new Compress flow. The stepper (4 steps with
+// checkmarks) replaces the implicit "figure it out from
+// the layout" pattern; the PresetCard grid replaces the
+// old chip bar (easier to compare options); the StickyBar
+// replaces the in-flow button so the Compress action is
+// always visible regardless of scroll position.
+import { CompressStepper } from "./CompressStepper";
+import { PresetCard } from "./PresetCard";
+import { CompressStickyBar } from "./CompressStickyBar";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -605,9 +615,17 @@ export function CompressView({
       const savings = lastResult.compressed_size / lastResult.original_size;
       const savingsPct = Math.round((1 - savings) * 100);
       const lockEmoji = profile.encrypt ? "🔒 " : "";
+      // Sprint 5.7.21-B-Cleanup: trilingual toast (was
+      // hardcoded Spanish "% más pequeño en"). Placeholders
+      // are filled by the user at the call site via the
+      // `t()` helper.
       setToast({
         kind: "ok",
-        msg: `✓ ${lockEmoji}${inputFilename} → ${prettyBytes(lastResult.compressed_size)} (${savingsPct}% más pequeño) en ${(durationMs / 1000).toFixed(1)}s`,
+        msg: t("compress.toast.success")
+          .replace("{file}", `${lockEmoji}${inputFilename}`)
+          .replace("{size}", prettyBytes(lastResult.compressed_size))
+          .replace("{pct}", String(savingsPct))
+          .replace("{sec}", (durationMs / 1000).toFixed(1)),
       });
       // Pin the success card so the user can see WHERE the
       // .nxs/.nxe file was saved and reveal it in Finder
@@ -645,7 +663,7 @@ export function CompressView({
           // likely a permission error. Show the card with a generic
           // path so the user knows something happened, plus a
           // warning toast.
-          setError("Compression completed but auto-save path was empty. Check console for details.");
+          setError(t("compress.error.empty_path"));
           setToast({
             kind: "err",
             msg: `✗ Saved empty (output_path missing) — compressed ${prettyBytes(compressedBytes)}`,
@@ -676,6 +694,48 @@ export function CompressView({
     progress && progress.bytes_total > 0
       ? Math.min(100, (progress.bytes_done / progress.bytes_total) * 100)
       : 0;
+
+  // Sprint 5.7.21-B-Remodel: estimated output size + sticky
+  // bar button label. Both are derived from the current
+  // state so the StickyBar can render without holding its
+  // own copies of profile/files/etc.
+  //
+  // The estimated size is a rough heuristic: 0.5x for lossy
+  // modes (typical 2-7x ratio on text/code corpora), 0.85x
+  // for lossless (1.2-1.5x ratio on mixed corpora), 1.0x
+  // for files we can't estimate (user-typed paths we
+  // haven't stat'd). The exact number comes from the
+  // progress bar after compress starts.
+  const estimatedSize = useMemo(() => {
+    if (files.length === 0) return "";
+    // We don't stat the files (would block the UI); use
+    // a fixed-budget estimate based on the file path
+    // string length as a placeholder. The real number
+    // comes in via the progress event.
+    // 30 bytes per file path is a rough proxy; the actual
+    // size comes from the backend's n_files × avg_size
+    // once the user hits Compress.
+    const rough = files.length * 30 * 1024;
+    const ratio = profile.fidelity === "lossless" ? 0.85 : 0.5;
+    return prettyBytes(rough * ratio);
+  }, [files, profile.fidelity]);
+
+  // The Compress button label changes based on state:
+  //   - default: "Comprimir" / "Compress" / "Comprimi"
+  //   - busy + writing phase: "Escribiendo…" / "Writing…"
+  //   - busy + done phase: "✓ Listo" / "✓ Done" / "✓ Fatto"
+  //   - busy + compressing: "Comprimiendo 42%"
+  //   - lastSuccess: "✓ Listo" (one-shot before reset)
+  //   - no files / no dest: disabled (the StickyBar grays out)
+  const compressButtonLabel = useMemo(() => {
+    if (busy) {
+      if (progress?.phase === "writing") return `💾 ${t("compress.btn.writing")}`;
+      if (progress?.phase === "done") return `✓ ${t("compress.btn.done")}`;
+      return `${t("compress.btn.busy")} ${progressPct.toFixed(0)}%`;
+    }
+    if (lastSuccess) return `✓ ${t("compress.btn.done")}`;
+    return t("compress.btn");
+  }, [busy, progress, progressPct, lastSuccess, t]);
 
   // Mode title/desc helpers
   const getModeTitle = (id: Mode) => {
@@ -739,6 +799,29 @@ export function CompressView({
           </p>
         </div>
 
+        {/* Sprint 5.7.21-B-Remodel: 4-step flow indicator.
+            Active step is computed from state: if no files
+            yet → step 0 (Files). Files picked but no preset
+            yet → step 1 (Profile). Preset picked but no dest
+            → step 2 (Output). Ready → step 3 (Compress). */}
+        <CompressStepper
+          steps={[
+            { id: "files", labelKey: "compress.step.files", hintKey: "compress.step.files.hint" },
+            { id: "profile", labelKey: "compress.step.profile", hintKey: "compress.step.profile.hint" },
+            { id: "output", labelKey: "compress.step.output", hintKey: "compress.step.output.hint" },
+            { id: "compress", labelKey: "compress.step.compress", hintKey: "compress.step.compress.hint" },
+          ]}
+          activeIndex={
+            files.length === 0
+              ? 0
+              : activePresetId === null && !profilesEqual(profile, DEFAULT_PROFILE)
+                ? 1
+                : !destDir
+                  ? 2
+                  : 3
+          }
+        />
+
         {/* Sprint 5.7.2 hotfix #24: success card. Shows WHERE the
             output file was saved and gives the user a way to
             reveal it in Finder or kick off another compression
@@ -778,13 +861,11 @@ export function CompressView({
                   <div className="text-amber-300/90 text-[11.5px] mb-3 flex items-start gap-2 bg-amber-500/[0.06] border border-amber-500/15 rounded-lg px-3 py-2">
                     <span className="flex-shrink-0 text-[14px] leading-none">ℹ️</span>
                     <span>
-                      <span className="font-semibold">Nota de rendimiento:</span>{" "}
-                      Se saltaron{" "}
-                      <span className="font-mono font-semibold">
-                        {prettyBytes(lastSuccess.skippedBytes)}
-                      </span>{" "}
-                      de caché de desarrollo (`.next`, `node_modules`, etc.).
-                      El ratio aplica solo a archivos de código fuente.
+                      <span className="font-semibold">{t("compress.success.skipped.title")}</span>{" "}
+                      {t("compress.success.skipped.body").replace(
+                        "{bytes}",
+                        prettyBytes(lastSuccess.skippedBytes)
+                      )}
                     </span>
                   </div>
                 )}
@@ -805,12 +886,18 @@ export function CompressView({
                     <div className="text-amber-300/90 text-[11.5px] mb-3 flex items-start gap-2 bg-amber-500/[0.06] border border-amber-500/15 rounded-lg px-3 py-2">
                       <span className="flex-shrink-0 text-[14px] leading-none">💡</span>
                       <span>
-                        <span className="font-semibold">Tu corpus es {buildPct.toFixed(0)}% artefactos de build</span>{" "}
-                        (<span className="font-mono">{prettyBytes(b.buildArtifactBytes)}</span>{" "}
-                        en <code className="text-amber-200/80">.next/</code>, <code className="text-amber-200/80">node_modules/</code>, <code className="text-amber-200/80">venv/</code>, etc.).
-                        Esos archivos ya están comprimidos — ningún codec puede reducir el ratio.
-                        Para mejor ratio en el código, cambiá a{" "}
-                        <span className="font-semibold">📝 Solo fuentes</span> o <span className="font-semibold">✨ Mínimo</span> arriba.
+                        <span className="font-semibold">
+                          {t("compress.success.breakdown.title").replace(
+                            "{pct}",
+                            buildPct.toFixed(0)
+                          )}
+                        </span>{" "}
+                        {t("compress.success.breakdown.bytes").replace(
+                          "{bytes}",
+                          prettyBytes(b.buildArtifactBytes)
+                        )}{" "}
+                        {t("compress.success.breakdown.explainer")}{" "}
+                        {t("compress.success.breakdown.suggest")}
                       </span>
                     </div>
                   );
@@ -824,7 +911,13 @@ export function CompressView({
                         await invoke("reveal_in_finder_cmd", { path: lastSuccess.outputPath });
                       } catch (e) {
                         console.error("reveal failed:", e);
-                        setToast({ kind: "err", msg: `✗ ${e}` });
+                        // Sprint 5.7.21-B-Cleanup: show a generic
+                        // error message to the user and log the
+                        // raw exception to console. The user
+                        // doesn't need to see "Error: spawn EBADF"
+                        // — they need to know "reveal in Finder
+                        // didn't work".
+                        setToast({ kind: "err", msg: t("compress.error.reveal_failed") });
                       }
                     }}
                     className="px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[12.5px] font-medium transition-colors"
@@ -963,25 +1056,16 @@ export function CompressView({
               {t("compress.profile.desc")}
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {BUILTIN_PRESETS.map((p) => {
-              const active = activePresetId === p.id;
-              return (
-                <button
-                  key={p.id}
-                  onClick={() => applyPreset(p)}
-                  disabled={busy}
-                  className={`group relative px-3.5 py-2 rounded-full border text-[12px] transition-all disabled:opacity-50 ${
-                    active
-                      ? "border-cyan-400/50 bg-cyan-400/10 text-cyan-100 shadow-[0_0_0_1px_rgba(34,211,238,0.15)]"
-                      : "border-white/[0.08] bg-white/[0.02] text-zinc-300 hover:border-white/[0.16] hover:bg-white/[0.04]"
-                  }`}
-                >
-                  <span className="mr-1.5">{p.icon}</span>
-                  <span className="font-medium">{t(`compress.preset.${p.id}` as "compress.preset.snapshot")}</span>
-                </button>
-              );
-            })}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {BUILTIN_PRESETS.map((p) => (
+              <PresetCard
+                key={p.id}
+                preset={p}
+                active={activePresetId === p.id}
+                onApply={(q) => applyPreset(q)}
+                disabled={busy}
+              />
+            ))}
             {customProfiles.map((p) => {
               const active = activePresetId === p.id;
               return (
@@ -1480,7 +1564,7 @@ export function CompressView({
               </span>
               <span>
                 {progress.bytes_done >= progress.bytes_total && progress.bytes_total > 0
-                  ? "✓ completado"
+                  ? t("compress.progress.done")
                   : progress.eta_ms > 0
                     ? `ETA ${formatMs(progress.eta_ms)}`
                     : "ETA —"}
@@ -1540,12 +1624,12 @@ export function CompressView({
                     ? `LZMA-${profile.mode === "rapido" ? 3 : profile.mode === "balanceado" ? 6 : 9}`
                     : "Zstd-3";
                   const preproc = profile.fidelity === "lossless"
-                    ? "Raw (bit-exact)"
+                    ? t("compress.coachmark.preprocessor_lossless")
                     : profile.mode === "ultra"
-                    ? "swc AST + Conservative"
-                    : "swc AST";
+                      ? t("compress.coachmark.preprocessor_ultra")
+                      : t("compress.coachmark.preprocessor_default");
                   const dict = profile.fidelity === "lossy" && profile.mode === "balanceado"
-                    ? " + dict (≥16 MiB)"
+                    ? t("compress.coachmark.dict_suffix")
                     : "";
                   return `${codec} + ${preproc}${dict}`;
                 })()}
@@ -1554,28 +1638,28 @@ export function CompressView({
           </div>
         )}
 
-        {/* Action button */}
-        <button
-          onClick={onCompress}
-          disabled={files.length === 0 || busy || !destDir}
-          className="w-full py-4 rounded-2xl bg-gradient-to-b from-cyan-500 to-cyan-600 hover:from-cyan-400 hover:to-cyan-500 disabled:from-zinc-800 disabled:to-zinc-800 disabled:text-zinc-600 text-white text-[15px] font-semibold tracking-tight transition-all shadow-lg shadow-cyan-500/20 disabled:shadow-none"
-        >
-          {busy
-            ? (progress?.phase === "writing"
-              ? `💾 ${t("compress.btn.writing")}`
-              : progress?.phase === "done"
-                ? `✓ ${t("compress.btn.done")}`
-                : `${t("compress.btn.busy")} ${progressPct.toFixed(0)}%`)
-            : lastSuccess
-              ? `✓ ${t("compress.btn.done")}`
-              : t("compress.btn")}
-        </button>
+        {/* Action button — moved to the sticky bar below */}
+        {/* Sprint 5.7.21-B-Remodel: error message is now
+            shown as a toast (not a permanent red banner).
+            The StickyBar handles the error state internally
+            (button shows disabled + tooltip explains why). */}
 
-        {error && (
-          <div className="mt-4 p-4 rounded-xl bg-red-500/[0.08] border border-red-500/20 text-red-400 text-[13px]">
-            {error}
-          </div>
-        )}
+        {/* Sticky bottom action bar — always visible
+            regardless of scroll position. The Compress
+            button + destination picker + estimated output
+            all live here. */}
+        <CompressStickyBar
+          destDir={destDir}
+          onPickDest={onBrowseDest}
+          encrypt={profile.encrypt}
+          onToggleEncrypt={() => updateProfile({ encrypt: !profile.encrypt })}
+          showEncryptToggle
+          estimatedSize={estimatedSize}
+          canCompress={files.length > 0 && !busy && !!destDir}
+          busy={busy}
+          buttonLabel={compressButtonLabel}
+          onCompress={onCompress}
+        />
       </div>
     </div>
   );

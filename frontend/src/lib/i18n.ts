@@ -90,6 +90,32 @@ const ES = {
   // Compress view
   "compress.title": "Comprimir",
   "compress.desc": "Arrastra archivos aquí, elige el modo y el destino. La compresión ocurre en local — tus archivos no salen de tu Mac.",
+  // Sprint 5.7.21-B-Remodel: top stepper. Each step has a
+  // short label + an action verb. The stepper shows the
+  // user WHERE they are in the flow.
+  "compress.step.files": "Archivos",
+  "compress.step.files.hint": "Elegí qué comprimir",
+  "compress.step.profile": "Perfil",
+  "compress.step.profile.hint": "Elegí el método",
+  "compress.step.output": "Destino",
+  "compress.step.output.hint": "Elegí dónde guardar",
+  "compress.step.compress": "Comprimir",
+  "compress.step.compress.hint": "Ejecutá la compresión",
+  "compress.dest.label": "Destino",
+  // Preset card labels (replaces the chip bar).
+  "compress.preset.snapshot.card": "Snapshot completo del proyecto, balance velocidad/ratio.",
+  "compress.preset.best.card": "El motor prueba 4 estrategias y elige la mejor para tu corpus.",
+  "compress.preset.source.card": "Salta dev cache, ratio más alto en código fuente.",
+  "compress.preset.code.card": "Solo fuentes, máxima compresión, sin builds.",
+  "compress.preset.balanced.card": "Buen default para trabajo diario, fuente + balance.",
+  "compress.preset.ultra.card": "LZMA-9, máxima compresión, el más lento.",
+  "compress.preset.encrypted.card": "AES-256-GCM cifrado, ideal para enviar por red.",
+  "compress.preset.lossless.card": "Bit-exact reversible, sin minify.",
+  // Sticky bottom bar
+  "compress.bottom.estimated": "Salida estimada:",
+  "compress.bottom.unknown_size": "tamaño desconocido",
+  "compress.bottom.click_to_pick": "click para elegir destino",
+  "compress.bottom.encrypt_toggle": "Cifrar con contraseña",
   "compress.drop": "Arrastra tus archivos aquí",
   "compress.drop.active": "Suelta para añadir",
   "compress.drop.hint": "o usa el campo de abajo para escribir la ruta",
@@ -220,6 +246,29 @@ const ES = {
   "compress.success.in": "en",
   "compress.success.reveal": "Revelar en Finder",
   "compress.success.another": "Comprimir otro",
+  // Sprint 5.7.21-B-Cleanup: full trilingual strings for the
+  // success card notes (skipped bytes / corpus breakdown).
+  // Previously these were hardcoded Spanish in the JSX,
+  // which meant Italian and English users got a
+  // mixed-language UI after a successful compression.
+  "compress.success.skipped.title": "Nota de rendimiento:",
+  "compress.success.skipped.body": "Se saltaron {bytes} de caché de desarrollo (`.next`, `node_modules`, etc.). El ratio aplica solo a archivos de código fuente.",
+  "compress.success.breakdown.title": "Tu corpus es {pct}% artefactos de build",
+  "compress.success.breakdown.bytes": "({bytes} en `.next/`, `node_modules/`, `venv/`, etc.)",
+  "compress.success.breakdown.explainer": "Esos archivos ya están comprimidos — ningún codec puede reducir el ratio.",
+  "compress.success.breakdown.suggest": "Para mejor ratio en el código, cambiá a 📝 Solo fuentes o ✨ Mínimo arriba.",
+  // Toast after a successful compress: "{file} → {size} ({pct}% smaller) in {sec}s"
+  "compress.toast.success": "{file} → {size} ({pct}% más pequeño) en {sec}s",
+  // Generic error path
+  "compress.error.empty_path": "Compresión completada pero la ruta de guardado estaba vacía. Revisá la consola para detalles.",
+  "compress.error.reveal_failed": "No se pudo abrir el archivo en Finder. Intentá manualmente desde la ruta indicada.",
+  // Progress bar terminal state
+  "compress.progress.done": "✓ completado",
+  // Engine strategy chip labels (the "Engine strategy" preview)
+  "compress.coachmark.preprocessor_lossless": "Raw (bit-exact)",
+  "compress.coachmark.preprocessor_ultra": "swc AST + Conservative",
+  "compress.coachmark.preprocessor_default": "swc AST",
+  "compress.coachmark.dict_suffix": " + dict (≥16 MiB)",
 
   // Compress modes
   "mode.fast.title": "Rápido",
@@ -617,6 +666,27 @@ const EN: Record<keyof typeof ES, string> = {
   "home.tip.shortcuts": "Press ⌘K to open the command palette and jump to any view.",
 
   "compress.title": "Compress",
+  "compress.step.files": "Files",
+  "compress.step.files.hint": "Choose what to compress",
+  "compress.step.profile": "Profile",
+  "compress.step.profile.hint": "Choose the method",
+  "compress.step.output": "Output",
+  "compress.step.output.hint": "Choose where to save",
+  "compress.step.compress": "Compress",
+  "compress.step.compress.hint": "Run the compression",
+  "compress.dest.label": "Output",
+  "compress.preset.snapshot.card": "Full project snapshot, balanced speed/ratio.",
+  "compress.preset.best.card": "The engine tries 4 strategies and picks the best for your corpus.",
+  "compress.preset.source.card": "Skip dev cache, higher ratio on source code.",
+  "compress.preset.code.card": "Source only, max compression, no builds.",
+  "compress.preset.balanced.card": "Good default for daily work, source + balanced.",
+  "compress.preset.ultra.card": "LZMA-9, max compression, the slowest.",
+  "compress.preset.encrypted.card": "AES-256-GCM encrypted, ideal for sending over the network.",
+  "compress.preset.lossless.card": "Bit-exact reversible, no minify.",
+  "compress.bottom.estimated": "Estimated output:",
+  "compress.bottom.unknown_size": "unknown size",
+  "compress.bottom.click_to_pick": "click to choose destination",
+  "compress.bottom.encrypt_toggle": "Encrypt with password",
   "compress.desc": "Drop files here, pick a mode and destination. Compression runs locally — files never leave your Mac.",
   "compress.drop": "Drop your files here",
   "compress.drop.active": "Release to add",
@@ -737,6 +807,27 @@ const EN: Record<keyof typeof ES, string> = {
   "compress.success.in": "in",
   "compress.success.reveal": "Reveal in Finder",
   "compress.success.another": "Compress another",
+  // Sprint 5.7.21-B-Cleanup: full trilingual strings for the
+  // success card notes (skipped bytes / corpus breakdown).
+  // Previously these were hardcoded Spanish in the JSX.
+  "compress.success.skipped.title": "Performance note:",
+  "compress.success.skipped.body": "{bytes} of dev cache were skipped (`.next`, `node_modules`, etc.). The ratio only applies to source code files.",
+  "compress.success.breakdown.title": "Your corpus is {pct}% build artifacts",
+  "compress.success.breakdown.bytes": "({bytes} in `.next/`, `node_modules/`, `venv/`, etc.)",
+  "compress.success.breakdown.explainer": "Those files are already compressed — no codec can shrink them.",
+  "compress.success.breakdown.suggest": "For a better ratio on code, switch to 📝 Source only or ✨ Minimal above.",
+  // Toast after a successful compress
+  "compress.toast.success": "{file} → {size} ({pct}% smaller) in {sec}s",
+  // Generic error path
+  "compress.error.empty_path": "Compression completed but the auto-save path was empty. Check the console for details.",
+  "compress.error.reveal_failed": "Could not open the file in Finder. Try navigating to the path manually.",
+  // Progress bar terminal state
+  "compress.progress.done": "✓ done",
+  // Engine strategy chip labels
+  "compress.coachmark.preprocessor_lossless": "Raw (bit-exact)",
+  "compress.coachmark.preprocessor_ultra": "swc AST + Conservative",
+  "compress.coachmark.preprocessor_default": "swc AST",
+  "compress.coachmark.dict_suffix": " + dict (≥16 MiB)",
 
   "mode.fast.title": "Fast",
   "mode.fast.desc": "Great for videos. Quick compression, saves ~10-20%.",
@@ -1058,6 +1149,27 @@ const IT: Record<keyof typeof ES, string> = {
 
   // Compress
   "compress.title": "Comprimi",
+  "compress.step.files": "File",
+  "compress.step.files.hint": "Scegli cosa comprimere",
+  "compress.step.profile": "Profilo",
+  "compress.step.profile.hint": "Scegli il metodo",
+  "compress.step.output": "Destinazione",
+  "compress.step.output.hint": "Scegli dove salvare",
+  "compress.step.compress": "Comprimi",
+  "compress.step.compress.hint": "Esegui la compressione",
+  "compress.dest.label": "Destinazione",
+  "compress.preset.snapshot.card": "Snapshot completo del progetto, bilanciato velocità/rapporto.",
+  "compress.preset.best.card": "Il motore prova 4 strategie e sceglie la migliore per il tuo corpus.",
+  "compress.preset.source.card": "Salta la cache di sviluppo, rapporto più alto sul codice.",
+  "compress.preset.code.card": "Solo sorgenti, massima compressione, senza build.",
+  "compress.preset.balanced.card": "Buon default per il lavoro quotidiano, sorgente + bilanciato.",
+  "compress.preset.ultra.card": "LZMA-9, massima compressione, il più lento.",
+  "compress.preset.encrypted.card": "AES-256-GCM cifrato, ideale per l'invio in rete.",
+  "compress.preset.lossless.card": "Bit-exact reversibile, senza minify.",
+  "compress.bottom.estimated": "Output stimato:",
+  "compress.bottom.unknown_size": "dimensione sconosciuta",
+  "compress.bottom.click_to_pick": "clicca per scegliere la destinazione",
+  "compress.bottom.encrypt_toggle": "Cifra con password",
   "compress.desc": "Trascina i file qui, scegli modalità e destinazione. La compressione è locale — i file non lasciano il tuo Mac.",
   "compress.drop": "Trascina i tuoi file qui",
   "compress.drop.active": "Rilascia per aggiungere",
@@ -1178,6 +1290,27 @@ const IT: Record<keyof typeof ES, string> = {
   "compress.success.in": "in",
   "compress.success.reveal": "Mostra nel Finder",
   "compress.success.another": "Comprimi un altro",
+  // Sprint 5.7.21-B-Cleanup: full trilingual strings for the
+  // success card notes (skipped bytes / corpus breakdown).
+  // Previously these were hardcoded Spanish in the JSX.
+  "compress.success.skipped.title": "Nota sulle prestazioni:",
+  "compress.success.skipped.body": "Sono stati saltati {bytes} di cache di sviluppo (`.next`, `node_modules`, ecc.). Il rapporto si applica solo ai file sorgente.",
+  "compress.success.breakdown.title": "Il tuo corpus è {pct}% artefatti di build",
+  "compress.success.breakdown.bytes": "({bytes} in `.next/`, `node_modules/`, `venv/`, ecc.)",
+  "compress.success.breakdown.explainer": "Quei file sono già compressi — nessun codec può ridurli.",
+  "compress.success.breakdown.suggest": "Per un rapporto migliore sul codice, passa a 📝 Solo sorgenti o ✨ Minimo sopra.",
+  // Toast after a successful compress
+  "compress.toast.success": "{file} → {size} ({pct}% più piccolo) in {sec}s",
+  // Generic error path
+  "compress.error.empty_path": "Compressione completata ma il percorso di salvataggio era vuoto. Controlla la console per i dettagli.",
+  "compress.error.reveal_failed": "Impossibile aprire il file nel Finder. Prova a navigare manualmente al percorso indicato.",
+  // Progress bar terminal state
+  "compress.progress.done": "✓ completato",
+  // Engine strategy chip labels
+  "compress.coachmark.preprocessor_lossless": "Raw (bit-exact)",
+  "compress.coachmark.preprocessor_ultra": "swc AST + Conservative",
+  "compress.coachmark.preprocessor_default": "swc AST",
+  "compress.coachmark.dict_suffix": " + dict (≥16 MiB)",
 
   // Modes
   "mode.fast.title": "Veloce",
