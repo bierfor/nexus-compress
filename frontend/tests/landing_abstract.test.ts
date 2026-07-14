@@ -173,18 +173,13 @@ test("LandingPage: RecentRow has file-type icon + kind badge", () => {
   // Sprint 5.7.21-B-Home-Icons: each recent activity row
   // shows a file-type icon (FileCode / FileImage / FileVideo
   // / etc.) based on the filename extension, with a kind
-  // badge overlay (compress / decompress / share).
+  // badge overlay (compress / decompress / share). The actual
+  // FILE_ICON_MAP / getFileKind / getKindBadge definitions
+  // moved to @/lib/fileIcons in the 5.7.21-B-FileIcons-Shared
+  // refactor — every view now uses the same shared lib.
   assert.ok(
-    src.includes("getFileKind"),
-    "must define a getFileKind helper for file-type icons"
-  );
-  assert.ok(
-    src.includes("getKindBadge"),
-    "must define a getKindBadge helper for kind badges"
-  );
-  assert.ok(
-    src.includes("FILE_ICON_MAP"),
-    "must define a FILE_ICON_MAP with extension → icon mappings"
+    src.includes("from \"@/lib/fileIcons\""),
+    "LandingPage must import the shared file-icon helpers"
   );
   // The RecentRow must use the FileIcon and KindIcon.
   assert.ok(
@@ -199,48 +194,6 @@ test("LandingPage: RecentRow has file-type icon + kind badge", () => {
   assert.ok(
     src.includes('data-testid="home-recent-row"'),
     "RecentRow must have a data-testid for tests"
-  );
-});
-
-test("LandingPage: file icon map covers common file types", () => {
-  // The icon map must cover at least the common file types
-  // a real user would work with: code, images, video, audio,
-  // archives, documents, and spreadsheets. The keys in the
-  // FILE_ICON_MAP are JS object keys (not quoted), so we
-  // match `  ext: {` (with leading indent) to be precise.
-  for (const ext of [
-    // Code
-    "js", "ts", "py", "rs", "go",
-    // Images
-    "jpg", "png", "svg", "webp",
-    // Video
-    "mp4", "mov", "mkv", "webm",
-    // Audio
-    "mp3", "wav", "flac",
-    // Archives
-    "zip", "tar", "gz", "bz2", "xz", "nxs", "nxs6", "nxe",
-    // Documents
-    "pdf", "doc", "docx", "txt", "md",
-    // Spreadsheets
-    "xls", "xlsx", "csv",
-    // JSON
-    "json",
-  ]) {
-    assert.ok(
-      new RegExp(`\\b${ext}:\\s*\\{`).test(src),
-      `FILE_ICON_MAP must include the "${ext}" extension`
-    );
-  }
-});
-
-test("LandingPage: kind badge has 3 distinct states", () => {
-  // The kind badge switches between compress / decompress /
-  // share with distinct colors and icons.
-  assert.ok(
-    /getKindBadge[\s\S]{0,400}compress[\s\S]{0,200}decompress[\s\S]{0,200}share/.test(
-      src
-    ),
-    "getKindBadge must handle all 3 kinds (compress / decompress / share)"
   );
 });
 

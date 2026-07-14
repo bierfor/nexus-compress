@@ -53,6 +53,7 @@ import {
 import { QRCodeSVG } from "qrcode.react";
 import { useAppStats, useRecentEvents } from "@/lib/useAppData";
 import { formatBytes, formatTimestampMs } from "@/lib/format";
+import { getFileKind, getKindBadge } from "@/lib/fileIcons";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -1495,45 +1496,55 @@ function LinkPanel({
               </div>
             ) : (
               <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] divide-y divide-white/[0.04]">
-                {recentShareEvents.map((ev) => (
-                  <div
-                    key={ev.id}
-                    className="px-3 py-2 flex items-center gap-3 hover:bg-white/[0.02] transition-colors"
-                  >
-                    {/* Sprint 5.7.21-B-Share-Icons: kind-specific
-                        icon. The user can scan the activity row
-                        and see at a glance what was shared. */}
+                {recentShareEvents.map((ev) => {
+                  // Sprint 5.7.21-B-FileIcons-Shared: use the
+                  // shared file-icon helpers. Each row shows
+                  // a file-type icon (FileCode / FileImage /
+                  // etc.) with a kind badge in the bottom-right
+                  // corner (compress / decompress / share).
+                  const fileKind = getFileKind(ev.filename);
+                  const kindBadge = getKindBadge(ev.kind);
+                  const FileIcon = fileKind.icon;
+                  const KindIcon = kindBadge.icon;
+                  return (
                     <div
-                      className={
-                        "w-7 h-7 rounded-md flex items-center justify-center shrink-0 " +
-                        (ev.kind === "compress"
-                          ? "bg-cyan-500/10 text-cyan-300"
-                          : ev.kind === "decompress"
-                            ? "bg-amber-500/10 text-amber-300"
-                            : "bg-emerald-500/10 text-emerald-300")
-                      }
+                      key={ev.id}
+                      className="px-3 py-2 flex items-center gap-3 hover:bg-white/[0.02] transition-colors"
                     >
-                      {ev.kind === "compress" ? (
-                        <Archive size={12} />
-                      ) : ev.kind === "decompress" ? (
-                        <FolderOpen size={12} />
-                      ) : (
-                        <Send size={12} />
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-zinc-200 text-[12.5px] truncate">
-                        {ev.filename}
-                      </p>
-                      <p className="text-zinc-600 text-[10.5px] mt-0.5 font-mono">
-                        {formatBytes(ev.originalBytes, locale)}
+                      <div className="relative shrink-0">
+                        <div
+                          className={
+                            "w-7 h-7 rounded-md flex items-center justify-center border " +
+                            fileKind.bg +
+                            " " +
+                            fileKind.border
+                          }
+                        >
+                          <FileIcon size={12} className={fileKind.color} strokeWidth={1.8} />
+                        </div>
+                        <div
+                          className={
+                            "absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center border border-[#0a0a0a] " +
+                            kindBadge.bg
+                          }
+                        >
+                          <KindIcon size={7} className={kindBadge.color} strokeWidth={2.5} />
+                        </div>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-zinc-200 text-[12.5px] truncate">
+                          {ev.filename}
+                        </p>
+                        <p className="text-zinc-600 text-[10.5px] mt-0.5 font-mono">
+                          {formatBytes(ev.originalBytes, locale)}
                       </p>
                     </div>
                     <span className="text-zinc-500 text-[10.5px] shrink-0 tabular-nums">
                       {formatTimestampMs(ev.timestamp, t)}
                     </span>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

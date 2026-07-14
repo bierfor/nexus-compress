@@ -26,6 +26,8 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { type View } from "@/components/NeoTopBar";
 import { useLocale } from "@/components/LocaleProvider";
 import { ArchivePreview, type Preview } from "@/components/ArchivePreview";
+import { getFileKind } from "@/lib/fileIcons";
+import { FolderOpen } from "lucide-react";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -850,13 +852,20 @@ export function DecompressView({
                             key={`dir-${i}-${entry.name}`}
                             className="text-zinc-500 text-[12px] flex items-center gap-3 px-4 py-2 font-mono"
                           >
-                            <span className="w-4">📁</span>
+                            <FolderOpen size={13} className="text-amber-400 shrink-0" />
                             <span className="flex-1 truncate">{entry.name}</span>
                             <span className="text-zinc-700 text-[10.5px]">dir</span>
                           </div>
                         );
                       }
                       const checked = selected.has(entry.name);
+                      // Sprint 5.7.21-B-FileIcons-Shared: use the
+                      // shared file-icon helpers. Each file entry
+                      // gets a colored icon based on extension
+                      // (FileCode / FileImage / etc.) instead of
+                      // a generic 📄 emoji.
+                      const fileKind = getFileKind(entry.name);
+                      const FileIcon = fileKind.icon;
                       return (
                         <label
                           key={`file-${i}-${entry.name}`}
@@ -868,7 +877,14 @@ export function DecompressView({
                             onChange={() => toggleEntry(entry.name)}
                             className="accent-amber-500 w-4 h-4 flex-shrink-0"
                           />
-                          <span className="w-4 flex-shrink-0">📄</span>
+                          <div
+                            className={
+                              "w-4 h-4 rounded flex items-center justify-center shrink-0 " +
+                              fileKind.bg
+                            }
+                          >
+                            <FileIcon size={10} className={fileKind.color} strokeWidth={2} />
+                          </div>
                           <span className="flex-1 truncate">{entry.name}</span>
                           <span className="text-zinc-500 text-[10.5px] flex-shrink-0 tabular-nums">
                             {prettyBytes(entry.size)}
@@ -900,20 +916,49 @@ export function DecompressView({
                     {t("decompress.content")} ({legacyInfo.files.length} {t("decompress.files").toLowerCase()})
                   </summary>
                   <div className="mt-3 max-h-48 overflow-y-auto space-y-1">
-                    {legacyInfo.files.slice(0, 50).map((f, i) => (
-                      <div
-                        key={i}
-                        className="text-zinc-500 text-[12px] flex items-center gap-2 font-mono"
-                      >
-                        <span className="text-zinc-700 w-6 text-right">
-                          {f.is_dir ? "📁" : "📄"}
-                        </span>
-                        <span className="flex-1 truncate">{f.path}</span>
-                        <span className="text-zinc-700 text-[10.5px]">
-                          {prettyBytes(f.size)}
-                        </span>
-                      </div>
-                    ))}
+                    {legacyInfo.files.slice(0, 50).map((f, i) => {
+                      // Sprint 5.7.21-B-FileIcons-Shared: use the
+                      // shared file-icon helpers. The legacy file
+                      // list (single-stream archives) used 📁/📄
+                      // emoji icons; now each entry gets a
+                      // proper Lucide icon based on extension
+                      // (or FolderOpen for directories).
+                      if (f.is_dir) {
+                        return (
+                          <div
+                            key={i}
+                            className="text-zinc-500 text-[12px] flex items-center gap-2 font-mono"
+                          >
+                            <FolderOpen size={12} className="text-amber-400 shrink-0" />
+                            <span className="flex-1 truncate">{f.path}</span>
+                            <span className="text-zinc-700 text-[10.5px]">
+                              {prettyBytes(f.size)}
+                            </span>
+                          </div>
+                        );
+                      }
+                      const fileKind = getFileKind(f.path);
+                      const FileIcon = fileKind.icon;
+                      return (
+                        <div
+                          key={i}
+                          className="text-zinc-500 text-[12px] flex items-center gap-2 font-mono"
+                        >
+                          <div
+                            className={
+                              "w-4 h-4 rounded flex items-center justify-center shrink-0 " +
+                              fileKind.bg
+                            }
+                          >
+                            <FileIcon size={10} className={fileKind.color} strokeWidth={2} />
+                          </div>
+                          <span className="flex-1 truncate">{f.path}</span>
+                          <span className="text-zinc-700 text-[10.5px]">
+                            {prettyBytes(f.size)}
+                          </span>
+                        </div>
+                      );
+                    })}
                     {legacyInfo.files.length > 50 && (
                       <div className="text-zinc-600 text-[11px] pt-2">
                         … y {legacyInfo.files.length - 50} más
@@ -933,7 +978,7 @@ export function DecompressView({
               {t("decompress.dest")}
             </div>
             <div className="flex items-center gap-3 px-5 py-4 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
-              <span className="text-zinc-500 text-[13px]">📁</span>
+              <FolderOpen size={14} className="text-zinc-500 shrink-0" />
               <span className="text-white text-[14px] flex-1 truncate font-mono">
                 {destDir || t("compress.dest.detecting")}
               </span>

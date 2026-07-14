@@ -32,20 +32,12 @@ import { useLocale } from "@/components/LocaleProvider";
 import { type View } from "./NeoTopBar";
 import { type RecentOp } from "@/components/RecentView";
 import { useRecentEvents } from "@/lib/useAppData";
+import { getFileKind, getKindBadge } from "@/lib/fileIcons";
 import {
   Archive,
   FolderOpen,
   Send,
   ArrowRight,
-  FileText,
-  FileCode,
-  FileImage,
-  FileVideo,
-  FileAudio,
-  FileArchive,
-  FileSpreadsheet,
-  FileJson,
-  type LucideIcon,
 } from "lucide-react";
 
 type ActionId = "compress" | "decompress" | "share";
@@ -96,121 +88,7 @@ function relativeTime(
   return t("days_ago", { n: Math.floor(diff / 86_400_000) });
 }
 
-// Sprint 5.7.21-B-Home-Icons: file-type icon picker. Each
-// extension family maps to a Lucide icon + accent color so the
-// user can scan the recent activity and tell at a glance what
-// kind of file was worked with. The mapping is intentionally
-// broad (every common file type covered) and falls back to a
-// generic FileText for unknown extensions.
-type FileKind = {
-  icon: LucideIcon;
-  color: string;
-  bg: string;
-  border: string;
-};
 
-const FILE_ICON_MAP: Record<string, FileKind> = {
-  // Code — cyan (matches the "compress" code source use case)
-  js: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  jsx: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  ts: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  tsx: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  py: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  rs: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  go: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  java: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  rb: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  php: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  swift: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  kt: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  sh: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  html: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  css: { icon: FileCode, color: "text-cyan-300", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
-  // Images — violet
-  jpg: { icon: FileImage, color: "text-violet-300", bg: "bg-violet-500/10", border: "border-violet-500/20" },
-  jpeg: { icon: FileImage, color: "text-violet-300", bg: "bg-violet-500/10", border: "border-violet-500/20" },
-  png: { icon: FileImage, color: "text-violet-300", bg: "bg-violet-500/10", border: "border-violet-500/20" },
-  gif: { icon: FileImage, color: "text-violet-300", bg: "bg-violet-500/10", border: "border-violet-500/20" },
-  svg: { icon: FileImage, color: "text-violet-300", bg: "bg-violet-500/10", border: "border-violet-500/20" },
-  webp: { icon: FileImage, color: "text-violet-300", bg: "bg-violet-500/10", border: "border-violet-500/20" },
-  // Video — rose
-  mp4: { icon: FileVideo, color: "text-rose-300", bg: "bg-rose-500/10", border: "border-rose-500/20" },
-  mov: { icon: FileVideo, color: "text-rose-300", bg: "bg-rose-500/10", border: "border-rose-500/20" },
-  avi: { icon: FileVideo, color: "text-rose-300", bg: "bg-rose-500/10", border: "border-rose-500/20" },
-  mkv: { icon: FileVideo, color: "text-rose-300", bg: "bg-rose-500/10", border: "border-rose-500/20" },
-  webm: { icon: FileVideo, color: "text-rose-300", bg: "bg-rose-500/10", border: "border-rose-500/20" },
-  // Audio — amber
-  mp3: { icon: FileAudio, color: "text-amber-300", bg: "bg-amber-500/10", border: "border-amber-500/20" },
-  wav: { icon: FileAudio, color: "text-amber-300", bg: "bg-amber-500/10", border: "border-amber-500/20" },
-  flac: { icon: FileAudio, color: "text-amber-300", bg: "bg-amber-500/10", border: "border-amber-500/20" },
-  aac: { icon: FileAudio, color: "text-amber-300", bg: "bg-amber-500/10", border: "border-amber-500/20" },
-  ogg: { icon: FileAudio, color: "text-amber-300", bg: "bg-amber-500/10", border: "border-amber-500/20" },
-  // Archives — emerald (matches the share/archive theme)
-  zip: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  tar: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  gz: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  tgz: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  bz2: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  xz: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  "7z": { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  rar: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  nxs: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  nxs6: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  nxe: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  nxr: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  lz: { icon: FileArchive, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  // Spreadsheets — emerald
-  xls: { icon: FileSpreadsheet, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  xlsx: { icon: FileSpreadsheet, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  csv: { icon: FileSpreadsheet, color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
-  // JSON — yellow
-  json: { icon: FileJson, color: "text-yellow-300", bg: "bg-yellow-500/10", border: "border-yellow-500/20" },
-  // Documents — zinc (neutral)
-  pdf: { icon: FileText, color: "text-zinc-300", bg: "bg-white/[0.04]", border: "border-white/[0.08]" },
-  doc: { icon: FileText, color: "text-zinc-300", bg: "bg-white/[0.04]", border: "border-white/[0.08]" },
-  docx: { icon: FileText, color: "text-zinc-300", bg: "bg-white/[0.04]", border: "border-white/[0.08]" },
-  txt: { icon: FileText, color: "text-zinc-300", bg: "bg-white/[0.04]", border: "border-white/[0.08]" },
-  md: { icon: FileText, color: "text-zinc-300", bg: "bg-white/[0.04]", border: "border-white/[0.08]" },
-};
-
-const DEFAULT_FILE_KIND: FileKind = {
-  icon: FileText,
-  color: "text-zinc-400",
-  bg: "bg-white/[0.04]",
-  border: "border-white/[0.08]",
-};
-
-function getFileKind(filename: string): FileKind {
-  // Strip path, then extension. Handles tar.gz, .tar.bz2, etc.
-  // by taking the last extension only (most common case).
-  const base = filename.split("/").pop() ?? filename;
-  // Special: compound extensions like .tar.gz, .tar.bz2, .tar.xz
-  const lower = base.toLowerCase();
-  for (const compound of ["tar.gz", "tar.bz2", "tar.xz"]) {
-    if (lower.endsWith(`.${compound}`)) {
-      return FILE_ICON_MAP[compound] ?? DEFAULT_FILE_KIND;
-    }
-  }
-  const ext = base.split(".").pop()?.toLowerCase() ?? "";
-  return FILE_ICON_MAP[ext] ?? DEFAULT_FILE_KIND;
-}
-
-// Kind badge: small icon overlay on the file icon. The
-// user can see at a glance whether the row is a compress,
-// decompress, or share op.
-function getKindBadge(kind: "compress" | "decompress" | "share"): {
-  icon: LucideIcon;
-  color: string;
-  bg: string;
-} {
-  if (kind === "compress") {
-    return { icon: Archive, color: "text-cyan-300", bg: "bg-cyan-500/20" };
-  }
-  if (kind === "decompress") {
-    return { icon: FolderOpen, color: "text-amber-300", bg: "bg-amber-500/20" };
-  }
-  return { icon: Send, color: "text-emerald-300", bg: "bg-emerald-500/20" };
-}
 
 export function LandingPage({
   onNavigate,
