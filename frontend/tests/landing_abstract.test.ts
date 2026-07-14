@@ -31,12 +31,14 @@ function has_key(key: string): boolean {
 
 test("LandingPage: file is small (abstract)", () => {
   // The previous version was 674 lines. The abstract version
-  // should be under 400 lines. We pin a generous ceiling of
-  // 400 to allow future additions.
+  // grew slightly with the home-icons sprint (file-type icon
+  // map + kind badge helpers + RecentRow icon rendering) but
+  // it's still much smaller than the pre-abstract version.
+  // We pin a ceiling of 500 to allow future additions.
   const lineCount = src.split("\n").length;
   assert.ok(
-    lineCount < 400,
-    `LandingPage should be <400 lines (was 674); got ${lineCount}`
+    lineCount < 500,
+    `LandingPage should be <500 lines (was 674); got ${lineCount}`
   );
 });
 
@@ -164,6 +166,81 @@ test("LandingPage: uses useRecentEvents hook for persistent activity", () => {
   assert.ok(
     src.includes("persistedOps"),
     "must name the persistent ops variable 'persistedOps'"
+  );
+});
+
+test("LandingPage: RecentRow has file-type icon + kind badge", () => {
+  // Sprint 5.7.21-B-Home-Icons: each recent activity row
+  // shows a file-type icon (FileCode / FileImage / FileVideo
+  // / etc.) based on the filename extension, with a kind
+  // badge overlay (compress / decompress / share).
+  assert.ok(
+    src.includes("getFileKind"),
+    "must define a getFileKind helper for file-type icons"
+  );
+  assert.ok(
+    src.includes("getKindBadge"),
+    "must define a getKindBadge helper for kind badges"
+  );
+  assert.ok(
+    src.includes("FILE_ICON_MAP"),
+    "must define a FILE_ICON_MAP with extension → icon mappings"
+  );
+  // The RecentRow must use the FileIcon and KindIcon.
+  assert.ok(
+    src.includes("FileIcon size={16}") || src.includes("FileIcon size="),
+    "RecentRow must render a file-type icon"
+  );
+  assert.ok(
+    src.includes("KindIcon size={8}"),
+    "RecentRow must render a kind badge icon"
+  );
+  // The row has a data-testid for tests.
+  assert.ok(
+    src.includes('data-testid="home-recent-row"'),
+    "RecentRow must have a data-testid for tests"
+  );
+});
+
+test("LandingPage: file icon map covers common file types", () => {
+  // The icon map must cover at least the common file types
+  // a real user would work with: code, images, video, audio,
+  // archives, documents, and spreadsheets. The keys in the
+  // FILE_ICON_MAP are JS object keys (not quoted), so we
+  // match `  ext: {` (with leading indent) to be precise.
+  for (const ext of [
+    // Code
+    "js", "ts", "py", "rs", "go",
+    // Images
+    "jpg", "png", "svg", "webp",
+    // Video
+    "mp4", "mov", "mkv", "webm",
+    // Audio
+    "mp3", "wav", "flac",
+    // Archives
+    "zip", "tar", "gz", "bz2", "xz", "nxs", "nxs6", "nxe",
+    // Documents
+    "pdf", "doc", "docx", "txt", "md",
+    // Spreadsheets
+    "xls", "xlsx", "csv",
+    // JSON
+    "json",
+  ]) {
+    assert.ok(
+      new RegExp(`\\b${ext}:\\s*\\{`).test(src),
+      `FILE_ICON_MAP must include the "${ext}" extension`
+    );
+  }
+});
+
+test("LandingPage: kind badge has 3 distinct states", () => {
+  // The kind badge switches between compress / decompress /
+  // share with distinct colors and icons.
+  assert.ok(
+    /getKindBadge[\s\S]{0,400}compress[\s\S]{0,200}decompress[\s\S]{0,200}share/.test(
+      src
+    ),
+    "getKindBadge must handle all 3 kinds (compress / decompress / share)"
   );
 });
 
