@@ -38,16 +38,19 @@ function has_key(key: string): boolean {
 }
 
 test("ShareView: file is smaller (abstract)", () => {
-  // The original was 1266 lines. Sprint 5.7.21-B-Share-Improve
-  // + Sprint 5.7.21-B-Share-Icons added icons, state machine,
-  // connection badges, and other visual improvements — the
-  // file grew to ~1578 lines but the design quality is
-  // significantly better. We pin a ceiling of 1600 to allow
-  // future additions without regression to the pre-abstract state.
+  // The original was 1266 lines. The 5.7.21-B-Abstract +
+  // 5.7.21-B-Share-Improve + 5.7.21-B-Share-Icons + 5.7.21-B-Share-Fixes
+  // sprints added icons, state machine, paste/clear/reveal
+  // buttons, and other visual improvements. The advanced
+  // options accordion (78 lines of dead UI) was removed
+  // because it was not wired to the backend. Net file growth
+  // is justified by the additional UX features. We pin a
+  // ceiling of 1700 to allow future additions without
+  // regression to the pre-abstract state.
   const lineCount = src.split("\n").length;
   assert.ok(
-    lineCount < 1600,
-    `ShareView should be <1600 lines (was 1266 before this sprint); got ${lineCount}`
+    lineCount < 1700,
+    `ShareView should be <1700 lines (was 1266 before this sprint); got ${lineCount}`
   );
 });
 
@@ -291,5 +294,95 @@ test("ShareView: SendPanel uses better drop zone icon (Share2 + Layers)", () => 
   assert.ok(
     /Inbox size=\{32\}/.test(src),
     "drop zone on drag-over must use Inbox icon"
+  );
+});
+
+test("ShareView: SendPanel has a cancel button (Sprint 5.7.21-B-Share-Fixes)", () => {
+  // The previous onCancel handler was defined but never wired
+  // to any button — dead code. The Sprint 5.7.21-B-Share-Fixes
+  // pass added a cancel button that calls onCancel.
+  assert.ok(
+    src.includes("onClick={onCancel}"),
+    "SendPanel must have a button that calls onCancel"
+  );
+  assert.ok(
+    src.includes("data-testid=\"send-cancel\""),
+    "cancel button must have a data-testid for tests"
+  );
+  assert.ok(
+    /share\.send\.canceling/.test(src),
+    "must reference share.send.canceling i18n key (loading state)"
+  );
+});
+
+test("ShareView: removed the dead advanced options accordion", () => {
+  // The previous "Advanced options" accordion (custom slug /
+  // expiration / download limit) was NOT wired to the backend
+  // — the p2p_send_start_cmd only takes file_path + code. The
+  // UI looked like a working feature but did nothing. Sprint
+  // 5.7.21-B-Share-Fixes removed it.
+  assert.ok(
+    !src.includes("share.send.customslug"),
+    "must NOT render the custom slug option (not wired to backend)"
+  );
+  assert.ok(
+    !src.includes("share.send.expiration"),
+    "must NOT render the expiration select (not wired)"
+  );
+  assert.ok(
+    !src.includes("share.send.downloadlimit"),
+    "must NOT render the download limit select (not wired)"
+  );
+});
+
+test("ShareView: ReceivePanel has Paste + Clear buttons on the token input", () => {
+  // Sprint 5.7.21-B-Share-Fixes: the user previously had to
+  // type Cmd+V into the textarea or manually delete the
+  // token. Now there's a Paste button (uses Clipboard API)
+  // and a Clear button (only when there's a value).
+  assert.ok(
+    src.includes("data-testid=\"receive-paste-token\""),
+    "must have a Paste button with data-testid"
+  );
+  assert.ok(
+    src.includes("data-testid=\"receive-clear-token\""),
+    "must have a Clear button with data-testid"
+  );
+  assert.ok(
+    /share\.receive\.btn\.paste/.test(src),
+    "must reference share.receive.btn.paste i18n key"
+  );
+  assert.ok(
+    /share\.receive\.btn\.clear/.test(src),
+    "must reference share.receive.btn.clear i18n key"
+  );
+});
+
+test("ShareView: ReceivePanel has Reveal in Finder button after success", () => {
+  // Sprint 5.7.21-B-Share-Fixes: the success card previously
+  // only showed the path. Now there's a button to reveal the
+  // file in Finder/Explorer.
+  assert.ok(
+    src.includes("data-testid=\"receive-reveal\""),
+    "success card must have a Reveal button with data-testid"
+  );
+  assert.ok(
+    src.includes("reveal_in_finder_cmd"),
+    "must invoke the reveal_in_finder_cmd Tauri command"
+  );
+  assert.ok(
+    /share\.receive\.btn\.reveal/.test(src),
+    "must reference share.receive.btn.reveal i18n key"
+  );
+});
+
+test("ShareView: STEPS is memoized with useMemo", () => {
+  // Sprint 5.7.21-B-Share-Fixes: STEPS was rebuilt on every
+  // render. Now memoized with useMemo so the step array is
+  // stable across renders (only changes when kind or locale
+  // changes).
+  assert.ok(
+    /const STEPS = useMemo\(/.test(src),
+    "STEPS must be memoized with useMemo"
   );
 });
