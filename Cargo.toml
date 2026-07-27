@@ -17,7 +17,7 @@ resolver = "2"
 
 [package]
 name = "nexus-compress"
-version = "0.1.2"
+version = "0.3.0"
 edition = "2021"
 description = "NexusCompress - hybrid compressor (LZ77 + rANS + dict codec)"
 # SPRINT 5.6.28: changed from `MIT` to `AGPL-3.0 + Commercial`.
@@ -33,6 +33,14 @@ path = "src/lib.rs"
 [dependencies]
 rans = "0.4"
 serde = { version = "1", features = ["derive"] }
+# Sprint 5.7.10-C: serde_json is now a direct dep so the
+# `CompressionProfile::from_json` entry point on the
+# `supreme_engine` module can parse the new nested
+# `profile: { ... }` payload from the Tauri command. It
+# was previously a transitive dep through `tauri::command`
+# macros, but the engine now uses it in its public API
+# surface.
+serde_json = "1"
 # Sprint 5.7 hotfix #21: RAM auto-tune for the LZMA dictionary size.
 # Pure-Rust, ~no-deps, ~1 ms on first call (cached by the OS page-cache
 # after that). We only need the system's available memory at compress
@@ -89,6 +97,34 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # xz-sys), battle-tested by every Linux distro and used by `xz`.
 # Pure-Rust alternative would be `xz = "0.4"`.
 xz2 = "0.1"
+# Sprint 5.7.21: external archive format support for the
+# `decompress_target_with_progress` dispatch. Adds a
+# second branch to the magic-byte sniffer that handles
+# the four most common third-party formats: .zip, .tar,
+# .tar.gz, and standalone .gz files.
+# - zip 2 (deflate-only): powers the .zip branch. RAR/7Z
+#   are intentionally NOT in this set — they need proprietary
+#   decoders and a different licensing story.
+# - tar 0.4: pure-Rust TAR reader, no compression; we compose
+#   it with flate2 for .tar.gz.
+# - flate2 1: stream gzip decode. Already a transitive dep
+#   via xz2, but we declare it directly so the .gz branch
+#   is in our public API surface.
+# - bzip2-rs 0.1: pure-Rust BZ2 decoder. ~7k LoC, no C deps.
+#   Powers the .bz2 extract path.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
+bzip2-rs = "0.1"
+# Sprint 5.7.2 hotfix #32: zstd for fast V6Solid encoding.
+# zstd ~300-500 MB/s on Apple Silicon vs LZMA9 ~20-50 MB/s.
+# Streaming API supports concatenated frames (multi-chunk = no problem).
+# `zdict_builder` feature enables dictionary training (from_samples, etc.).
+zstd = { version = "0.13", features = ["zdict_builder"] }
+# Sprint 5.7.6: Sonic Scheduler — num_cpus for thread count.
+# Already transitive via rayon, but pin it directly so the
+# scheduler module doesn't depend on rayon's internal API.
+num_cpus = "1"
 # v6 AST minifier. swc_core is the meta-crate that unifies the
 # swc_ecma_parser / swc_ecma_codegen / swc_ecma_ast sub-crates
 # under a single versioned release family. Using the meta-crate
@@ -106,6 +142,12 @@ serde_json = "1"
 # test target fails to compile even though the lib target builds
 # clean. Adding it back is a no-op for the runtime (dev-dep only).
 tempfile = "3"
+# Sprint 5.7.5: zip-format-coverage tests in src/solid_archive.rs
+# use the `zip` crate to build minimal but real OOXML/ODF/iWork
+# files (docx, xlsx, pptx, epub, pages, etc.) so the format
+# roundtrip tests exercise the actual zip central directory
+# instead of stub bytes. The `zip` crate is dev-only.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Sprint 5.7.1 hotfix #21: pull `xattr` ONLY on Unix targets.
 # Declared as `optional = true` here so the `fs-xattr` feature

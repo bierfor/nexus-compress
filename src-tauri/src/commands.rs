@@ -14,15 +14,144 @@
 //! the return values to the frontend via JSON.
 
 use nexus_compress::api::{
-    self, ApiError, ApiResult, BackendInfo, CompressResult, CompressTargetResult, CompressionBackend,
+    self, ApiError, ApiResult, CompressResult, CompressTargetResult,
     CompressionLevel, DecompressResult, DecompressTargetResult, EngineInfo, PeekResult,
     ProgressEvent, SelfTestResult,
+};
+// Sprint 5.7.10-E: removed `BackendInfo` and `CompressionBackend` from
+// the api imports. The legacy `compress_bytes_with_backend_cmd`,
+// `compress_directory_with_backend_cmd`, and `backend_info_cmd`
+// Tauri commands are gone (the SupremeEngine is the only public
+// compress path). The frontend never called any of them.
+use nexus_compress::supreme_engine::{
+    CompressionProfile, ProfileCodec, ProfileFidelity, ProfileMode, PROFILE_SCHEMA_VERSION,
 };
 use std::path::PathBuf;
 use std::str::FromStr;
 
 fn to_ipc<T>(r: ApiResult<T>) -> Result<T, String> {
     r.map_err(|e| format!("{}: {}", e.code, e.message))
+}
+
+/// Sprint 5.7.10-C: translate the legacy flat-field Tauri
+/// request shape into a `CompressionProfile`.
+///
+/// The 5.7.10-A/-B/-C infrastructure makes the engine profile-
+/// driven, but the frontend still sends the legacy flat fields
+/// (`backend`, `codec`, `lossless`, `corpus_mode`, etc.) for
+/// backward compatibility. This helper maps each flat field
+/// to its profile counterpart, defaulting to the safe option
+/// when the field is missing.
+///
+/// In 5.7.10-D the frontend switches to sending
+/// `{ req: { path, profile: { ... } } }` directly. The
+/// `from_json` constructor on `CompressionProfile` already
+/// handles the nested shape, so this helper becomes a
+/// one-line passthrough.
+fn build_profile_from_legacy_req(
+    req: &serde_json::Value,
+) -> Result<CompressionProfile, String> {
+    // If the request includes a nested `profile` object,
+    // use it directly (5.7.10-D forward path).
+    if let Some(profile_value) = req.get("profile") {
+        return CompressionProfile::from_json(profile_value);
+    }
+
+    // Legacy flat-field shape (5.7.10-C backward-compat path).
+    //
+    // `mode`: the preset ID maps directly to ProfileMode
+    // ("rapido" | "balanceado" | "ultra"). Default "balanceado".
+    let mode = req
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .map(|s| ProfileMode::from_str(s))
+        .transpose()?
+        .unwrap_or_default();
+
+    // `codec`: "auto" | "lzma" | "zstd". Default "auto".
+    let codec = req
+        .get("codec")
+        .and_then(|v| v.as_str())
+        .map(|s| ProfileCodec::from_str(s))
+        .transpose()?
+        .unwrap_or_default();
+
+    // `fidelity`: derived from `lossless` / `no_minify` boolean.
+    // Both flag forms are accepted (the legacy CLI uses one
+    // and the legacy GUI the other).
+    let fidelity = if req
+        .get("lossless")
+        .and_then(|v| v.as_bool())
+        .or_else(|| req.get("no_minify").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+    {
+        ProfileFidelity::Lossless
+    } else {
+        ProfileFidelity::Lossy
+    };
+
+    // `corpus_mode`: "everything" | "source" | "minimal".
+    // Default "everything" (5.7.7 inversion).
+    let corpus_mode = req
+        .get("corpus_mode")
+        .and_then(|v| v.as_str())
+        .map(|s| api::CorpusMode::from_str(s))
+        .transpose()?
+        .unwrap_or_default();
+
+    // `raw_extensions` / `minify_extensions`: arrays of strings.
+    // Empty arrays default to "use the built-in per-extension
+    // table" (the legacy behaviour).
+    let raw_extensions: Vec<String> = req
+        .get("raw_extensions")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let minify_extensions: Vec<String> = req
+        .get("minify_extensions")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    // `encrypt` / `recovery_level`: derived from the password
+    // + recovery pair. Encrypt is true when password is set
+    // (the legacy path also forced encrypt when password was
+    // present). Recovery defaults to "low" (the design-doc
+    // default of 10% parity).
+    let encrypt = req.get("password").and_then(|v| v.as_str()).is_some();
+    let recovery_level = req
+        .get("recovery_level")
+        .and_then(|v| v.as_str())
+        .map(|s| api::RecoveryLevel::from_str(s))
+        .transpose()?
+        .unwrap_or_default();
+
+    // Sprint 5.7.18: --skip-archive flag plumbing. The
+    // frontend sends `skipArchive` (camelCase) in the
+    // profile; we accept it directly from the request for
+    // the legacy flat-field shape (so old frontends can
+    // still set it). The `#[serde(default)]` on
+    // `CompressionProfile.skip_archive` means the nested
+    // path (Sprint 5.7.10-D) also handles a missing field
+    // gracefully.
+    let skip_archive: bool = req
+        .get("skip_archive")
+        .or_else(|| req.get("profile").and_then(|p| p.get("skipArchive")))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    Ok(CompressionProfile {
+        schema_version: PROFILE_SCHEMA_VERSION,
+        mode,
+        codec,
+        fidelity,
+        corpus_mode,
+        raw_extensions,
+        minify_extensions,
+        encrypt,
+        recovery_level,
+        skip_archive,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -99,46 +228,6 @@ pub async fn engine_info_cmd() -> Result<EngineInfo, String> {
     Ok(api::engine_info())
 }
 
-#[tauri::command]
-pub async fn backend_info_cmd() -> Result<Vec<BackendInfo>, String> {
-    Ok(api::backend_info())
-}
-
-#[tauri::command]
-pub async fn compress_bytes_with_backend_cmd(
-    input: Vec<u8>,
-    file_name: String,
-    backend: String,
-    lzma_level: u32,
-) -> Result<CompressResult, String> {
-    let backend =
-        CompressionBackend::from_str(&backend).map_err(|e| format!("invalid_backend: {}", e))?;
-    tauri::async_runtime::spawn_blocking(move || {
-        api::compress_bytes_with_backend(&input, &file_name, backend, lzma_level)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {}", e))
-}
-
-#[tauri::command]
-pub async fn compress_directory_with_backend_cmd(
-    input_dir: String,
-    backend: String,
-    lzma_level: u32,
-) -> Result<(api::DirectoryResult, Vec<u8>), String> {
-    let backend =
-        CompressionBackend::from_str(&backend).map_err(|e| format!("invalid_backend: {}", e))?;
-    let path = PathBuf::from(input_dir);
-    tauri::async_runtime::spawn_blocking(move || {
-        to_ipc(
-            api::compress_directory_with_backend(&path, backend, lzma_level)
-                .map(|(r, a)| (r, a.to_vec())),
-        )
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {}", e))?
-}
-
 /// Compress any path by reference — auto-detects file vs directory.
 /// This is the entry point the GUI uses when the user drops a file
 /// or folder onto the dropzone (the OS gives us the path, not the
@@ -163,42 +252,52 @@ pub async fn compress_target_cmd(
     db_state: State<'_, Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
     req: serde_json::Value,
 ) -> Result<CompressTargetResult, String> {
-    let path = req
+    // Sprint 5.7.10-C: this command was ~100 lines of JSON
+    // parsing + if-let dispatch into 4 different backend
+    // functions. It's now a thin shell that:
+    //   1. Builds a `CompressionProfile` from the request fields
+    //      (translates the legacy flat shape to the profile).
+    //   2. Builds a `CompressInvocation` (profile + path + password
+    //      + output dir).
+    //   3. Hands it to `SupremeEngine::compress`, which resolves
+    //      the right backend / codec / preprocessor internally.
+    //
+    // The legacy flat-field shape is preserved for 5.7.10-C
+    // (this sprint) so the live frontend keeps working
+    // unchanged. In 5.7.10-D the command will accept a
+    // nested `profile: { ... }` object directly. In
+    // 5.7.10-E the `CompressionBackend` enum is deleted.
+    let path_str = req
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing 'path' in req".to_string())?
         .to_string();
-    let backend_str = req
-        .get("backend")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing 'backend' in req".to_string())?;
-    let lzma_level = req.get("lzma_level").and_then(|v| v.as_u64()).unwrap_or(6) as u32;
     let output_dir = req
         .get("output_dir")
         .and_then(|v| v.as_str())
         .map(PathBuf::from);
-    // Sprint 5.7.2 PR #4: optional encryption. When the frontend
-    // includes `password` in the req, we route to the encrypted
-    // pipeline (v4 codec + AES-256-GCM + optional Reed-Solomon).
-    // The `recovery_level` string ("off" / "low" / "high") defaults
-    // to "low" (10 % parity) when password is set, matching the
-    // design doc's "recovery on by default" choice.
-    let password: Option<String> = req
+    let password: Option<Vec<u8>> = req
         .get("password")
         .and_then(|v| v.as_str())
-        .map(String::from);
-    let recovery_str: Option<String> = req
-        .get("recovery_level")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let backend =
-        CompressionBackend::from_str(backend_str).map_err(|e| format!("invalid_backend: {}", e))?;
-    let p = PathBuf::from(path);
+        .map(|s| s.as_bytes().to_vec());
+
+    // Translate the legacy flat-field shape to a CompressionProfile.
+    // The frontend will switch to sending `profile: { ... }`
+    // directly in 5.7.10-D. Until then, every field that
+    // exists in the profile is mapped from its flat twin.
+    let profile = build_profile_from_legacy_req(&req)?;
+    let p = PathBuf::from(&path_str);
     let filename_for_db = p
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("file")
         .to_string();
+    let invocation = nexus_compress::supreme_engine::CompressInvocation {
+        profile,
+        path: p,
+        password,
+        output_dir,
+    };
 
     let inner: ApiResult<CompressTargetResult> = tauri::async_runtime::spawn_blocking(move || {
         let app_for_event = app.clone();
@@ -210,34 +309,87 @@ pub async fn compress_target_cmd(
         let cb = |event: ProgressEvent| {
             throttler.feed("compress-progress", &event);
         };
-        // Two paths: encrypted (password is set) or plain.
-        // We keep the dispatch in one function so the frontend
-        // doesn't have to call different commands; the password
-        // is the only signal that decides the branch.
-        if let Some(pwd) = password.as_deref() {
-            let recovery = match recovery_str.as_deref() {
-                Some(s) => api::RecoveryLevel::from_str(s)
-                    .map_err(|e| ApiError::new("compress.invalid_recovery_level", e))?,
-                None => api::RecoveryLevel::default(),
-            };
-            let opts = api::CompressWithPasswordOptions {
-                password: pwd.as_bytes(),
-                recovery,
-            };
-            api::compress_target_with_password(&p, &opts, cb)
-        } else {
-            api::compress_target(
-                &p,
-                backend,
-                lzma_level,
-                output_dir.as_deref(),
-                cb,
-            )
-        }
+        nexus_compress::supreme_engine::SupremeEngine::compress(&invocation, cb)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))?;
-    let result: CompressTargetResult = to_ipc(inner)?;
+    let mut result: CompressTargetResult = to_ipc(inner)?;
+
+    // Sprint 5.7.13: write the compressed bytes to disk BEFORE
+    // returning to the frontend. The previous version returned
+    // `result.compressed_bytes` (a `Vec<u8>` of the entire
+    // archive) over the Tauri IPC. On a 5 GB corpus the WebView
+    // would spend minutes copying the buffer through the IPC
+    // boundary (`WebKit::WebURLSchemeTask::didReceiveData` →
+    // `WebCore::SharedMemory::copyBuffer` → `_platform_memmove`)
+    // and the UI would freeze, ballooning the process footprint
+    // to 30+ GB. The fix is to write the file here, in the
+    // backend, and return only the path. The frontend already
+    // expects `output_path` to be non-empty
+    // (CompressView.tsx:642 hotfix #40).
+    let output_dir_for_write = req
+        .get("output_dir")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    // Resolve the final output path: `output_dir/<basename>.nxs6`
+    // if the user picked a directory, or `<basename>.nxs6`
+    // next to the input if they didn't.
+    let final_output_path: PathBuf = match output_dir_for_write.as_ref() {
+        Some(dir) if !dir.as_os_str().is_empty() => {
+            dir.join(format!("{}.{}", filename_for_db, result.output_ext))
+        }
+        _ => {
+            // No output_dir: write next to the input.
+            let input_path = PathBuf::from(&path_str);
+            let parent = input_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            parent.join(format!(
+                "{}.{}",
+                input_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("archive"),
+                result.output_ext
+            ))
+        }
+    };
+    // Only write if the engine actually produced bytes
+    // (i.e. compression succeeded). For an empty corpus the
+    // engine returns 0 bytes and the frontend should see that.
+    if !result.compressed_bytes.is_empty() {
+        if let Some(parent) = final_output_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return Err(format!(
+                    "failed to create output dir {}: {}",
+                    parent.display(),
+                    e
+                ));
+            }
+        }
+        if let Err(e) = std::fs::write(&final_output_path, &result.compressed_bytes) {
+            return Err(format!(
+                "failed to write archive to {}: {}",
+                final_output_path.display(),
+                e
+            ));
+        }
+        result.output_path = final_output_path.to_string_lossy().to_string();
+        eprintln!(
+            "[nexus-rar] wrote {} bytes to {}",
+            result.compressed_size,
+            result.output_path
+        );
+    } else {
+        // Empty archive (e.g. empty corpus). We still want
+        // output_path to reflect what we tried to do so the
+        // UI can surface the "0 bytes" state cleanly.
+        result.output_path = final_output_path.to_string_lossy().to_string();
+    }
+    // Strip the bytes from the IPC payload. The frontend doesn't
+    // need them — it shows the path in the success card and
+    // optionally opens Finder to the path.
+    result.compressed_bytes = Vec::new();
 
     // Sprint 5.7 hotfix #20: persist into the local SQLite store so
     // the Recientes view (RecentView.tsx) and the Home dashboard
@@ -1358,4 +1510,112 @@ pub async fn reset_stats_cmd(
 ) -> Result<(), String> {
     let conn = state.lock().await;
     db::reset_stats(&conn).map_err(|e| e.to_string())
+}
+
+/// Sprint 5.7.19 (v0.3.0): the "Best Mode" preview.
+///
+/// Reads up to 5 MB of the input (file or directory sample)
+/// and runs `ProfileAuto::resolve_best()` on it. Returns the
+/// recommended (mode, codec) pair plus the expected ratio and
+/// wall-time, so the UI can show:
+///
+///   "Estrategia recomendada: Zstd-3 Lossy (ratio 6.4x, 80 MB/s)"
+///
+/// before the user actually commits to a compress.
+///
+/// The input can be a file or a directory. For directories we
+/// walk the first 5 MB of files (sorted by path) so the sample
+/// is deterministic.
+#[tauri::command]
+pub async fn preview_corpus_cmd(req: serde_json::Value) -> Result<serde_json::Value, String> {
+    use nexus_compress::supreme_engine::{resolve_best, TimeBudget};
+    let path_str = req
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'path' in req".to_string())?
+        .to_string();
+    let path = std::path::PathBuf::from(&path_str);
+    let budget = req
+        .get("budget")
+        .and_then(|v| v.as_str())
+        .unwrap_or("standard");
+    let budget = match budget {
+        "instant" => TimeBudget::Instant,
+        "unlimited" => TimeBudget::Unlimited,
+        _ => TimeBudget::Standard,
+    };
+    // Read up to 5 MB of the input. For a file, we read the
+    // first 5 MB. For a directory, we read files in path
+    // order until we've collected 5 MB.
+    let sample = read_sample_for_preview(&path, 5 * 1024 * 1024)
+        .map_err(|e| format!("failed to read sample: {}", e))?;
+    // Run the orchestrator. This runs IN RAM (no I/O on
+    // the rest of the corpus) so it's safe to call from the
+    // UI thread.
+    let decision = resolve_best(&sample, budget);
+    Ok(serde_json::json!({
+        "mode": match decision.mode {
+            nexus_compress::supreme_engine::ProfileMode::Rapido => "rapido",
+            nexus_compress::supreme_engine::ProfileMode::Balanceado => "balanceado",
+            nexus_compress::supreme_engine::ProfileMode::Ultra => "ultra",
+        },
+        "codec": match decision.codec {
+            nexus_compress::supreme_engine::ProfileCodec::Auto => "auto",
+            nexus_compress::supreme_engine::ProfileCodec::Lzma => "lzma",
+            nexus_compress::supreme_engine::ProfileCodec::Zstd => "zstd",
+        },
+        "expected_ratio": decision.expected_ratio,
+        "expected_time_ms": decision.expected_time_ms,
+    }))
+}
+
+/// Read up to `max_bytes` of the input. For a file, just the
+/// first `max_bytes`. For a directory, the concatenation of
+/// files in path order until we hit the cap.
+fn read_sample_for_preview(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+    if !path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("path does not exist: {}", path.display()),
+        ));
+    }
+    let metadata = std::fs::metadata(path)?;
+    if metadata.is_file() {
+        // Single file: read up to max_bytes.
+        use std::io::Read;
+        let mut f = std::fs::File::open(path)?;
+        let mut buf = Vec::with_capacity(max_bytes.min(8 * 1024));
+        let mut handle = f.take(max_bytes as u64);
+        handle.read_to_end(&mut buf)?;
+        Ok(buf)
+    } else {
+        // Directory: walk and concatenate.
+        let mut buf = Vec::with_capacity(max_bytes);
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            if buf.len() >= max_bytes {
+                break;
+            }
+            use std::io::Read;
+            let mut f = match std::fs::File::open(&p) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let remaining = max_bytes - buf.len();
+            let mut handle = f.take(remaining as u64);
+            let mut chunk = Vec::with_capacity(remaining);
+            if handle.read_to_end(&mut chunk).is_err() {
+                continue;
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
+    }
 }

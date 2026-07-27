@@ -213,28 +213,12 @@ fn main() {
     println!("Use the v4 `.nxar` (per-file lossless) when roundtrip fidelity matters.");
 }
 
+/// Walk the entire corpus tree (Everything mode — no skip-list).
+/// Thin wrapper around `nexus_compress::walker::walk` so the
+/// bench harness shares the same walk semantics as the CLI / GUI.
+/// Sprint 5.7.10-B consolidated the 4 duplicate walkers into
+/// `src/walker.rs`; this used to be a 22-line local recursive
+/// walker.
 fn walk_dir(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                walk(root, &path, out)?;
-            } else if file_type.is_file() {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let bytes = std::fs::read(&path)?;
-                out.push((rel, bytes));
-            }
-        }
-        Ok(())
-    }
-    let mut out = Vec::new();
-    walk(root, root, &mut out)?;
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    Ok(nexus_compress::walker::walk(root, nexus_compress::api::CorpusMode::Everything, false)?.files)
 }

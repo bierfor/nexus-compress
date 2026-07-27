@@ -13,7 +13,7 @@
  *     pushes to it via onComplete
  */
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { type View } from "@/components/NeoTopBar";
 import { useLocale } from "@/components/LocaleProvider";
 import {
@@ -24,7 +24,32 @@ import {
   AlertCircle,
   File as FileIcon,
   FilePlus,
+  Settings as SettingsIcon,
+  Sliders,
 } from "lucide-react";
+import {
+  type CompressionProfile,
+  type AnyProfile,
+  type CustomProfile,
+  BUILTIN_PRESETS,
+  DEFAULT_PROFILE,
+  loadCustomProfiles,
+  saveCustomProfiles,
+  profilesEqual,
+} from "@/lib/profiles";
+// Sprint 5.7.21-B-Abstract: the Compress page is now
+// abstract — the configuration UI (5-section accordion +
+// 7-card preset grid + savings preview) is gone from the
+// main view. The user sees: drop zone + active preset chip
+// + Compress action. All fine-tuning lives behind a single
+// "Configure" button that opens the SettingsDrawer (slide-in
+// from the right). The PresetPicker is the chip + popover
+// that replaces the old PresetCard grid.
+import { CompressStepper } from "./CompressStepper";
+import { CompressStickyBar } from "./CompressStickyBar";
+import { CompressSuccess } from "./CompressSuccess";
+import { SettingsDrawer } from "./SettingsDrawer";
+import { PresetPicker } from "./PresetPicker";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -46,6 +71,10 @@ interface CompressResult {
   ratio: number;
   compress_time_ms: number;
   n_files: number;
+  /// Sprint 5.7.2 hotfix #44: bytes skipped by the dev-cache filter.
+  /// Surfaced as a tooltip on the success card so the user
+  /// understands a low ratio on a cache-heavy corpus is intentional.
+  skipped_bytes?: number;
 }
 
 interface ProgressEvent {
@@ -86,36 +115,47 @@ function formatRate(bps: number): string {
 
 type Mode = "rapido" | "balanceado" | "ultra";
 
+// Sprint 5.7.2 hotfix #47: codec toggle. "auto" keeps the
+// entropy-flip pipeline; "lzma" and "zstd" pin a single codec
+// and skip the flip. The string values match the CLI
+// `--codec` argument and the Tauri command's `codec` field.
+type CodecChoice = "auto" | "lzma" | "zstd";
+
+// Static data — titles and descriptions come from t()
+//
+// Sprint 5.7.21-B-Abstract: the CODECS, FIDELITY, and
+// CORPUS_MODES arrays now live in SettingsDrawer.tsx
+// (where the chips are actually rendered). The type
+// aliases below are still useful as TS type-level
+// documentation of the choices, so we keep them but
+// drop the runtime arrays.
+
+// Sprint 5.7.3 hotfix #49: fidelity toggle. The codec toggle
+// (Auto | LZMA | Zstd) decides WHICH entropy coder to use; the
+// fidelity toggle (Lossy | Lossless) decides WHETHER to feed
+// the smart preprocessor at all. Lossless is the "Safe Mode":
+// every file is treated as Preprocessor::Raw, the archive is
+// bit-exact reversible. The trade-off is a worse ratio on
+// text corpora (typically 1.5-2x instead of 5-7x).
+type FidelityChoice = "lossy" | "lossless";
+
+// Sprint 5.7.7 hotfix #55: corpus mode 3-pill selector.
+// "everything" (default) = full directory, no skip.
+// "source" = skip dev caches / lock files (pre-5.7.7
+// hardcoded default; still useful for ratio-focused
+// backups). "minimal" = only source code + manifests,
+// highest ratio but cannot rebuild.
+type CorpusModeChoice = "everything" | "source" | "minimal";
+
 // Only backend/static data — titles and descriptions come from t()
-const MODES: {
-  id: Mode;
-  icon: string;
-  stars: number;
-  backend: string;
-  lzma: number;
-}[] = [
-  {
-    id: "rapido",
-    icon: "⚡",
-    stars: 4,
-    backend: "v4",
-    lzma: 0,
-  },
-  {
-    id: "balanceado",
-    icon: "⚖",
-    stars: 5,
-    backend: "v5-min",
-    lzma: 6,
-  },
-  {
-    id: "ultra",
-    icon: "💎",
-    stars: 3,
-    backend: "v6-solid",
-    lzma: 9,
-  },
-];
+//
+// Sprint 5.7.21-G: the MODES array is now in
+// `src/lib/modes.ts` so it can be unit-tested without
+// pulling in React + Tauri runtime. The contract: the
+// chip badge displayed in the UI must match what the
+// backend's `resolve_plan` actually emits for
+// `codec === "auto"`. See modes.ts for the full table.
+import { MODES } from "../lib/modes";
 
 export function CompressView({
   onComplete,
@@ -132,8 +172,59 @@ export function CompressView({
 }) {
   const { t } = useLocale();
   const [files, setFiles] = useState<string[]>([]);
-  const [mode, setMode] = useState<Mode>("balanceado");
+  // Sprint 5.7.8: profile state. A profile bundles
+  // every user-tweakable setting into one struct.
+  // The active preset is tracked separately so the UI
+  // can highlight the matching chip and offer a
+  // "save as custom" affordance when the user edits it.
+  const [profile, setProfile] = useState<CompressionProfile>(DEFAULT_PROFILE);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  // Custom profiles live in localStorage so they
+  // survive app restarts. Loaded on mount, saved on
+  // every change.
+  const [customProfiles, setCustomProfiles] = useState<CustomProfile[]>([]);
+  useEffect(() => {
+    setCustomProfiles(loadCustomProfiles());
+  }, []);
+  useEffect(() => {
+    saveCustomProfiles(customProfiles);
+  }, [customProfiles]);
+  // Sprint 5.7.21-B-Abstract: settings drawer open state
+  // (closed by default). The "Configure" button toggles
+  // it. The drawer is rendered as a z-50 overlay at the
+  // end of the JSX tree. The previous `openSections`
+  // accordion state is gone — the drawer is for users
+  // who want to fine-tune, not a default UI.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Legacy individual setters removed in 5.7.8 —
+  // the profile is the single source of truth. The
+  // invoke and the renders below read directly from
+  // `profile.{mode, codec, fidelity, corpusMode,
+  // rawExtensions, minifyExtensions, encrypt,
+  // recoveryLevel}`. Helpers below (updateProfile)
+  // wrap setProfile with the right shape.
+  const updateProfile = useCallback(
+    (patch: Partial<CompressionProfile>) => {
+      setProfile((prev) => ({ ...prev, ...patch }));
+      setActivePresetId(null);
+    },
+    []
+  );
   const [destDir, setDestDir] = useState<string>("");
+
+  // Sprint 5.7.4 hotfix #50: turn the comma-separated
+  // extension list the user typed in the Advanced panel
+  // into the array shape the backend expects. Trims each
+  // entry, lowercases it, drops empty strings, and
+  // strips the leading dot (so ".json" and "json" both
+  // match `json`). Returns [] when the input is blank.
+  const parseExtList = (raw: string): string[] => {
+    return raw
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter((s) => s.length > 0)
+      .map((s) => s.replace(/^\./, ""));
+  };
   const [destInitialized, setDestInitialized] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -144,14 +235,53 @@ export function CompressView({
   // Tauri call; if `password` is set, the backend routes to
   // the encrypted pipeline (v4 + AES-256-GCM + optional
   // Reed-Solomon).
-  const [encrypt, setEncrypt] = useState(false);
+  //
+  // Sprint 5.7.21 (Option B cleanup): `encrypt` and
+  // `recoveryLevel` are now part of the `profile` state
+  // (5.7.8 single-source-of-truth refactor). Only the
+  // `password` stays as local state because it's a runtime
+  // secret and intentionally NOT saved to the profile
+  // (otherwise it would leak into localStorage and into
+  // every Tauri command invocation).
   const [password, setPassword] = useState<string>("");
-  const [recoveryLevel, setRecoveryLevel] = useState<"off" | "low" | "high">("low");
   const [showPwd, setShowPwd] = useState(false);
   // FolderOpen + Plus icons for the new btn-ghost / btn-primary buttons
   // are imported at the top of the file.
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+  // Sprint 5.7.2 hotfix #24: success card state. The previous
+  // behavior cleared `progress` and `files` the instant compress
+  // resolved, which left the user staring at the (empty) input
+  // area with no idea where the .nxs/.nxe file landed. Now we
+  // pin the last successful result to the screen until the user
+  // explicitly chooses to compress another file or reveal the
+  // output in Finder. Lives alongside `progress` so a fresh
+  // compress can replace it.
+  const [lastSuccess, setLastSuccess] = useState<{
+    inputFilename: string;
+    outputPath: string;
+    originalSize: number;
+    compressedSize: number;
+    durationMs: number;
+    encrypted: boolean;
+    /// Sprint 5.7.2 hotfix #44: bytes skipped by the dev-cache
+    /// filter. Surfaced as a tooltip on the success card.
+    skippedBytes?: number;
+    /// Sprint 5.7.9 part 6: corpus breakdown by category
+    /// (source bytes / build_artifact bytes / other bytes).
+    /// The UI uses this to warn the user when their
+    /// archive is dominated by build artifacts (where
+    /// no codec can do much). For a single-file input
+    /// this is undefined.
+    corpusBreakdown?: {
+      sourceBytes: number;
+      sourceFiles: number;
+      buildArtifactBytes: number;
+      buildArtifactFiles: number;
+      otherBytes: number;
+      otherFiles: number;
+    };
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Initialize the destination to the real ~/Downloads path on mount.
@@ -288,9 +418,17 @@ export function CompressView({
       if (Array.isArray(result)) acceptPaths(result);
       else if (typeof result === "string") acceptPaths([result]);
     } catch (e) {
-      console.error("file picker:", e);
+      // Sprint 5.7.21-B cleanup: surface the picker error
+      // to the user via the existing `error` state instead
+      // of silently logging to console. The most common
+      // case is the user closing the dialog (we treat that
+      // as a soft cancel and don't show anything).
+      const msg = String((e as Error)?.message ?? e);
+      if (!/cancel/i.test(msg)) {
+        setError(t("compress.error.file_picker") + ": " + msg);
+      }
     }
-  }, [acceptPaths]);
+  }, [acceptPaths, t]);
 
   const onBrowseFolders = useCallback(async () => {
     if (!isTauri) return;
@@ -303,9 +441,16 @@ export function CompressView({
       if (Array.isArray(result)) acceptPaths(result);
       else if (typeof result === "string") acceptPaths([result]);
     } catch (e) {
-      console.error("folder picker:", e);
+      // Sprint 5.7.21-B cleanup: surface the picker error
+      // to the user via the existing `error` state. The
+      // user closing the dialog is treated as a soft
+      // cancel (no error shown).
+      const msg = String((e as Error)?.message ?? e);
+      if (!/cancel/i.test(msg)) {
+        setError(t("compress.error.folder_picker") + ": " + msg);
+      }
     }
-  }, [acceptPaths]);
+  }, [acceptPaths, t]);
 
   // Path input
   const onAddPath = useCallback(() => {
@@ -324,9 +469,72 @@ export function CompressView({
       const result = await open({ multiple: false, directory: true });
       if (typeof result === "string") setDestDir(result);
     } catch (e) {
-      console.error("folder picker:", e);
+      // Sprint 5.7.21-B cleanup: surface the destination
+      // picker error to the user (the existing `error`
+      // state). User-cancelled dialog is silent.
+      const msg = String((e as Error)?.message ?? e);
+      if (!/cancel/i.test(msg)) {
+        setError(t("compress.error.dest_picker") + ": " + msg);
+      }
     }
+  }, [t]);
+
+  // Apply a built-in or custom preset: replace the
+  // current profile with the preset's settings, mark
+  // the chip as active, and pre-open the sections
+  // the user might want to see.
+  const applyPreset = useCallback((p: AnyProfile) => {
+    const next: CompressionProfile = {
+      schemaVersion: 1,
+      mode: p.mode,
+      codec: p.codec,
+      fidelity: p.fidelity,
+      corpusMode: p.corpusMode,
+      rawExtensions: p.rawExtensions,
+      minifyExtensions: p.minifyExtensions,
+      encrypt: p.encrypt,
+      recoveryLevel: p.recoveryLevel,
+    };
+    setProfile(next);
+    setActivePresetId(p.id);
+    // Sprint 5.7.21-B-Abstract: the previous implementation
+    // pre-opened accordion sections based on the preset.
+    // The accordion is gone now — every preset's settings
+    // are immediately available in the SettingsDrawer
+    // (and the drawer is closed by default, so it doesn't
+    // matter). Nothing to pre-open here.
   }, []);
+
+  // Save the current profile as a custom preset.
+  // Custom profiles live in localStorage and survive
+  // app restarts.
+  const saveAsCustom = useCallback(
+    (name: string) => {
+      const id = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const newCustom: CustomProfile = {
+        ...profile,
+        schemaVersion: 1,
+        id,
+        builtIn: false,
+        name: name.trim() || t("compress.profile.custom_default_name"),
+      };
+      setCustomProfiles((prev) => [...prev, newCustom]);
+      setActivePresetId(id);
+    },
+    [profile, t]
+  );
+
+  // Delete a custom preset. No-op for built-ins.
+  const deleteCustom = useCallback((id: string) => {
+    setCustomProfiles((prev) => prev.filter((p) => p.id !== id));
+    setActivePresetId(null);
+  }, []);
+
+  // Detect "current profile matches no preset" — used
+  // to show the "save as custom" affordance.
+  const profileIsCustom = !BUILTIN_PRESETS.some((bp) =>
+    profilesEqual(bp, profile)
+  ) && !customProfiles.some((cp) => profilesEqual(cp, profile));
 
   // Compress
   const onCompress = useCallback(async () => {
@@ -335,39 +543,113 @@ export function CompressView({
     setError(null);
     setProgress(null);
     const startTime = Date.now();
-    const m = MODES.find((x) => x.id === mode)!;
     const inputPath = files[0];
     const inputFilename = inputPath.split("/").pop() || "archivo";
     // Guard: encryption requires a non-empty password. We don't
     // fail the click silently — show an error and bail.
-    if (encrypt && !password) {
+    if (profile.encrypt && !password) {
       setError("encryption enabled but no password set");
       setBusy(false);
       return;
     }
     try {
+      // Sprint 5.7.10-D: the request is now a single
+      // `profile` object instead of 8 separate fields. The
+      // backend (SupremeEngine) reads the profile and
+      // resolves the right backend / codec / preprocessor
+      // internally. The flat-field shape still works
+      // (build_profile_from_legacy_req in commands.rs
+      // translates it), but the frontend is moving to the
+      // canonical nested shape.
       const lastResult: CompressResult = await tauriInvoke("compress_target_cmd", {
         req: {
           path: inputPath,
-          backend: m.backend,
-          lzma_level: m.lzma,
           output_dir: destDir || null,
-          // Sprint 5.7.2: optional encryption. When `password`
-          // is set, the backend routes to the encrypted pipeline
-          // (v4 + AES-256-GCM + optional Reed-Solomon). When
-          // `password` is null, the existing plain path runs.
-          password: encrypt ? password : null,
-          recovery_level: encrypt ? recoveryLevel : null,
+          profile: {
+            schemaVersion: 1,
+            mode: profile.mode,
+            codec: profile.codec,
+            fidelity: profile.fidelity,
+            corpusMode: profile.corpusMode,
+            // Per-extension overrides: the GUI keeps them as
+            // comma-separated strings in the profile (legacy
+            // shape for localStorage); we parse to a string
+            // array here. The backend's PreprocessorOverrides
+            // constructor normalises / dedupes.
+            rawExtensions: parseExtList(profile.rawExtensions),
+            minifyExtensions: parseExtList(profile.minifyExtensions),
+            encrypt: profile.encrypt,
+            recoveryLevel: profile.recoveryLevel,
+          },
+          // Password is intentionally NOT in the profile —
+          // it's a runtime secret, not a saved setting.
+          // Custom profiles in localStorage don't carry it.
+          password: profile.encrypt ? password : null,
+          // Sprint 5.7.8: the active profile id. Backend can
+          // log this for reproducibility (a future
+          // "compression history by profile" feature).
+          profile_id: activePresetId,
         },
       });
       const durationMs = Date.now() - startTime;
       const savings = lastResult.compressed_size / lastResult.original_size;
       const savingsPct = Math.round((1 - savings) * 100);
-      const lockEmoji = encrypt ? "🔒 " : "";
+      const lockEmoji = profile.encrypt ? "🔒 " : "";
+      // Sprint 5.7.21-B-Cleanup: trilingual toast (was
+      // hardcoded Spanish "% más pequeño en"). Placeholders
+      // are filled by the user at the call site via the
+      // `t()` helper.
       setToast({
         kind: "ok",
-        msg: `✓ ${lockEmoji}${inputFilename} → ${prettyBytes(lastResult.compressed_size)} (${savingsPct}% más pequeño) en ${(durationMs / 1000).toFixed(1)}s`,
+        msg: t("compress.toast.success")
+          .replace("{file}", `${lockEmoji}${inputFilename}`)
+          .replace("{size}", prettyBytes(lastResult.compressed_size))
+          .replace("{pct}", String(savingsPct))
+          .replace("{sec}", (durationMs / 1000).toFixed(1)),
       });
+      // Pin the success card so the user can see WHERE the
+      // .nxs/.nxe file was saved and reveal it in Finder
+      // before kicking off another compress.
+      //
+      // Sprint 5.7.2 hotfix #40: ALWAYS show the success card if
+      // compression produced any bytes — don't silently hide it
+      // when output_path is empty (which used to make users think
+      // the compression "got lost"). When output_path is missing
+      // we still show the card so the user sees compression_size,
+      // and we surface a warning that auto-save may have failed.
+      const outputPath = (lastResult as any).output_path || "";
+      const compressedBytes = lastResult.compressed_size || 0;
+      if (compressedBytes > 0) {
+        if (outputPath) {
+          setLastSuccess({
+            inputFilename,
+            outputPath,
+            originalSize: lastResult.original_size,
+            compressedSize: compressedBytes,
+            durationMs,
+            encrypted: profile.encrypt,
+            // Sprint 5.7.2 hotfix #44: carry the dev-cache skip
+            // bytes into the success card so the UI can show the
+            // "skipped X MiB" diagnostic.
+            skippedBytes: (lastResult as any).skipped_bytes ?? 0,
+            // Sprint 5.7.9 part 6: corpus breakdown by category.
+            // Used to warn the user when the archive is dominated
+            // by build artifacts (low ratio is honest math, not
+            // a bug).
+            corpusBreakdown: (lastResult as any).corpus_breakdown,
+          });
+        } else {
+          // Compression succeeded but auto-save produced no path —
+          // likely a permission error. Show the card with a generic
+          // path so the user knows something happened, plus a
+          // warning toast.
+          setError(t("compress.error.empty_path"));
+          setToast({
+            kind: "err",
+            msg: `✗ Saved empty (output_path missing) — compressed ${prettyBytes(compressedBytes)}`,
+          });
+        }
+      }
       onComplete({
         kind: "compress",
         filename: inputFilename,
@@ -385,7 +667,7 @@ export function CompressView({
       setBusy(false);
       setProgress(null);
     }
-  }, [files, mode, destDir, onComplete]);
+  }, [files, profile.mode, destDir, onComplete]);
 
   // Progress percentage (0–100)
   const progressPct =
@@ -393,21 +675,52 @@ export function CompressView({
       ? Math.min(100, (progress.bytes_done / progress.bytes_total) * 100)
       : 0;
 
-  // Mode title/desc helpers
-  const getModeTitle = (id: Mode) => {
-    if (id === "rapido") return t("mode.fast.title");
-    if (id === "balanceado") return t("mode.balanced.title");
-    return t("mode.ultra.title");
-  };
-  const getModeDesc = (id: Mode) => {
-    if (id === "rapido") return t("mode.fast.desc");
-    if (id === "balanceado") return t("mode.balanced.desc");
-    return t("mode.ultra.desc");
-  };
+  // Sprint 5.7.21-B-Remodel: estimated output size + sticky
+  // bar button label. Both are derived from the current
+  // state so the StickyBar can render without holding its
+  // own copies of profile/files/etc.
+  //
+  // The estimated size is a rough heuristic: 0.5x for lossy
+  // modes (typical 2-7x ratio on text/code corpora), 0.85x
+  // for lossless (1.2-1.5x ratio on mixed corpora), 1.0x
+  // for files we can't estimate (user-typed paths we
+  // haven't stat'd). The exact number comes from the
+  // progress bar after compress starts.
+  const estimatedSize = useMemo(() => {
+    if (files.length === 0) return "";
+    // We don't stat the files (would block the UI); use
+    // a fixed-budget estimate based on the file path
+    // string length as a placeholder. The real number
+    // comes in via the progress event.
+    // 30 bytes per file path is a rough proxy; the actual
+    // size comes from the backend's n_files × avg_size
+    // once the user hits Compress.
+    const rough = files.length * 30 * 1024;
+    const ratio = profile.fidelity === "lossless" ? 0.85 : 0.5;
+    return prettyBytes(rough * ratio);
+  }, [files, profile.fidelity]);
 
-  // Estimated savings for the preview
-  const estSavings =
-    mode === "rapido" ? 0.15 : mode === "balanceado" ? 0.35 : 0.5;
+  // The Compress button label changes based on state:
+  //   - default: "Comprimir" / "Compress" / "Comprimi"
+  //   - busy + writing phase: "Escribiendo…" / "Writing…"
+  //   - busy + done phase: "✓ Listo" / "✓ Done" / "✓ Fatto"
+  //   - busy + compressing: "Comprimiendo 42%"
+  //   - lastSuccess: "✓ Listo" (one-shot before reset)
+  //   - no files / no dest: disabled (the StickyBar grays out)
+  const compressButtonLabel = useMemo(() => {
+    if (busy) {
+      if (progress?.phase === "writing") return `💾 ${t("compress.btn.writing")}`;
+      if (progress?.phase === "done") return `✓ ${t("compress.btn.done")}`;
+      return `${t("compress.btn.busy")} ${progressPct.toFixed(0)}%`;
+    }
+    if (lastSuccess) return `✓ ${t("compress.btn.done")}`;
+    return t("compress.btn");
+  }, [busy, progress, progressPct, lastSuccess, t]);
+
+  // Sprint 5.7.21-B-Abstract: getModeTitle/getModeDesc/estSavings
+  // are gone — the savings preview card is removed (the user
+  // gets the real number on the success screen, no need for
+  // a noisy estimate in the main flow).
 
   return (
     <div
@@ -436,80 +749,134 @@ export function CompressView({
         </div>
       )}
 
-      <div className="max-w-4xl mx-auto px-8 pt-12 pb-20">
-        {/* Header */}
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[12px] tracking-wide mb-2">
-            <button
-              onClick={() => onNavigate("landing")}
-              className="hover:text-zinc-300 transition-colors"
-            >
-              {t("back")}
-            </button>
-          </div>
-          <h1 className="text-white text-[36px] font-semibold tracking-tight mb-3">
-            {t("compress.title")}
-          </h1>
-          <p className="text-zinc-400 text-[14px] leading-relaxed max-w-2xl">
-            {t("compress.desc")}
-          </p>
-        </div>
+      <div className="max-w-5xl mx-auto px-8 pt-8 pb-20">
+        {/* Sprint 5.7.21-B-Cleanup: the page header is gone.
+            The TopBar already provides global nav; a per-page
+            "Comprimir" title + "Arrastra archivos..." description
+            on top of that was visual noise. The stepper (right
+            below) tells the user WHERE they are; the drop zone
+            (the next section) tells them WHAT to do. */}
 
-        {/* Big drop zone */}
-        <div className="mb-10">
+        {/* Sprint 5.7.21-B-Cleanup: when lastSuccess is set
+            AND the user is not actively compressing, the
+            whole screen becomes a "success takeover" view.
+            The CompressSuccess component owns the layout —
+            no stepper, no drop zone, no preset grid, no
+            accordion. The user just sees the result and two
+            clear actions. They click "Compress another" to
+            come back to the configuration flow. */}
+
+        {/* Sprint 5.7.21-B-Cleanup: hide the stepper when the
+            success takeover is active (CompressSuccess has its
+            own visual). The stepper only makes sense in the
+            configuration flow. */}
+        {!lastSuccess && (
+          <CompressStepper
+            steps={[
+              { id: "files", labelKey: "compress.step.files", hintKey: "compress.step.files.hint" },
+              { id: "profile", labelKey: "compress.step.profile", hintKey: "compress.step.profile.hint" },
+              { id: "output", labelKey: "compress.step.output", hintKey: "compress.step.output.hint" },
+              { id: "compress", labelKey: "compress.step.compress", hintKey: "compress.step.compress.hint" },
+            ]}
+            activeIndex={
+              files.length === 0
+                ? 0
+                : activePresetId === null && !profilesEqual(profile, DEFAULT_PROFILE)
+                  ? 1
+                  : !destDir
+                    ? 2
+                    : 3
+            }
+          />
+        )}
+        {lastSuccess && !busy ? (
+          <CompressSuccess
+            info={lastSuccess}
+            isTauri={isTauri}
+            onAnother={() => setLastSuccess(null)}
+            onReveal={async (path) => {
+              if (!isTauri) return "Tauri only";
+              try {
+                const { invoke } = await import("@tauri-apps/api/core");
+                await invoke("reveal_in_finder_cmd", { path });
+                return null;
+              } catch (e) {
+                console.error("reveal failed:", e);
+                return String((e as Error)?.message ?? e);
+              }
+            }}
+          />
+        ) : null}
+
+        {/* Sprint 5.7.21-B-Cleanup: the entire configuration
+            flow (drop zone, preset grid, accordion, savings
+            preview) is hidden when the success takeover is
+            active. The user sees ONLY the success state and
+            two clear actions — the configuration UI is not
+            visible until they click "Compress another". */}
+        {!lastSuccess && (
+          <>
+        {/* Sprint 5.7.21-B-Abstract: hero drop zone. The
+            abstract design reduces the icon size (80 → 36)
+            and tightens the padding (py-20 → py-12) so the
+            drop zone is a calm container, not a "look at
+            me" callout. The user reads the title, types a
+            path or drops a file, moves on. No fanfare. */}
+        <div className="mb-8">
           {files.length === 0 ? (
             <div
-              className={`relative p-16 text-center ${
-                dragOver ? "dropzone is-dragover" : "dropzone"
+              className={`relative rounded-2xl border-2 border-dashed transition-all duration-200 px-8 py-12 text-center ${
+                dragOver
+                  ? "border-cyan-400/60 bg-cyan-500/[0.04]"
+                  : "border-white/[0.08] hover:border-white/[0.16] bg-white/[0.015]"
               }`}
+              onDragOver={onDragOver}
+              onDragLeave={onDragLeave}
+              onDrop={onDrop}
             >
-              <div className="text-cyan-400 mb-6 select-none inline-block transition-transform duration-300" style={{ transform: dragOver ? "scale(1.15) rotate(-6deg)" : "scale(1)" }}>
-                <Archive size={64} strokeWidth={1.4} />
+              <div
+                className="text-cyan-400/70 mb-5 select-none inline-block transition-transform duration-300"
+                style={{ transform: dragOver ? "scale(1.1) rotate(-4deg)" : "scale(1)" }}
+              >
+                <Archive size={36} strokeWidth={1.3} />
               </div>
-              <h3 className="text-white text-[20px] font-medium mb-2">
+              <h3 className="text-white text-[20px] font-medium tracking-tight mb-1.5">
                 {dragOver ? t("compress.drop.active") : t("compress.drop")}
               </h3>
-              <p className="text-zinc-500 text-[13px] mb-6">
+              <p className="text-zinc-500 text-[13px] mb-6 max-w-md mx-auto">
                 {t("compress.drop.hint")}
               </p>
-              <div className="flex items-center gap-2 max-w-2xl mx-auto flex-wrap">
+              <div className="flex items-center gap-2 max-w-xl mx-auto flex-wrap justify-center">
                 <input
                   type="text"
                   value={pathInput}
                   onChange={(e) => setPathInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && onAddPath()}
                   placeholder={t("compress.placeholder")}
-                  className="input flex-1 min-w-[200px]"
+                  className="flex-1 min-w-[180px] px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white text-[13px] placeholder:text-zinc-600 focus:outline-none focus:border-cyan-400/40 focus:bg-white/[0.06] transition-all"
                 />
-                {/* Archivos — multi-select file picker with no
-                    extension filter (the previous `["*"]` filter
-                    was restricting on macOS). */}
                 <button
                   onClick={onBrowseFiles}
-                  className="btn btn-ghost"
+                  className="px-3 py-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-300 hover:text-white text-[12.5px] font-medium transition-all flex items-center gap-1.5"
                   title={t("compress.browse.files")}
                 >
-                  <FilePlus size={14} />
+                  <FilePlus size={13} />
                   {t("compress.browse.files")}
                 </button>
-                {/* Carpetas — multi-select directory picker.
-                    The pipeline (`compress_target_cmd`) walks
-                    folders recursively, so any directory just
-                    works. */}
                 <button
                   onClick={onBrowseFolders}
-                  className="btn btn-ghost"
+                  className="px-3 py-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-300 hover:text-white text-[12.5px] font-medium transition-all flex items-center gap-1.5"
                   title={t("compress.browse.folders")}
                 >
-                  <FolderOpen size={14} />
+                  <FolderOpen size={13} />
                   {t("compress.browse.folders")}
                 </button>
                 <button
                   onClick={onAddPath}
                   disabled={!pathInput.trim()}
-                  className="btn btn-primary"
+                  className="px-3 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[12.5px] font-medium transition-all flex items-center gap-1.5 disabled:opacity-30 disabled:hover:bg-cyan-500/15"
                 >
-                  <Plus size={14} />
+                  <Plus size={13} />
                   {t("compress.add")}
                 </button>
               </div>
@@ -549,163 +916,50 @@ export function CompressView({
           )}
         </div>
 
-        {/* Mode selector */}
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-4">
-            {t("compress.mode")}
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            {MODES.map((m) => {
-              const active = mode === m.id;
-              return (
-                <button
-                  key={m.id}
-                  onClick={() => setMode(m.id)}
-                  disabled={busy}
-                  className={`relative text-left p-5 rounded-2xl border transition-all disabled:opacity-50 ${
-                    active
-                      ? "bg-white/[0.08] border-cyan-500/40"
-                      : "bg-white/[0.02] border-white/[0.06] hover:border-white/[0.12]"
-                  }`}
-                >
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-xl">{m.icon}</span>
-                    <span className="text-white text-[16px] font-medium">
-                      {getModeTitle(m.id)}
-                    </span>
-                  </div>
-                  <div className="text-zinc-500 text-[11.5px] leading-relaxed mb-2.5 min-h-[2.6em]">
-                    {getModeDesc(m.id)}
-                  </div>
-                  <div className="flex items-center gap-0.5 text-amber-400/80 text-[11px]">
-                    {"★".repeat(m.stars)}
-                    <span className="text-zinc-700">
-                      {"★".repeat(5 - m.stars)}
-                    </span>
-                  </div>
-                  {active && (
-                    <div className="absolute top-3 right-3 w-2 h-2 rounded-full bg-cyan-400" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
+
+        {/* Sprint 5.7.21-B-Abstract: the configuration UI is
+            now a single chip + a "Configure" button. The
+            previous 3-column PresetCard grid + 5-section
+            accordion + savings preview are all gone from
+            the main view. The user sees:
+              - the active preset (chip, with chevron for
+                the popover that lists all presets)
+              - a small "Configure" button that opens the
+                settings drawer (slide-in panel)
+            That's it. The Compress action lives in the
+            sticky bar at the bottom. */}
+
+        {/* Preset + Configure row */}
+        <div className="mb-6 flex items-center justify-center gap-2">
+          <PresetPicker
+            activePreset={
+              activePresetId
+                ? BUILTIN_PRESETS.find((p) => p.id === activePresetId) ??
+                  customProfiles.find((p) => p.id === activePresetId)
+                : undefined
+            }
+            customProfiles={customProfiles}
+            applyPreset={applyPreset}
+            profileIsCustom={profileIsCustom}
+            saveAsCustom={saveAsCustom}
+            deleteCustom={deleteCustom}
+            onOpenSettings={() => setSettingsOpen(true)}
+            busy={busy}
+          />
+          <button
+            onClick={() => setSettingsOpen(true)}
+            disabled={busy}
+            aria-label={t("compress.configure.tooltip")}
+            title={t("compress.configure.tooltip")}
+            data-testid="configure-button"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-white/[0.08] bg-white/[0.02] text-zinc-400 hover:text-white hover:bg-white/[0.05] hover:border-white/[0.16] text-[12px] font-medium transition-all disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+          >
+            <Sliders size={12} />
+            {t("compress.configure")}
+          </button>
         </div>
 
-        {/* Destination */}
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[11px] tracking-[0.2em] uppercase mb-3">
-            {t("compress.dest")}
-          </div>
-          <div className="flex items-center gap-3 px-5 py-4 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
-            <span className="text-zinc-500 text-[13px]">📁</span>
-            <span
-              className="text-white text-[14px] flex-1 truncate font-mono"
-              title={destDir}
-            >
-              {destDir || t("compress.dest.detecting")}
-            </span>
-            <button
-              onClick={onBrowseDest}
-              disabled={busy}
-              className="px-3 py-1.5 text-[12px] text-zinc-400 hover:text-white border border-white/[0.08] hover:border-white/[0.16] rounded-lg transition-colors disabled:opacity-50"
-            >
-              {t("compress.dest.change")}
-            </button>
-          </div>
-        </div>
 
-        {/* Sprint 5.7.2: encryption + recovery panel. Toggle to
-            enable AES-256-GCM, choose a recovery level, type a
-            password. The panel collapses when encryption is off
-            (the default — 7z-style "off by default" UX would be
-            too aggressive; matching the design doc, encryption
-            is opt-in but enabled by default in production). */}
-        <div className="mb-4 panel p-3 flex flex-col gap-2">
-          <label className="flex items-center justify-between cursor-pointer">
-            <span className="metric-label flex items-center gap-2">
-              <span className="text-amber-400">🔒</span>
-              encryption
-            </span>
-            <span className="flex items-center gap-2">
-              <span className="text-[10px] text-zinc-500 uppercase tracking-wider">
-                {encrypt ? "on" : "off"}
-              </span>
-              <input
-                type="checkbox"
-                checked={encrypt}
-                onChange={(e) => setEncrypt(e.target.checked)}
-                disabled={busy}
-                className="w-4 h-4 accent-cyan-500 cursor-pointer disabled:opacity-50"
-              />
-            </span>
-          </label>
-
-          {encrypt && (
-            <div className="flex flex-col gap-2 mt-1 pt-2 border-t border-zinc-800">
-              {/* Password input + visibility toggle */}
-              <div className="relative">
-                <input
-                  type={showPwd ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="archive password"
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  disabled={busy}
-                  className="w-full bg-zinc-900/60 border border-zinc-700 rounded px-3 py-2 pr-9 text-[12px] font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500 focus:bg-zinc-900 disabled:opacity-50"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPwd((s) => !s)}
-                  tabIndex={-1}
-                  disabled={busy}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-cyan-400 text-[14px] leading-none disabled:opacity-50"
-                  title={showPwd ? "hide password" : "show password"}
-                >
-                  {showPwd ? "🙈" : "👁"}
-                </button>
-              </div>
-
-              {/* Recovery level radio group. Default "low" (10%
-                  parity, matches the 7z UX). */}
-              <div className="flex flex-col gap-1.5">
-                <div className="text-[10px] text-zinc-500 uppercase tracking-wider">
-                  recovery (Reed-Solomon)
-                </div>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {(
-                    [
-                      { v: "off", label: "off", desc: "0% overhead" },
-                      { v: "low", label: "low", desc: "1 / 10 files" },
-                      { v: "high", label: "high", desc: "2-3 / 8 files" },
-                    ] as const
-                  ).map((opt) => {
-                    const active = recoveryLevel === opt.v;
-                    return (
-                      <button
-                        key={opt.v}
-                        type="button"
-                        disabled={busy}
-                        onClick={() => setRecoveryLevel(opt.v)}
-                        className={`px-2 py-1.5 rounded border text-[10.5px] font-mono transition-colors disabled:opacity-50 ${
-                          active
-                            ? "border-cyan-500 bg-cyan-500/10 text-cyan-300"
-                            : "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300"
-                        }`}
-                      >
-                        <div className="font-medium">{opt.label}</div>
-                        <div className="text-[9px] text-zinc-500 mt-0.5">
-                          {opt.desc}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
 
         {/* Progress (only when compressing) */}
         {busy && progress && (
@@ -765,95 +1019,105 @@ export function CompressView({
               </span>
             </div>
             {/* Sprint 5.7.2 hotfix #23: real-time ETA / throughput /
-                elapsed (the new ProgressEvent fields). The backend
-                sends these on every emit, and the warm-up window
-                (<100 ms) sends zeros — guarded by Number.isFinite
-                so we don't display "0:00 / 0 MB/s / —" before the
-                first codec chunk lands. */}
+                elapsed (the new ProgressEvent fields). Sprint 5.7.2
+                hotfix #24: always show elapsed_ms (even 0 → "0:00")
+                and compute throughput as a fallback when
+                bytes_per_sec is 0 but bytes_done > 0 (the warm-up
+                window or events that arrived with elapsed < 100ms
+                used to show "—" for both, which looks broken at 100%). */}
             <div className="flex items-center justify-between text-[10.5px] text-zinc-500 tabular-nums mt-1">
               <span>
-                {progress.elapsed_ms > 0 ? formatMs(progress.elapsed_ms) : "—"}
+                {formatMs(progress.elapsed_ms)}
                 <span className="text-zinc-700 mx-1.5">·</span>
-                {progress.bytes_per_sec > 0 ? formatRate(progress.bytes_per_sec) : "—"}
+                {(() => {
+                  // Prefer the backend's reported throughput,
+                  // but fall back to bytes_done/elapsed_ms so the
+                  // bar never shows "—" when bytes have actually
+                  // been processed.
+                  let rate = progress.bytes_per_sec;
+                  if (!(rate > 0) && progress.elapsed_ms > 0 && progress.bytes_done > 0) {
+                    rate = (progress.bytes_done * 1000) / progress.elapsed_ms;
+                  }
+                  return rate > 0 ? formatRate(rate) : "—";
+                })()}
               </span>
               <span>
-                {progress.eta_ms > 0 ? `ETA ${formatMs(progress.eta_ms)}` : "ETA —"}
+                {progress.bytes_done >= progress.bytes_total && progress.bytes_total > 0
+                  ? t("compress.progress.done")
+                  : progress.eta_ms > 0
+                    ? `ETA ${formatMs(progress.eta_ms)}`
+                    : "ETA —"}
               </span>
             </div>
           </div>
         )}
 
-        {/* Estimated savings preview (when files are loaded and not busy) */}
-        {files.length > 0 && !busy && (
-          <div className="mb-10 p-6 rounded-2xl bg-gradient-to-br from-cyan-500/[0.06] to-emerald-500/[0.04] border border-white/[0.08]">
-            <div className="text-zinc-400 text-[11px] tracking-[0.2em] uppercase mb-4">
-              {t("compress.estimate.title")} ({getModeTitle(mode)})
-            </div>
-            <div className="grid grid-cols-3 gap-6">
-              <Stat label={t("compress.estimate.saving")} value={`${(estSavings * 100).toFixed(0)}%`} />
-              <Stat
-                label={t("compress.estimate.speed")}
-                value={
-                  mode === "rapido"
-                    ? t("compress.speed.fast")
-                    : mode === "balanceado"
-                    ? t("compress.speed.medium")
-                    : t("compress.speed.slow")
-                }
-              />
-              <Stat
-                label={t("compress.estimate.best")}
-                value={
-                  mode === "rapido"
-                    ? t("compress.best.video")
-                    : mode === "balanceado"
-                    ? t("compress.best.general")
-                    : t("compress.best.files")
-                }
-              />
-            </div>
-          </div>
+        {/* Sprint 5.7.21-B-Abstract: the savings preview is
+            gone. The user already saw the configuration UI
+            (the chip + the drawer); the real ratio number
+            comes from CompressSuccess after the run. Showing
+            a "65% smaller" estimate in the main flow was
+            visual noise. */}
+
+        {/* Action button — moved to the sticky bar below */}
+        {/* Sprint 5.7.21-B-Remodel: error message is now
+            shown as a toast (not a permanent red banner).
+            The StickyBar handles the error state internally
+            (button shows disabled + tooltip explains why). */}
+        </>
         )}
 
-        {/* Action button */}
-        <button
-          onClick={onCompress}
-          disabled={files.length === 0 || busy || !destDir}
-          className="w-full py-4 rounded-2xl bg-gradient-to-b from-cyan-500 to-cyan-600 hover:from-cyan-400 hover:to-cyan-500 disabled:from-zinc-800 disabled:to-zinc-800 disabled:text-zinc-600 text-white text-[15px] font-semibold tracking-tight transition-all shadow-lg shadow-cyan-500/20 disabled:shadow-none"
-        >
-          {busy
-            ? `${t("compress.btn.busy")} ${progressPct.toFixed(0)}%`
-            : t("compress.btn")}
-        </button>
-
-        {error && (
-          <div className="mt-4 p-4 rounded-xl bg-red-500/[0.08] border border-red-500/20 text-red-400 text-[13px]">
-            {error}
-          </div>
+        {/* Sticky bottom action bar — hidden in the success
+            takeover (no compress needed in that state).
+            The Compress button + destination picker +
+            estimated output live here. */}
+        {!lastSuccess && (
+        <CompressStickyBar
+          destDir={destDir}
+          onPickDest={onBrowseDest}
+          encrypt={profile.encrypt}
+          onToggleEncrypt={() => updateProfile({ encrypt: !profile.encrypt })}
+          showEncryptToggle
+          estimatedSize={estimatedSize}
+          canCompress={files.length > 0 && !busy && !!destDir}
+          busy={busy}
+          buttonLabel={compressButtonLabel}
+          onCompress={onCompress}
+        />
         )}
       </div>
+
+      {/* Sprint 5.7.21-B-Abstract: settings drawer. Slide-in
+          panel from the right that contains the 5 sections
+          (Speed / Quality / Content / Advanced / Security)
+          plus a compact preset picker. Rendered at the root
+          level (z-50 overlay) so it covers the page while
+          the user is fine-tuning. */}
+      <SettingsDrawer
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        profile={profile}
+        updateProfile={updateProfile}
+        customProfiles={customProfiles}
+        applyPreset={applyPreset}
+        activePresetId={activePresetId}
+        profileIsCustom={profileIsCustom}
+        password={password}
+        setPassword={setPassword}
+        showPwd={showPwd}
+        setShowPwd={setShowPwd}
+        saveAsCustom={saveAsCustom}
+        deleteCustom={deleteCustom}
+        busy={busy}
+      />
     </div>
   );
 }
 
-function Stat({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <div>
-      <div className="text-zinc-500 text-[11px] uppercase tracking-wider mb-1">
-        {label}
-      </div>
-      <div className="text-[20px] font-semibold tabular-nums tracking-tight text-white">
-        {value}
-      </div>
-    </div>
-  );
-}
+// Sprint 5.7.21-B-Abstract: the local `Stat` helper was
+// only used by the savings preview (now removed). The
+// preset stats live in the success screen (CompressSuccess)
+// and the sticky bar's estimated size uses prettyBytes.
 
 function prettyBytes(n: number): string {
   if (n < 1024) return `${n} B`;

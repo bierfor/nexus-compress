@@ -26,6 +26,8 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { type View } from "@/components/NeoTopBar";
 import { useLocale } from "@/components/LocaleProvider";
 import { ArchivePreview, type Preview } from "@/components/ArchivePreview";
+import { getFileKind } from "@/lib/fileIcons";
+import { FolderOpen } from "lucide-react";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -86,6 +88,35 @@ function isInspectable(name: string | null): "tar" | "solid" | null {
   if (lower.endsWith(".tar")) return "tar";
   if (lower.endsWith(".nxs6") || lower.endsWith(".nxs")) return "solid";
   return null;
+}
+
+/// Sprint 5.7.21-EXT: the new external formats (zip / tar.gz /
+/// gz / bz2 / xz) ALSO support peek (via the new external_decompress
+/// module) but they don't go through the legacy
+/// `p2p_archive_list_cmd` path that the .tar / .nxs6
+/// archives use. They go through `peek_archive_target_cmd`
+/// instead, which is the same Tauri command the catch-all
+/// "single file" archives use today. This function returns
+/// `true` for any format the backend can peek, so the
+/// ArchivePreview renders the file list for ZIP / TAR.GZ
+/// / GZ too (not just TAR / NXS6).
+function isPeekable(name: string | null): boolean {
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  return (
+    lower.endsWith(".zip") ||
+    lower.endsWith(".tar") ||
+    lower.endsWith(".tar.gz") ||
+    lower.endsWith(".tgz") ||
+    lower.endsWith(".gz") ||
+    lower.endsWith(".bz2") ||
+    lower.endsWith(".xz") ||
+    lower.endsWith(".nxs6") ||
+    lower.endsWith(".nxs") ||
+    lower.endsWith(".nxar") ||
+    lower.endsWith(".nxe") ||
+    lower.endsWith(".nxr")
+  );
 }
 
 export function DecompressView({
@@ -399,14 +430,28 @@ export function DecompressView({
         directory: false,
         filters: [
           { name: "All files", extensions: ["*"] },
+          // Sprint 5.7.21-EXT: include the third-party
+          // formats the backend can now extract. The list
+          // is mirrored from src/external_decompress.rs::
+          // detect_format + the extension overrides for
+          // TAR (no magic).
           { name: "NexusCompress archives", extensions: ["nxs", "nxs6", "nxe", "nxr", "lz", "nxar"] },
+          { name: "ZIP archives", extensions: ["zip"] },
+          { name: "TAR archives", extensions: ["tar"] },
+          { name: "Compressed archives", extensions: ["tar.gz", "tgz", "gz", "bz2", "xz"] },
         ],
       });
       if (typeof result === "string") acceptPath(result);
     } catch (e) {
-      console.error("file picker:", e);
+      // Sprint 5.7.21-B cleanup: surface the picker error
+      // to the user via the existing `error` state. User-
+      // cancelled dialog is silent.
+      const msg = String((e as Error)?.message ?? e);
+      if (!/cancel/i.test(msg)) {
+        setError(t("decompress.error.file_picker") + ": " + msg);
+      }
     }
-  }, [acceptPath]);
+  }, [acceptPath, t]);
 
   const onAddPath = useCallback(() => {
     const trimmed = pathInput.trim();
@@ -422,9 +467,13 @@ export function DecompressView({
       const result = await open({ multiple: false, directory: true });
       if (typeof result === "string") setDestDir(result);
     } catch (e) {
-      console.error(e);
+      // Sprint 5.7.21-B cleanup: surface the picker error.
+      const msg = String((e as Error)?.message ?? e);
+      if (!/cancel/i.test(msg)) {
+        setError(t("decompress.error.dest_picker") + ": " + msg);
+      }
     }
-  }, []);
+  }, [t]);
 
   const toggleEntry = useCallback((name: string) => {
     setSelected((prev) => {
@@ -599,38 +648,26 @@ export function DecompressView({
         dragOver ? "bg-amber-500/[0.04]" : ""
       }`}
     >
-      <div className="max-w-4xl mx-auto px-8 pt-12 pb-20">
-        {/* Header */}
-        <div className="mb-10">
-          <div className="text-zinc-500 text-[12px] tracking-wide mb-2">
-            <button
-              onClick={() => onNavigate("landing")}
-              className="hover:text-zinc-300 transition-colors"
-            >
-              {t("back")}
-            </button>
-          </div>
-          <h1 className="text-white text-[36px] font-semibold tracking-tight mb-3">
-            {t("decompress.title")}
-          </h1>
-          <p className="text-zinc-400 text-[14px] leading-relaxed max-w-2xl">
-            {t("decompress.desc")}
-          </p>
-        </div>
+      <div className="max-w-4xl mx-auto px-8 pt-8 pb-20">
+        {/* Sprint 5.7.21-B-Abstract: the Decompress page no
+            longer has a big header. The TopBar already
+            provides global nav; the per-page title + back
+            link was visual noise. The drop zone (right
+            below) is the only thing the user needs to see. */}
 
         {/* Drop zone or archive info */}
         {!archivePath ? (
           <div
-            className={`relative rounded-3xl border-2 border-dashed transition-all p-16 text-center mb-10 ${
+            className={`relative rounded-2xl border-2 border-dashed transition-all px-8 py-12 text-center mb-8 ${
               dragOver
                 ? "border-amber-400 bg-amber-500/[0.08]"
                 : "border-white/[0.08] bg-white/[0.02]"
             }`}
           >
-            <div className="text-7xl mb-6 select-none">
+            <div className="text-amber-400/70 mb-5 select-none">
               {dragOver ? "⤓" : "📂"}
             </div>
-            <h3 className="text-white text-[20px] font-medium mb-2">
+            <h3 className="text-white text-[20px] font-medium tracking-tight mb-1.5">
               {dragOver ? t("decompress.drop.active") : t("decompress.drop")}
             </h3>
             <p className="text-zinc-500 text-[13px] mb-6">
@@ -720,7 +757,22 @@ export function DecompressView({
                       unlockError={unlockError}
                       onUnlock={onUnlock}
                     />
-                  ) : null}
+                  ) : (
+                    // Sprint 5.7.21-EXT: show the file list
+                    // for the new external formats (zip /
+                    // tar.gz / gz) too. The peek already
+                    // populated legacyInfo.files via
+                    // peek_archive_target_cmd; we just
+                    // hand it to ArchivePreview. Skip when
+                    // the file list is empty (single-file
+                    // archive like .nxs without TOC) so
+                    // the user doesn't see an empty list.
+                    legacyInfo.files && legacyInfo.files.length > 0 ? (
+                      <ArchivePreview
+                        preview={legacyToPreview(legacyInfo)}
+                      />
+                    ) : null
+                  )}
                 </>
               ) : peeking ? (
                 <div className="text-zinc-500 text-[13px] py-4 flex items-center gap-2">
@@ -800,13 +852,20 @@ export function DecompressView({
                             key={`dir-${i}-${entry.name}`}
                             className="text-zinc-500 text-[12px] flex items-center gap-3 px-4 py-2 font-mono"
                           >
-                            <span className="w-4">📁</span>
+                            <FolderOpen size={13} className="text-amber-400 shrink-0" />
                             <span className="flex-1 truncate">{entry.name}</span>
                             <span className="text-zinc-700 text-[10.5px]">dir</span>
                           </div>
                         );
                       }
                       const checked = selected.has(entry.name);
+                      // Sprint 5.7.21-B-FileIcons-Shared: use the
+                      // shared file-icon helpers. Each file entry
+                      // gets a colored icon based on extension
+                      // (FileCode / FileImage / etc.) instead of
+                      // a generic 📄 emoji.
+                      const fileKind = getFileKind(entry.name);
+                      const FileIcon = fileKind.icon;
                       return (
                         <label
                           key={`file-${i}-${entry.name}`}
@@ -818,7 +877,14 @@ export function DecompressView({
                             onChange={() => toggleEntry(entry.name)}
                             className="accent-amber-500 w-4 h-4 flex-shrink-0"
                           />
-                          <span className="w-4 flex-shrink-0">📄</span>
+                          <div
+                            className={
+                              "w-4 h-4 rounded flex items-center justify-center shrink-0 " +
+                              fileKind.bg
+                            }
+                          >
+                            <FileIcon size={10} className={fileKind.color} strokeWidth={2} />
+                          </div>
                           <span className="flex-1 truncate">{entry.name}</span>
                           <span className="text-zinc-500 text-[10.5px] flex-shrink-0 tabular-nums">
                             {prettyBytes(entry.size)}
@@ -850,20 +916,49 @@ export function DecompressView({
                     {t("decompress.content")} ({legacyInfo.files.length} {t("decompress.files").toLowerCase()})
                   </summary>
                   <div className="mt-3 max-h-48 overflow-y-auto space-y-1">
-                    {legacyInfo.files.slice(0, 50).map((f, i) => (
-                      <div
-                        key={i}
-                        className="text-zinc-500 text-[12px] flex items-center gap-2 font-mono"
-                      >
-                        <span className="text-zinc-700 w-6 text-right">
-                          {f.is_dir ? "📁" : "📄"}
-                        </span>
-                        <span className="flex-1 truncate">{f.path}</span>
-                        <span className="text-zinc-700 text-[10.5px]">
-                          {prettyBytes(f.size)}
-                        </span>
-                      </div>
-                    ))}
+                    {legacyInfo.files.slice(0, 50).map((f, i) => {
+                      // Sprint 5.7.21-B-FileIcons-Shared: use the
+                      // shared file-icon helpers. The legacy file
+                      // list (single-stream archives) used 📁/📄
+                      // emoji icons; now each entry gets a
+                      // proper Lucide icon based on extension
+                      // (or FolderOpen for directories).
+                      if (f.is_dir) {
+                        return (
+                          <div
+                            key={i}
+                            className="text-zinc-500 text-[12px] flex items-center gap-2 font-mono"
+                          >
+                            <FolderOpen size={12} className="text-amber-400 shrink-0" />
+                            <span className="flex-1 truncate">{f.path}</span>
+                            <span className="text-zinc-700 text-[10.5px]">
+                              {prettyBytes(f.size)}
+                            </span>
+                          </div>
+                        );
+                      }
+                      const fileKind = getFileKind(f.path);
+                      const FileIcon = fileKind.icon;
+                      return (
+                        <div
+                          key={i}
+                          className="text-zinc-500 text-[12px] flex items-center gap-2 font-mono"
+                        >
+                          <div
+                            className={
+                              "w-4 h-4 rounded flex items-center justify-center shrink-0 " +
+                              fileKind.bg
+                            }
+                          >
+                            <FileIcon size={10} className={fileKind.color} strokeWidth={2} />
+                          </div>
+                          <span className="flex-1 truncate">{f.path}</span>
+                          <span className="text-zinc-700 text-[10.5px]">
+                            {prettyBytes(f.size)}
+                          </span>
+                        </div>
+                      );
+                    })}
                     {legacyInfo.files.length > 50 && (
                       <div className="text-zinc-600 text-[11px] pt-2">
                         … y {legacyInfo.files.length - 50} más
@@ -883,7 +978,7 @@ export function DecompressView({
               {t("decompress.dest")}
             </div>
             <div className="flex items-center gap-3 px-5 py-4 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
-              <span className="text-zinc-500 text-[13px]">📁</span>
+              <FolderOpen size={14} className="text-zinc-500 shrink-0" />
               <span className="text-white text-[14px] flex-1 truncate font-mono">
                 {destDir || t("compress.dest.detecting")}
               </span>

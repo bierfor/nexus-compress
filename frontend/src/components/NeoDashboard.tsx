@@ -38,7 +38,8 @@ export function NeoDashboard({
         {onNavigate && (
           <button
             onClick={() => onNavigate("landing")}
-            className="text-zinc-700 hover:text-zinc-400 transition-colors"
+            className="text-zinc-700 hover:text-zinc-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/40 rounded-md px-2 py-0.5"
+            aria-label={t("landing.empty.cta")}
           >
             {t("landing.empty.cta")}
           </button>
@@ -63,8 +64,9 @@ export function NeoDashboard({
       {/* Left — click to go to Recent */}
       <button
         onClick={() => onNavigate?.("recent")}
-        className="flex items-center gap-2.5 text-zinc-400 hover:text-zinc-200 transition-colors min-w-0"
+        className="flex items-center gap-2.5 text-zinc-400 hover:text-zinc-200 transition-colors min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/40 rounded-md px-1.5 py-0.5"
         title={t("nav.recent")}
+        aria-label={t("nav.recent")}
       >
         <span className={`shrink-0 ${op.status === "ok" ? "text-emerald-400" : "text-red-400"}`}>
           {op.status === "ok" ? <Check size={14} strokeWidth={2.5} /> : <AlertCircle size={14} strokeWidth={2.5} />}

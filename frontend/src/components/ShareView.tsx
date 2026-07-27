@@ -1,41 +1,58 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { type View } from "@/components/NeoTopBar";
 import { PageHeader } from "@/components/PageHeader";
 import { useLocale } from "@/components/LocaleProvider";
 import {
   Send,
+  Share2,
+  Archive,
+  Clipboard,
   FileText,
   FolderOpen,
   ArrowRight,
   Copy,
   Check,
+  CheckCircle2,
   RefreshCw,
+  Loader2,
   File,
   X,
   Wifi,
+  Cloud,
   Globe,
+  Network,
+  Radio,
+  Activity,
+  Users,
   AlertCircle,
   Sparkles,
+  Upload,
   Link as LinkIcon,
+  ExternalLink,
+  Hash,
   QrCode,
   Lock,
   Shield,
   Download,
   Clock,
   Infinity as InfinityIcon,
-  ChevronDown,
-  Settings2,
   Server,
   HardDrive,
   KeyRound,
   Eye,
   EyeOff,
+  Plus,
+  Layers,
+  Inbox,
+  ScanLine,
+  ShieldCheck,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useAppStats, useRecentEvents } from "@/lib/useAppData";
 import { formatBytes, formatTimestampMs } from "@/lib/format";
+import { getFileKind, getKindBadge } from "@/lib/fileIcons";
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -93,6 +110,13 @@ export function ShareView({
   // state without prop-drilling or context.
   const [shareResp, setShareResp] = useState<SendStartResp | null>(null);
 
+  // Sprint 5.7.21-B-Abstract: tabs at the top so the user
+  // picks ONE flow (Send or Receive) instead of seeing both
+  // flows + a "selling points" header competing for attention.
+  // Default to "send" because that's the more common path
+  // (the user has a file they want to share).
+  const [tab, setTab] = useState<"send" | "receive">("send");
+
   // Sprint 5.7: real share stats + recent share events so the
   // LinkPanel Actividad section shows actual past transfers,
   // not hardcoded placeholder text.
@@ -101,55 +125,65 @@ export function ShareView({
   const recentShareEvents = recentShares.filter((o) => o.kind === "share").slice(0, 3);
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-7xl mx-auto px-8 pt-8 pb-16">
-        {/* Header — title + 3 selling-point pills on the right */}
-        <div className="flex items-start justify-between mb-8 gap-6">
-          <div>
-            <h1 className="text-white text-[32px] font-semibold tracking-tight leading-tight">
-              {t("share.title")}
-            </h1>
-            <p className="text-zinc-500 text-[14px] mt-1.5">
-              {t("share.desc")}
-            </p>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <span className="chip chip-cyan">
-              <InfinityIcon size={11} />
-              {t("share.feature.unlimited")}
-            </span>
-            <span className="chip">{t("share.feature.nostorage")}</span>
-            <span className="chip chip-cyan">
-              <Shield size={11} />
-              {t("share.feature.e2e")}
-            </span>
-          </div>
+      <div className="max-w-3xl mx-auto px-8 pt-8 pb-16">
+        {/* Sprint 5.7.21-B-Abstract: the big page header
+            (h1 + 3 selling-point chips) is gone. The TopBar
+            already provides global nav; the per-page title
+            and the "Unlimited / No storage / E2E" marketing
+            chips were visual noise. The tabs below + the
+            panel content is the only thing the user needs. */}
+
+        {/* Tabs: Send | Receive */}
+        <div className="mb-8 inline-flex items-center gap-1 p-1 rounded-2xl border border-white/[0.06] bg-white/[0.02]">
+          <button
+            onClick={() => setTab("send")}
+            data-testid="share-tab-send"
+            data-active={tab === "send"}
+            className={
+              "px-5 py-2 rounded-xl text-[13px] font-medium transition-all " +
+              (tab === "send"
+                ? "bg-cyan-500/15 text-cyan-200 border border-cyan-500/30"
+                : "text-zinc-400 hover:text-zinc-200 border border-transparent")
+            }
+          >
+            {t("share.tab.send")}
+          </button>
+          <button
+            onClick={() => setTab("receive")}
+            data-testid="share-tab-receive"
+            data-active={tab === "receive"}
+            className={
+              "px-5 py-2 rounded-xl text-[13px] font-medium transition-all " +
+              (tab === "receive"
+                ? "bg-cyan-500/15 text-cyan-200 border border-cyan-500/30"
+                : "text-zinc-400 hover:text-zinc-200 border border-transparent")
+            }
+          >
+            {t("share.tab.receive")}
+          </button>
         </div>
 
-        {/* 2-column layout: Send flow | Link preview.
-            Sprint 5.7: fixed 3-col card-balanced layout (was 2-col).
-            SendPanel gets 5/12 cols, LinkPanel gets 7/12 cols. */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 mb-8">
-          <div className="lg:col-span-5">
+        {/* Active panel. The 2-col layout (Send | Link) is gone —
+            the LinkPanel renders as a sub-section below the
+            SendPanel once a share is active. The ReceivePanel
+            renders alone when the receive tab is active. */}
+        {tab === "send" ? (
+          <div className="space-y-5">
             <SendPanel onComplete={onComplete} onRespChange={setShareResp} />
+            {shareResp && (
+              <LinkPanel
+                resp={shareResp}
+                stats={stats}
+                recentShareEvents={recentShareEvents}
+                locale={locale}
+                t={t as (k: string, vars?: Record<string, string | number>) => string}
+                onNavigate={onNavigate}
+              />
+            )}
           </div>
-          <div className="lg:col-span-7">
-            <LinkPanel
-              resp={shareResp}
-              stats={stats}
-              recentShareEvents={recentShareEvents}
-              locale={locale}
-              t={t as (k: string, vars?: Record<string, string | number>) => string}
-              onNavigate={onNavigate}
-            />
-          </div>
-        </div>
-
-        {/* Receive panel below (full width on lg, single col on mobile) */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          <div className="lg:col-span-12">
-            <ReceivePanel />
-          </div>
-        </div>
+        ) : (
+          <ReceivePanel />
+        )}
       </div>
     </div>
   );
@@ -172,7 +206,15 @@ function SendPanel({
   onRespChange?: (resp: SendStartResp | null) => void;
 }) {
   const { t } = useLocale();
+  // Sprint 5.7.21-B-Share-Improve: track whether the selected
+  // path is a file or a folder so the UI shows the right icon
+  // + label. Set by the explicit browse buttons (file vs
+  // folder); for typed paths the kind is "unknown" and we use
+  // a generic FileText icon.
   const [filePath, setFilePath] = useState<string | null>(null);
+  const [pathKind, setPathKind] = useState<"file" | "folder" | "unknown">(
+    "unknown"
+  );
   const [resp, setResp] = useState<SendStartResp | null>(null);
   const [busy, setBusy] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -180,20 +222,33 @@ function SendPanel({
   const [pathInput, setPathInput] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [copied, setCopied] = useState<"code" | "token" | null>(null);
+  // Sprint 5.7.21-B-Share-Improve: when the user drops multiple
+  // paths, the backend only takes the first. We surface a quiet
+  // warning so they know.
+  const [multiWarning, setMultiWarning] = useState(false);
 
   // Sprint 5.6.29: bubble `resp` up to ShareView so LinkPanel can render.
   useEffect(() => {
     onRespChange?.(resp);
   }, [resp, onRespChange]);
 
-  const acceptPath = useCallback((p: string | null) => {
-    if (p) {
-      setFilePath(p);
-      setError(null);
-      setResp(null);
-      setPathInput("");
-    }
-  }, []);
+  // Sprint 5.7.21-B-Share-Improve: acceptPath takes an explicit
+  // kind so the preview can render the right icon (File vs
+  // FolderOpen). The drop handler passes "unknown" since we
+  // can't tell from a path string alone.
+  const acceptPath = useCallback(
+    (p: string | null, kind: "file" | "folder" | "unknown" = "unknown") => {
+      if (p) {
+        setFilePath(p);
+        setPathKind(kind);
+        setError(null);
+        setResp(null);
+        setPathInput("");
+        setMultiWarning(false);
+      }
+    },
+    []
+  );
 
   // drag-drop
   const onDragOver = useCallback((e: React.DragEvent) => {
@@ -206,7 +261,15 @@ function SendPanel({
       e.preventDefault();
       setDragOver(false);
       const paths: string[] = (e as any).detail?.paths ?? [];
-      if (paths.length) acceptPath(paths[0]);
+      if (paths.length === 0) return;
+      // Sprint 5.7.21-B-Share-Improve: if the user dropped more
+      // than one item, the backend (p2p_send_start_cmd) only
+      // takes a single path. We use the first and show a quiet
+      // warning so they know the rest were dropped silently.
+      if (paths.length > 1) {
+        setMultiWarning(true);
+      }
+      acceptPath(paths[0], "unknown");
     },
     [acceptPath]
   );
@@ -221,19 +284,32 @@ function SendPanel({
         if (!ev?.listen) return;
         unlisten = await ev.listen("tauri://drag-drop", (e: any) => {
           const paths: string[] = e?.payload?.paths ?? [];
-          if (paths.length) acceptPath(paths[0]);
+          if (paths.length === 0) return;
+          if (paths.length > 1) {
+            setMultiWarning(true);
+          }
+          acceptPath(paths[0], "unknown");
         });
       } catch {}
     })();
     return () => unlisten?.();
   }, [acceptPath]);
 
+  // Sprint 5.7.21-B-Share-Improve: two explicit browse buttons
+  // — "Choose file" and "Choose folder" — so the user can pick
+  // the kind they want. The previous version only had a file
+  // picker; onBrowseFolder was defined but never called (dead
+  // code from a pre-refactor).
   const onBrowseFile = useCallback(async () => {
     if (!isTauri) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const r = await open({ multiple: false, directory: false, filters: [{ name: "All files", extensions: ["*"] }] });
-      if (typeof r === "string") acceptPath(r);
+      const r = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "All files", extensions: ["*"] }],
+      });
+      if (typeof r === "string") acceptPath(r, "file");
     } catch {}
   }, [acceptPath]);
 
@@ -242,9 +318,19 @@ function SendPanel({
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const r = await open({ multiple: false, directory: true });
-      if (typeof r === "string") acceptPath(r);
+      if (typeof r === "string") acceptPath(r, "folder");
     } catch {}
   }, [acceptPath]);
+
+  // Sprint 5.7.21-B-Share-Improve: text path input. The user
+  // can type a path directly (useful when the native picker
+  // is flaky, e.g. macOS Sequoia — see share.send.drop.hint).
+  // The kind is "unknown" because we can't tell from the path
+  // string alone.
+  const onAddPath = useCallback(() => {
+    const trimmed = pathInput.trim();
+    if (trimmed) acceptPath(trimmed, "unknown");
+  }, [pathInput, acceptPath]);
 
   const onSend = useCallback(async () => {
     if (!filePath) return;
@@ -274,10 +360,12 @@ function SendPanel({
 
   const onReset = useCallback(() => {
     setFilePath(null);
+    setPathKind("unknown");
     setResp(null);
     setError(null);
     setPathInput("");
     setCopied(null);
+    setMultiWarning(false);
   }, []);
 
   const onCopy = useCallback(async (text: string, which: "code" | "token") => {
@@ -287,6 +375,15 @@ function SendPanel({
   }, []);
 
   const filename = filePath ? filePath.split("/").pop() : null;
+
+  // The preview icon depends on pathKind. Three states:
+  //   file    → FileText
+  //   folder  → FolderOpen
+  //   unknown → FileText (generic — the user might have typed
+  //             the path or dropped it; the backend will tell
+  //             us on the response)
+  const PreviewIcon =
+    pathKind === "folder" ? FolderOpen : FileText;
 
   return (
     <div
@@ -312,7 +409,11 @@ function SendPanel({
 
       {!resp ? (
         <>
-          {/* Dropzone with file icon + CTA button */}
+          {/* Dropzone — Sprint 5.7.21-B-Share-Icons: the icon is
+              a Share2 (the main "share" semantic) with a small
+              Layers stack in the bottom-right corner as decoration.
+              On drag-over, the icon rotates 6° and the bg changes
+              to suggest "this is where items land". */}
           <div
             className={
               "relative rounded-2xl p-10 text-center transition-all duration-200 cursor-pointer " +
@@ -324,181 +425,235 @@ function SendPanel({
             {dragOver && (
               <div className="absolute inset-0 rounded-2xl pointer-events-none animate-pulse-glow" />
             )}
-            <div
-              className={
-                "mx-auto mb-4 w-16 h-16 rounded-2xl flex items-center justify-center transition-all duration-300 text-blue-500 " +
-                (dragOver
-                  ? "bg-blue-500/20 scale-110 rotate-[-6deg]"
-                  : "bg-blue-500/10 group-hover:scale-105")
-              }
-            >
-              {dragOver ? (
-                <ArrowRight size={28} strokeWidth={2.2} />
-              ) : (
-                <FileText size={28} strokeWidth={1.6} />
+            {/* Icon stack: Share2 (main) + small Layers corner
+                badge. Two layers of iconography to make the
+                drop intent crystal clear. */}
+            <div className="relative inline-block mb-4">
+              <div
+                className={
+                  "mx-auto w-16 h-16 rounded-2xl flex items-center justify-center transition-all duration-300 text-cyan-400 " +
+                  (dragOver
+                    ? "bg-cyan-500/20 scale-110 rotate-[-6deg]"
+                    : "bg-cyan-500/10")
+                }
+              >
+                {dragOver ? (
+                  <Inbox size={32} strokeWidth={1.6} />
+                ) : (
+                  <Share2 size={28} strokeWidth={1.6} />
+                )}
+              </div>
+              {!dragOver && (
+                <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-md bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-300">
+                  <Layers size={12} strokeWidth={2.2} />
+                </div>
               )}
             </div>
             <p className="text-white text-[14px] font-medium mb-1">
               {dragOver ? t("share.send.drop.active") : t("share.send.drop")}
             </p>
-            <p className="text-zinc-500 text-[12px] mb-5">
+            <p className="text-zinc-500 text-[12px] mb-5 max-w-md mx-auto">
               {t("share.send.drop.hint")}
             </p>
-            {/* Solid cyan button (matches mockup — no gradient) */}
-            <button
-              onClick={onBrowseFile}
-              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-blue-500 hover:bg-blue-400 text-white text-[13px] font-semibold transition-all duration-150 hover:-translate-y-px shadow-[0_4px_20px_-6px_rgba(59,130,246,0.55)]"
-            >
-              <File size={14} />
-              {t("share.send.choose")}
-            </button>
+            {/* Sprint 5.7.21-B-Share-Improve: two browse buttons
+                side by side — "Choose file" + "Choose folder".
+                The previous version only had a file picker. */}
+            <div className="inline-flex items-center gap-2">
+              <button
+                onClick={onBrowseFile}
+                data-testid="send-browse-file"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-white text-[13px] font-semibold transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+              >
+                <File size={14} />
+                {t("share.send.browse.file")}
+              </button>
+              <button
+                onClick={onBrowseFolder}
+                data-testid="send-browse-folder"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-200 text-[13px] font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+              >
+                <FolderOpen size={14} />
+                {t("share.send.browse.folder")}
+              </button>
+            </div>
           </div>
 
-          {/* Selected file preview — matches mockup: gray icon, simple card */}
+          {/* Path text input — alternative to the picker / drop.
+              The user can paste a path (Cmd+Opt+C in Finder). */}
+          {!filePath && (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={pathInput}
+                onChange={(e) => setPathInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && onAddPath()}
+                placeholder={t("share.send.placeholder")}
+                className="flex-1 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white text-[12.5px] placeholder:text-zinc-600 focus:outline-none focus:border-cyan-400/40 focus:bg-white/[0.06] transition-all font-mono"
+              />
+              <button
+                onClick={onAddPath}
+                disabled={!pathInput.trim()}
+                className="px-3 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[12.5px] font-medium transition-all flex items-center gap-1.5 disabled:opacity-30 disabled:hover:bg-cyan-500/15"
+              >
+                <Plus size={13} />
+                {t("share.send.add")}
+              </button>
+            </div>
+          )}
+
+          {/* Multi-drop warning (shown when user dropped >1 file) */}
+          {multiWarning && (
+            <div className="text-amber-300/80 text-[12px] px-3 py-2 rounded-lg bg-amber-500/[0.06] border border-amber-500/20">
+              {t("share.send.multi.warning")}
+            </div>
+          )}
+
+          {/* Selected path preview — the icon switches between
+              File and FolderOpen based on pathKind. Sprint
+              5.7.21-B-Share-Icons: each kind gets its own
+              accent color + icon shape so the user can tell
+              at a glance what they're about to share. */}
           {filePath && (
             <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex items-center gap-3 animate-scale-in">
-              <div className="w-10 h-10 rounded-lg bg-white/[0.05] flex items-center justify-center text-zinc-400 shrink-0">
-                <FileText size={18} />
+              <div
+                className={
+                  "w-10 h-10 rounded-lg flex items-center justify-center shrink-0 border " +
+                  (pathKind === "folder"
+                    ? "bg-amber-500/10 border-amber-500/20 text-amber-300"
+                    : pathKind === "unknown"
+                      ? "bg-zinc-500/10 border-zinc-500/20 text-zinc-300"
+                      : "bg-cyan-500/10 border-cyan-500/20 text-cyan-300")
+                }
+              >
+                <PreviewIcon size={18} strokeWidth={1.8} />
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-white text-[13px] truncate font-medium">
                   {filename}
                 </p>
-                <p className="text-zinc-500 text-[10.5px] mt-0.5">
-                  Listo para compartir
+                <p className="text-zinc-500 text-[10.5px] mt-0.5 flex items-center gap-1.5">
+                  {pathKind === "folder" ? (
+                    <>
+                      <FolderOpen size={9} className="text-amber-400" />
+                      {t("share.send.ready.folder")}
+                    </>
+                  ) : pathKind === "unknown" ? (
+                    <>
+                      <File size={9} className="text-zinc-500" />
+                      {t("share.send.ready.file")}
+                    </>
+                  ) : (
+                    <>
+                      <FileText size={9} className="text-cyan-400" />
+                      {t("share.send.ready.file")}
+                    </>
+                  )}
                 </p>
               </div>
               <button
-                onClick={() => setFilePath(null)}
-                className="text-zinc-500 hover:text-white transition-colors p-1.5 rounded-md hover:bg-white/[0.05]"
+                onClick={() => {
+                  setFilePath(null);
+                  setPathKind("unknown");
+                  setMultiWarning(false);
+                }}
+                className="text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 transition-colors p-1.5 rounded-md"
                 aria-label={t("share.send.remove")}
+                data-testid="send-remove-path"
               >
                 <X size={16} />
               </button>
             </div>
           )}
 
-          {/* Advanced options accordion */}
-          {filePath && (
-            <details className="rounded-xl border border-white/[0.06] bg-white/[0.02] open:bg-white/[0.03] group">
-              <summary className="flex items-center gap-2 px-4 py-3 cursor-pointer list-none select-none text-zinc-400 hover:text-white transition-colors">
-                <Settings2 size={14} />
-                <span className="text-[12px] font-medium flex-1">
-                  {t("share.send.advanced")}
-                </span>
-                <ChevronDown
-                  size={14}
-                  className="transition-transform duration-200 group-open:rotate-180"
-                />
-              </summary>
-              <div className="px-4 pb-4 flex flex-col gap-3 text-[12.5px]">
-                {/* Custom slug */}
-                <div className="flex items-center gap-3">
-                  <LinkIcon size={14} className="text-zinc-500 shrink-0" />
-                  <span className="text-zinc-300 shrink-0">
-                    {t("share.send.customslug")}
-                  </span>
-                  <span className="text-zinc-600 text-[10.5px]">
-                    ({t("share.send.optional")})
-                  </span>
-                  <input
-                    type="text"
-                    placeholder={t("share.send.customslug.placeholder")}
-                    className="input flex-1 py-1.5 text-[12px] font-mono"
-                  />
-                </div>
-                {/* Expiration */}
-                <div className="flex items-center gap-3">
-                  <Clock size={14} className="text-zinc-500 shrink-0" />
-                  <span className="text-zinc-300 shrink-0">
-                    {t("share.send.expiration")}
-                  </span>
-                  <select
-                    defaultValue="7d"
-                    className="ml-auto bg-transparent border border-white/[0.08] rounded-lg px-3 py-1.5 text-[12px] text-zinc-200 focus:outline-none focus:border-cyan-500/50 cursor-pointer hover:border-white/[0.16] transition-colors"
-                  >
-                    <option value="1d">1 {t("share.send.day")}</option>
-                    <option value="7d">7 {t("share.send.days")}</option>
-                    <option value="30d">30 {t("share.send.days")}</option>
-                    <option value="never">{t("share.send.never")}</option>
-                  </select>
-                </div>
-                {/* Download limit */}
-                <div className="flex items-center gap-3">
-                  <Download size={14} className="text-zinc-500 shrink-0" />
-                  <span className="text-zinc-300 shrink-0">
-                    {t("share.send.downloadlimit")}
-                  </span>
-                  <select
-                    defaultValue="none"
-                    className="ml-auto bg-transparent border border-white/[0.08] rounded-lg px-3 py-1.5 text-[12px] text-zinc-200 focus:outline-none focus:border-cyan-500/50 cursor-pointer hover:border-white/[0.16] transition-colors"
-                  >
-                    <option value="none">{t("share.send.unlimited")}</option>
-                    <option value="5">5</option>
-                    <option value="10">10</option>
-                    <option value="50">50</option>
-                    <option value="100">100</option>
-                  </select>
-                </div>
-              </div>
-            </details>
-          )}
+          {/* Sprint 5.7.21-B-Share-Fixes: the previous
+              "Advanced options" accordion (custom slug /
+              expiration / download limit) was NOT wired to
+              the backend — the p2p_send_start_cmd only takes
+              file_path + code. The UI looked like a working
+              feature but did nothing. Removed; the advanced
+              options will come back when the backend grows
+              the corresponding fields. */}
 
-          {/* Big gradient CTA */}
+          {/* Sprint 5.7.21-B-Share-Improve: replaced the big
+              gradient CTA with a single-accent abstract button,
+              consistent with the rest of the app. The previous
+              version had a 3-color gradient (emerald-cyan-emerald)
+              with a heavy shadow. The new design uses a flat
+              cyan button. */}
           <button
             onClick={onSend}
             disabled={!filePath || busy}
-            className="w-full py-4 rounded-2xl font-semibold text-[14.5px] text-white relative overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 hover:scale-[1.01] active:scale-[0.99] disabled:hover:scale-100"
-            style={{
-              background: busy
-                ? "linear-gradient(135deg, #34d399 0%, #22d3ee 100%)"
-                : "linear-gradient(135deg, #34d399 0%, #10b981 35%, #22d3ee 100%)",
-              boxShadow: !busy && filePath
-                ? "0 8px 32px -8px rgba(34,211,238,0.55), 0 0 0 1px rgba(255,255,255,0.08) inset"
-                : "none",
-            }}
+            data-testid="send-cta"
+            className="w-full py-3 rounded-xl font-semibold text-[14px] text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-800 disabled:text-zinc-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
           >
-            <span className="relative z-10 flex items-center justify-center gap-2">
-              {busy ? (
-                <>
-                  <RefreshCw size={16} className="animate-spin-slow" />
-                  {t("share.send.btn.busy")}
-                </>
-              ) : (
-                <>
-                  <LinkIcon size={16} />
-                  {t("share.send.cta")}
-                </>
-              )}
-            </span>
+            {busy ? (
+              <>
+                <RefreshCw size={15} className="animate-spin" />
+                {t("share.send.btn.busy")}
+              </>
+            ) : (
+              <>
+                <LinkIcon size={15} />
+                {t("share.send.cta")}
+              </>
+            )}
           </button>
           <p className="text-zinc-500 text-[11.5px] text-center -mt-2">
             {t("share.send.cta.sub")}
           </p>
         </>
       ) : (
-        /* Active link — show summary in left card too */
+        /* Active link — show summary in left card too. Sprint
+            5.7.21-B-Share-Fixes: now uses the shared getFileKind
+            helper so the icon matches the file type (FileCode /
+            FileImage / etc.) instead of a generic FileText. */
         <div className="rounded-2xl bg-emerald-500/[0.06] border border-emerald-500/20 p-5 flex flex-col gap-4 animate-scale-in">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-300 shrink-0">
-              <FileText size={18} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-white text-[13.5px] truncate font-semibold">
-                {resp.filename}
-              </p>
-              <p className="text-zinc-500 text-[11px] font-mono mt-0.5">
-                {prettyBytes(resp.file_size)}
-              </p>
-            </div>
-            <button
-              onClick={onReset}
-              className="btn btn-ghost"
-            >
-              <RefreshCw size={12} />
-              {t("share.send.new")}
-            </button>
-          </div>
+          {(() => {
+            const fileKind = getFileKind(resp.filename);
+            const FileIcon = fileKind.icon;
+            return (
+              <div className="flex items-center gap-3">
+                <div
+                  className={
+                    "w-10 h-10 rounded-lg flex items-center justify-center border shrink-0 " +
+                    fileKind.bg +
+                    " " +
+                    fileKind.border
+                  }
+                >
+                  <FileIcon size={18} className={fileKind.color} strokeWidth={1.8} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-white text-[13.5px] truncate font-semibold">
+                    {resp.filename}
+                  </p>
+                  <p className="text-zinc-500 text-[11px] font-mono mt-0.5">
+                    {prettyBytes(resp.file_size)}
+                  </p>
+                </div>
+                <button
+                  onClick={onReset}
+                  className="btn btn-ghost"
+                >
+                  <RefreshCw size={12} />
+                  {t("share.send.new")}
+                </button>
+              </div>
+            );
+          })()}
+          {/* Sprint 5.7.21-B-Share-Fixes: cancel button during
+              a stuck send. Previously onCancel was defined
+              but never wired to any button. Now the user can
+              abort if the send is hanging. */}
+          <button
+            onClick={onCancel}
+            disabled={cancelling || !busy}
+            data-testid="send-cancel"
+            className="self-end text-zinc-500 hover:text-rose-400 disabled:text-zinc-700 text-[11px] font-medium transition-colors inline-flex items-center gap-1.5"
+          >
+            <X size={11} />
+            {cancelling ? t("share.send.canceling") : t("share.send.cancel")}
+          </button>
         </div>
       )}
 
@@ -655,21 +810,32 @@ function ReceivePanel() {
     return () => { cancelled = true; };
   }, [resolvedDownloads, suggestedName, userEditedPath]);
 
-  const STEPS = kind === "v1"
-    ? [
-        t("share.receive.step.detecting"),
-        t("share.receive.step.connecting"),
-        t("share.receive.step.handshake"),
-        t("share.receive.step.transferring"),
-        t("share.receive.step.verifying"),
-      ]
-    : [
-        t("share.receive.step.detecting"),
-        t("share.receive.step.finding"),
-        t("share.receive.step.handshake"),
-        t("share.receive.step.transferring"),
-        t("share.receive.step.verifying"),
-      ];
+  // Sprint 5.7.21-B-Share-Fixes: STEPS is now memoized so
+  // it doesn't rebuild on every render. The deps are the
+  // kind (changes which set of steps to use) and the 5 step
+  // labels (change when locale changes). The two step arrays
+  // have the same length (5 each) so stepIdx is a stable
+  // index into both.
+  const STEPS = useMemo(
+    () =>
+      kind === "v1"
+        ? [
+            t("share.receive.step.detecting"),
+            t("share.receive.step.connecting"),
+            t("share.receive.step.handshake"),
+            t("share.receive.step.transferring"),
+            t("share.receive.step.verifying"),
+          ]
+        : [
+            t("share.receive.step.detecting"),
+            t("share.receive.step.finding"),
+            t("share.receive.step.handshake"),
+            t("share.receive.step.transferring"),
+            t("share.receive.step.verifying"),
+          ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [kind, t]
+  );
 
   // Sprint 5.6.25: resolve the final output path. Since the
   // `outputPath` field is ALWAYS the real final path (kept in
@@ -781,9 +947,49 @@ function ReceivePanel() {
 
       {/* Token input */}
       <div>
-        <label className="text-zinc-500 text-[10px] tracking-[0.2em] uppercase font-medium pl-1 block mb-2">
-          {t("share.receive.token.label")}
-        </label>
+        <div className="flex items-center justify-between mb-2">
+          <label className="text-zinc-500 text-[10px] tracking-[0.2em] uppercase font-medium pl-1">
+            {t("share.receive.token.label")}
+          </label>
+          {/* Sprint 5.7.21-B-Share-Fixes: token input has a
+              "Paste" button (uses the Clipboard API) + a
+              "Clear" button (only when there's a value).
+              Previously the user had to type Cmd+V into the
+              textarea or manually delete the token. */}
+          <div className="flex items-center gap-1">
+            {token && (
+              <button
+                onClick={() => {
+                  setToken("");
+                  setResult(null);
+                  setError(null);
+                }}
+                data-testid="receive-clear-token"
+                className="px-2 py-1 rounded text-[10.5px] text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 transition-colors flex items-center gap-1"
+              >
+                <X size={10} />
+                {t("share.receive.btn.clear")}
+              </button>
+            )}
+            <button
+              onClick={async () => {
+                try {
+                  const text = await navigator.clipboard.readText();
+                  if (text) {
+                    setToken(text.trim());
+                    setResult(null);
+                    setError(null);
+                  }
+                } catch {}
+              }}
+              data-testid="receive-paste-token"
+              className="px-2 py-1 rounded text-[10.5px] text-zinc-300 hover:text-white hover:bg-white/[0.06] transition-colors flex items-center gap-1 border border-white/[0.08]"
+            >
+              <Clipboard size={10} />
+              {t("share.receive.btn.paste")}
+            </button>
+          </div>
+        </div>
         <textarea
           value={token}
           onChange={(e) => {
@@ -886,7 +1092,7 @@ function ReceivePanel() {
       {/* Progress steps */}
       {busy && stepIdx >= 0 && (
         <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] px-4 py-3 space-y-2.5 animate-fade-in">
-          {STEPS.map((label, i) => {
+          {STEPS.map((label: string, i: number) => {
             const done = i < stepIdx;
             const active = i === stepIdx && !stepErr;
             const err = i === stepIdx && stepErr;
@@ -922,29 +1128,60 @@ function ReceivePanel() {
         </div>
       )}
 
-      {/* Success result */}
+      {/* Success result. Sprint 5.7.21-B-Share-Fixes:
+          - Uses the shared getFileKind helper for the icon
+            (FileCode / FileImage / etc.) instead of generic.
+          - Added a "Reveal in Finder" button so the user
+            doesn't have to copy the path manually. */}
       {result && !busy && (
         <div className="rounded-2xl bg-emerald-500/[0.06] border border-emerald-500/20 p-5 animate-scale-in">
-          <div className="flex items-center gap-2 mb-2">
-            <div className="w-7 h-7 rounded-lg bg-emerald-500/20 flex items-center justify-center text-emerald-300">
-              <Check size={14} strokeWidth={3} />
-            </div>
-            <p className="text-emerald-300 text-[10px] tracking-[0.2em] uppercase font-medium">
-              {t("share.receive.result.title")}
-            </p>
-          </div>
-          <p className="text-white text-[24px] font-semibold tabular-nums mb-1">
-            {prettyBytes(result.bytes_written)}
-          </p>
-          <p className="text-zinc-200 text-[13px] font-medium truncate mb-1">
-            {result.filename || "archivo"}
-          </p>
-          <p
-            className="text-zinc-500 text-[11px] font-mono truncate"
-            title={result.output_path}
-          >
-            ▸ {result.output_path}
-          </p>
+          {(() => {
+            const fileKind = getFileKind(result.filename || "");
+            const FileIcon = fileKind.icon;
+            return (
+              <>
+                <div className="flex items-center gap-2 mb-2">
+                  <div
+                    className={
+                      "w-7 h-7 rounded-lg flex items-center justify-center border " +
+                      fileKind.bg +
+                      " " +
+                      fileKind.border
+                    }
+                  >
+                    <FileIcon size={13} className={fileKind.color} strokeWidth={2} />
+                  </div>
+                  <p className="text-emerald-300 text-[10px] tracking-[0.2em] uppercase font-medium">
+                    {t("share.receive.result.title")}
+                  </p>
+                </div>
+                <p className="text-white text-[24px] font-semibold tabular-nums mb-1">
+                  {prettyBytes(result.bytes_written)}
+                </p>
+                <p className="text-zinc-200 text-[13px] font-medium truncate mb-1">
+                  {result.filename || "archivo"}
+                </p>
+                <p
+                  className="text-zinc-500 text-[11px] font-mono truncate mb-3"
+                  title={result.output_path}
+                >
+                  ▸ {result.output_path}
+                </p>
+                <button
+                  onClick={async () => {
+                    try {
+                      await tauriInvoke("reveal_in_finder_cmd", { path: result.output_path });
+                    } catch {}
+                  }}
+                  data-testid="receive-reveal"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[12px] font-medium transition-all"
+                >
+                  <FolderOpen size={12} />
+                  {t("share.receive.btn.reveal")}
+                </button>
+              </>
+            );
+          })()}
         </div>
       )}
 
@@ -994,7 +1231,7 @@ function LinkPanel({
   // Build a pretty URL for display. The token from the backend
   // already encodes the slug; we wrap it in a friendly URL.
   const linkUrl = resp
-    ? `https://nexusrar.app/d/${resp.code.toLowerCase()}`
+    ? `https://nexuscompress.dev/d/${resp.code.toLowerCase()}`
     : null;
 
   const onCopy = useCallback(async (text: string, which: "link" | "token") => {
@@ -1010,8 +1247,8 @@ function LinkPanel({
       {/* Step header with status pill */}
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300 text-[13px] font-bold">
-            2
+          <div className="w-8 h-8 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300">
+            <LinkIcon size={15} strokeWidth={2} />
           </div>
           <div>
             <h2 className="text-white text-[15px] font-semibold leading-tight">
@@ -1022,65 +1259,175 @@ function LinkPanel({
             </p>
           </div>
         </div>
+        {/* Sprint 5.7.21-B-Share-Icons: live status badge. The
+            chip shows a pulsing dot + state name. The connection
+            type (LAN vs Internet tunnel) is shown next to it so
+            the user knows which transport their receiver will use. */}
         {resp && (
-          <span className="chip chip-emerald shrink-0">
-            <span className="relative flex w-2 h-2">
-              <span className="absolute inline-flex h-full w-full rounded-full opacity-75 animate-ping bg-emerald-400" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400" />
-            </span>
-            {t("share.link.active")}
-          </span>
-        )}
-      </div>
-
-      {resp && linkUrl ? (
-        <>
-          {/* Link display card — friendly URL + QR + copy */}
-          <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] p-4 flex items-center gap-3 animate-scale-in">
-            <div className="w-9 h-9 rounded-lg bg-white/[0.05] flex items-center justify-center text-zinc-400 shrink-0">
-              <LinkIcon size={16} />
-            </div>
-            <p className="flex-1 text-white text-[13px] font-mono truncate">
-              {linkUrl}
-            </p>
-            <button
-              onClick={() => onCopy(linkUrl, "link")}
-              className={
-                "inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[13px] font-semibold transition-all duration-150 " +
-                (copied === "link"
-                  ? "bg-emerald-500/20 text-emerald-300"
-                  : "bg-blue-500 hover:bg-blue-400 text-white shadow-[0_4px_16px_-4px_rgba(59,130,246,0.5)]")
-              }
+          <div className="flex items-center gap-2 shrink-0">
+            <span
+              className="px-2.5 py-1 rounded-full border border-emerald-500/30 bg-emerald-500/[0.08] text-emerald-300 text-[10.5px] font-medium inline-flex items-center gap-1.5"
+              data-testid="link-status-badge"
             >
-              {copied === "link" ? (
+              <span className="relative flex w-1.5 h-1.5">
+                <span className="absolute inline-flex h-full w-full rounded-full opacity-75 animate-ping bg-emerald-400" />
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
+              </span>
+              {t("share.link.state.ready")}
+            </span>
+            <span
+              className="px-2.5 py-1 rounded-full border border-cyan-500/20 bg-cyan-500/[0.06] text-cyan-300 text-[10.5px] font-medium inline-flex items-center gap-1.5"
+              data-testid="link-connection-badge"
+            >
+              {resp.upnp_status ? (
                 <>
-                  <Check size={14} />
-                  {t("share.link.copied")}
+                  <Globe size={10} />
+                  {t("share.link.connection.tunnel")}
                 </>
               ) : (
                 <>
-                  <Copy size={14} />
-                  {t("share.link.copy")}
+                  <Wifi size={10} />
+                  {t("share.link.connection.lan")}
                 </>
               )}
-            </button>
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Sprint 5.7.21-B-Share-Icons: 4-step state machine. Each
+          step is a small circle with an icon: Created (Check),
+          Ready (pulse), Connected (Users), Sent (CheckCircle2).
+          Steps 1+2 are done when a link is active; 3+4 are
+          future states. The user can see the progress at a
+          glance. */}
+      {resp && (
+        <div className="flex items-center justify-between gap-1 px-1" data-testid="link-state-machine">
+          {[
+            { id: "created", icon: Check, label: t("share.link.step.created"), done: true },
+            { id: "ready", icon: Activity, label: t("share.link.step.ready"), done: true, current: true },
+            { id: "connected", icon: Users, label: t("share.link.step.connected"), done: false },
+            { id: "sent", icon: CheckCircle2, label: t("share.link.step.sent"), done: false },
+          ].map((step, i, arr) => (
+            <div key={step.id} className="flex items-center gap-1 flex-1 last:flex-none">
+              <div className="flex flex-col items-center gap-1.5 shrink-0">
+                <div
+                  className={
+                    "w-7 h-7 rounded-full flex items-center justify-center border transition-all " +
+                    (step.done && (step as { current?: boolean }).current
+                      ? "bg-cyan-500/20 border-cyan-500/50 text-cyan-300"
+                      : step.done
+                        ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                        : "bg-white/[0.04] border-white/[0.10] text-zinc-600")
+                  }
+                >
+                  {(step as { current?: boolean }).current ? (
+                    <span className="relative flex w-2.5 h-2.5">
+                      <span className="absolute inline-flex h-full w-full rounded-full opacity-75 animate-ping bg-cyan-400" />
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-cyan-400" />
+                    </span>
+                  ) : (
+                    <step.icon size={12} />
+                  )}
+                </div>
+                <span
+                  className={
+                    "text-[9.5px] uppercase tracking-wider text-center " +
+                    ((step as { current?: boolean }).current
+                      ? "text-cyan-300 font-semibold"
+                      : step.done
+                        ? "text-emerald-300/80"
+                        : "text-zinc-600")
+                  }
+                >
+                  {step.label}
+                </span>
+              </div>
+              {i < arr.length - 1 && (
+                <div
+                  className={
+                    "flex-1 h-px mb-4 transition-colors " +
+                    (step.done && arr[i + 1].done ? "bg-emerald-500/40" : "bg-white/[0.06]")
+                  }
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {resp && linkUrl ? (
+        <>
+          {/* Link display card — friendly URL + QR + copy.
+              Sprint 5.7.21-B-Share-Icons: the link card now uses
+              a more "prominent" feel: a cyan-tinted background,
+              ExternalLink icon hint, and a dedicated copy button
+              with a state animation (Check on success). */}
+          <div className="rounded-2xl bg-cyan-500/[0.04] border border-cyan-500/20 p-4 animate-scale-in">
+            <div className="flex items-center gap-3 mb-2">
+              <ExternalLink size={11} className="text-cyan-400 shrink-0" />
+              <span className="text-cyan-300 text-[10px] tracking-[0.2em] uppercase font-semibold">
+                {t("share.link.url.label")}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-black/30 border border-white/[0.06]">
+                <p
+                  className="text-white text-[12.5px] font-mono truncate"
+                  title={linkUrl}
+                >
+                  {linkUrl}
+                </p>
+              </div>
+              <button
+                onClick={() => onCopy(linkUrl, "link")}
+                data-testid="link-copy-button"
+                className={
+                  "shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[13px] font-semibold transition-all duration-150 " +
+                  (copied === "link"
+                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                    : "bg-cyan-500 hover:bg-cyan-400 text-white border border-cyan-500/30")
+                }
+              >
+                {copied === "link" ? (
+                  <>
+                    <Check size={14} strokeWidth={2.5} />
+                    {t("share.link.copied")}
+                  </>
+                ) : (
+                  <>
+                    <Copy size={14} />
+                    {t("share.link.copy")}
+                  </>
+                )}
+              </button>
+            </div>
+            {/* QR toggle — Sprint 5.7.21-B-Share-Icons: when
+                active, the icon turns cyan with a tinted bg to
+                make the "QR is open" state obvious. */}
             <button
               onClick={() => setShowQR((v) => !v)}
+              data-testid="link-qr-toggle"
               className={
-                "btn btn-ghost px-3 " +
-                (showQR ? "bg-white/[0.08] text-white" : "")
+                "mt-2 w-full flex items-center justify-center gap-2 py-1.5 rounded-lg text-[11.5px] font-medium transition-colors " +
+                (showQR
+                  ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30"
+                  : "text-zinc-500 hover:text-cyan-300 hover:bg-white/[0.04] border border-transparent")
               }
-              title={t("share.link.qr")}
             >
-              <QrCode size={14} />
+              <QrCode size={12} />
+              {showQR ? t("share.link.qr.hide") : t("share.link.qr.show")}
             </button>
           </div>
 
-          {/* Raw token display — what the receiver actually pastes */}
-          <div className="rounded-2xl bg-cyan-500/[0.04] border border-cyan-500/20 p-3 animate-scale-in">
+          {/* Raw token display — what the receiver actually pastes.
+              Sprint 5.7.21-B-Share-Icons: better hierarchy with
+              Hash icon (instead of KeyRound) to signal "this is
+              the code/ID". */}
+          <div className="rounded-2xl bg-white/[0.02] border border-white/[0.06] p-3 animate-scale-in">
             <div className="flex items-center gap-2 mb-2">
-              <KeyRound size={12} className="text-cyan-400 shrink-0" />
-              <span className="text-cyan-300 text-[10px] tracking-[0.2em] uppercase font-medium">
+              <Hash size={12} className="text-zinc-400 shrink-0" />
+              <span className="text-zinc-400 text-[10px] tracking-[0.2em] uppercase font-medium">
                 {t("share.link.token.label")}
               </span>
               <button
@@ -1099,16 +1446,17 @@ function LinkPanel({
               </p>
               <button
                 onClick={() => onCopy(resp.token, "token")}
+                data-testid="token-copy-button"
                 className={
                   "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-all duration-150 shrink-0 " +
                   (copied === "token"
-                    ? "bg-emerald-500/20 text-emerald-300"
-                    : "bg-cyan-500 hover:bg-cyan-400 text-white")
+                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                    : "bg-white/[0.04] hover:bg-white/[0.08] text-zinc-300 border border-white/[0.08]")
                 }
               >
                 {copied === "token" ? (
                   <>
-                    <Check size={12} />
+                    <Check size={12} strokeWidth={2.5} />
                     {t("share.link.copied")}
                   </>
                 ) : (
@@ -1121,47 +1469,37 @@ function LinkPanel({
             </div>
           </div>
 
-          {/* QR code (collapsible) */}
+          {/* QR code (collapsible). Sprint 5.7.21-B-Share-Icons:
+              added a ScanLine icon header above the QR + a soft
+              shadow around the QR card to lift it from the rest
+              of the page. */}
           {showQR && (
-            <div className="rounded-2xl bg-white p-4 flex flex-col items-center gap-3 animate-scale-in">
-              <div className="rounded-xl bg-white p-2">
+            <div className="rounded-2xl bg-white p-4 flex flex-col items-center gap-3 animate-scale-in shadow-[0_0_40px_-12px_rgba(34,211,238,0.4)]">
+              <div className="w-full flex items-center justify-center gap-2 text-zinc-500 text-[10.5px] uppercase tracking-[0.2em] font-semibold">
+                <ScanLine size={11} />
+                {t("share.link.qr.scan")}
+              </div>
+              <div className="rounded-xl bg-white p-2 ring-1 ring-zinc-200">
                 <QRCodeSVG
                   value={linkUrl}
-                  size={180}
+                  size={200}
                   level="M"
                   bgColor="#ffffff"
                   fgColor="#0a0a0c"
                 />
               </div>
-              <p className="text-zinc-600 text-[11.5px] font-mono">
-                {t("share.link.qr.scan")}
-              </p>
             </div>
           )}
 
-          {/* Feature pills row */}
-          <div className="grid grid-cols-3 gap-2">
-            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex flex-col items-center gap-1.5 text-center">
-              <Clock size={16} className="text-amber-400" />
-              <p className="text-zinc-300 text-[11px] leading-tight">
-                {t("share.link.feature.expires")}
-              </p>
-            </div>
-            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex flex-col items-center gap-1.5 text-center">
-              <InfinityIcon size={16} className="text-cyan-400" />
-              <p className="text-zinc-300 text-[11px] leading-tight">
-                {t("share.link.feature.unlimited")}
-              </p>
-            </div>
-            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex flex-col items-center gap-1.5 text-center">
-              <Shield size={16} className="text-emerald-400" />
-              <p className="text-zinc-300 text-[11px] leading-tight">
-                {t("share.link.feature.e2e")}
-              </p>
-            </div>
-          </div>
+          {/* Feature pills row removed in 5.7.21-B-Abstract —
+              the 3 pills (Expiración / Ilimitado / E2E) just
+              repeated the selling points that used to live in
+              the page header. The user already knows the share
+              is encrypted + direct; no need to remind them. */}
 
-          {/* Vista previa */}
+          {/* Vista previa — kept: the user wants to confirm the
+              file is the one they sent (especially for transfers
+              that take >1 minute to connect). */}
           <div>
             <h3 className="text-zinc-400 text-[10px] tracking-[0.2em] uppercase font-medium mb-3">
               {t("share.link.preview")}
@@ -1181,66 +1519,104 @@ function LinkPanel({
             </div>
           </div>
 
-          {/* Actividad — Sprint 5.7: real past transfers from db.rs */}
+          {/* Actividad — Sprint 5.7: real past transfers from db.rs.
+              Kept compact (single column, no card per row) so it
+              doesn't compete with the link/token/QR above for
+              visual attention. */}
           <div>
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-zinc-400 text-[10px] tracking-[0.2em] uppercase font-medium">
                 {t("share.link.activity")}
               </h3>
-              <button
-                onClick={() => onNavigate && onNavigate("recent")}
-                className="text-zinc-500 hover:text-cyan-400 text-[10.5px] transition-colors flex items-center gap-1"
-              >
-                {t("share.link.activity.seeall")}
-                <ArrowRight size={10} />
-              </button>
+              {recentShareEvents.length > 0 && (
+                <button
+                  onClick={() => onNavigate && onNavigate("recent")}
+                  className="text-zinc-500 hover:text-cyan-400 text-[10.5px] transition-colors flex items-center gap-1"
+                >
+                  {t("share.link.activity.seeall")}
+                  <ArrowRight size={10} />
+                </button>
+              )}
             </div>
             {recentShareEvents.length === 0 ? (
-              <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-5 flex items-center gap-3">
-                <div className="w-9 h-9 rounded-full bg-white/[0.04] flex items-center justify-center text-zinc-500 shrink-0">
-                  <Clock size={16} />
+              <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-4 flex items-center gap-3">
+                <div className="w-8 h-8 rounded-md bg-white/[0.04] flex items-center justify-center text-zinc-500 shrink-0">
+                  <Clock size={14} />
                 </div>
-                <div>
-                  <p className="text-zinc-300 text-[12.5px] font-medium">
-                    {t("share.link.activity.empty")}
-                  </p>
-                  <p className="text-zinc-600 text-[11px] mt-0.5">
-                    {t("share.link.activity.hint")}
-                  </p>
-                </div>
+                <p className="text-zinc-500 text-[12px] italic">
+                  {t("share.link.activity.empty")}
+                </p>
               </div>
             ) : (
-              <div className="space-y-2">
-                {recentShareEvents.map((ev) => (
-                  <div
-                    key={ev.id}
-                    className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex items-center gap-3 hover:bg-white/[0.04] transition-colors"
-                  >
-                    <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-                      <Send size={14} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-zinc-200 text-[12.5px] truncate font-medium">
-                        {ev.filename}
+              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] divide-y divide-white/[0.04]">
+                {recentShareEvents.map((ev) => {
+                  // Sprint 5.7.21-B-FileIcons-Shared: use the
+                  // shared file-icon helpers. Each row shows
+                  // a file-type icon (FileCode / FileImage /
+                  // etc.) with a kind badge in the bottom-right
+                  // corner (compress / decompress / share).
+                  const fileKind = getFileKind(ev.filename);
+                  const kindBadge = getKindBadge(ev.kind);
+                  const FileIcon = fileKind.icon;
+                  const KindIcon = kindBadge.icon;
+                  return (
+                    <div
+                      key={ev.id}
+                      className="px-3 py-2 flex items-center gap-3 hover:bg-white/[0.02] transition-colors"
+                    >
+                      <div className="relative shrink-0">
+                        <div
+                          className={
+                            "w-7 h-7 rounded-md flex items-center justify-center border " +
+                            fileKind.bg +
+                            " " +
+                            fileKind.border
+                          }
+                        >
+                          <FileIcon size={12} className={fileKind.color} strokeWidth={1.8} />
+                        </div>
+                        <div
+                          className={
+                            "absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center border border-[#0a0a0a] " +
+                            kindBadge.bg
+                          }
+                        >
+                          <KindIcon size={7} className={kindBadge.color} strokeWidth={2.5} />
+                        </div>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-zinc-200 text-[12.5px] truncate">
+                          {ev.filename}
+                        </p>
+                        <p className="text-zinc-600 text-[10.5px] mt-0.5 font-mono">
+                          {formatBytes(ev.originalBytes, locale)}
                       </p>
-                      <p className="text-zinc-500 text-[10.5px] mt-0.5 font-mono">
-                        {formatBytes(ev.originalBytes, locale)}
-                      </p>
                     </div>
-                    <span className="text-zinc-500 text-[10.5px] shrink-0">
+                    <span className="text-zinc-500 text-[10.5px] shrink-0 tabular-nums">
                       {formatTimestampMs(ev.timestamp, t)}
                     </span>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
         </>
       ) : (
-        /* Empty state when no link is active */
-        <div className="rounded-2xl border-2 border-dashed border-white/[0.08] p-10 flex flex-col items-center text-center gap-3 min-h-[280px] justify-center">
-          <div className="w-14 h-14 rounded-2xl bg-white/[0.04] flex items-center justify-center text-zinc-500">
-            <LinkIcon size={26} strokeWidth={1.5} />
+        /* Empty state when no link is active. Sprint
+            5.7.21-B-Share-Icons: layered icon (the main
+            LinkIcon with a smaller Send2 in the corner)
+            for a more "abstract" illustration. Plus a
+            3-step "how it works" mini-list to orient the
+            user. */
+        <div className="rounded-2xl border-2 border-dashed border-white/[0.08] p-8 flex flex-col items-center text-center gap-5 min-h-[280px] justify-center">
+          <div className="relative inline-block">
+            <div className="w-16 h-16 rounded-2xl bg-white/[0.04] flex items-center justify-center text-zinc-500">
+              <LinkIcon size={28} strokeWidth={1.5} />
+            </div>
+            <div className="absolute -bottom-1 -right-1 w-7 h-7 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300">
+              <Share2 size={13} strokeWidth={2.2} />
+            </div>
           </div>
           <div>
             <p className="text-zinc-400 text-[13.5px] font-medium mb-1">

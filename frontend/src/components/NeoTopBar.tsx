@@ -48,7 +48,7 @@ export function NeoTopBar({
           <Hexagon size={18} strokeWidth={2.5} fill="currentColor" />
         </div>
         <span className="text-white font-semibold text-[14px] tracking-tight">
-          NexusRAR
+          NexusCompress
         </span>
       </div>
 
@@ -61,8 +61,11 @@ export function NeoTopBar({
             <button
               key={item.id}
               onClick={() => onNavigate(item.id)}
+              aria-label={item.label}
+              aria-current={active ? "page" : undefined}
               className={
                 "group relative flex items-center gap-1.5 px-3.5 py-1.5 text-[12.5px] font-medium rounded-lg transition-all duration-200 " +
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50 " +
                 (active
                   ? "text-white bg-white/[0.08] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]"
                   : "text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] hover:-translate-y-px")
@@ -86,12 +89,12 @@ export function NeoTopBar({
       {/* Version + theme toggle */}
       <div className="w-[120px] flex justify-end items-center gap-2">
         <span className="text-zinc-500 text-[11px] font-mono tracking-wide tabular-nums px-2 py-0.5 rounded-md border border-white/[0.06]">
-          v0.1.2
+          v0.3.0
         </span>
         <button
           onClick={toggle}
-          className="w-8 h-8 rounded-lg flex items-center justify-center text-zinc-400 hover:text-amber-400 hover:bg-white/[0.05] border border-white/[0.06] hover:border-amber-500/30 transition-all duration-200"
-          aria-label={theme === "dark" ? "Switch to light" : "Switch to dark"}
+          className="w-8 h-8 rounded-lg flex items-center justify-center text-zinc-400 hover:text-amber-400 hover:bg-white/[0.05] border border-white/[0.06] hover:border-amber-500/30 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+          aria-label={theme === "dark" ? t("theme.toggle.toLight") : t("theme.toggle.toDark")}
         >
           {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
         </button>

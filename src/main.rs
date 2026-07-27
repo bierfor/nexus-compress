@@ -51,6 +51,20 @@ fn print_help() {
     eprintln!("    --solid         directory: build a SOLID v6 archive (NXS6, LOSSY)");
     eprintln!("                    cross-file LZMA dictionary, max ratio on source code");
     eprintln!("    --level N       LZMA level 0..9 (default 6, used by --solid and v5/v6)");
+    eprintln!("    --codec K       SOLID v6 codec: auto | lzma | zstd. Default: auto.");
+    eprintln!("                    auto: per-chunk codec flip based on entropy (#46 hybrid).");
+    eprintln!("                    lzma: pure LZMA, no entropy flip (use for max ratio).");
+    eprintln!("                    zstd: pure Zstd, no entropy flip (use for max speed).");
+    eprintln!("    --lossless      SOLID v6: skip the per-extension preprocessor (Raw for all).");
+    eprintln!("                    Archives are bit-exact reversible but ratio drops to ~1.5-2x.");
+    eprintln!("                    Use for backups where integrity > compression.");
+    eprintln!("    --raw-ext EXT[,..]  pin extensions to Raw (bit-exact). e.g. --raw-ext .json,.env");
+    eprintln!("    --corpus MODE       directory walk mode: everything|source|minimal");
+    eprintln!("                        (default: everything = no skip, full archive)");
+    eprintln!("                    Overrides the default per-extension rule. --lossless implies all.");
+    eprintln!("    --minify-ext EXT[,..]  pin extensions to Conservative minify. e.g. --minify-ext .md");
+    eprintln!("    --skip-archive    skip archive files (.zip, .tar, .gz, .rar, ...) during the walk.");
+    eprintln!("                    Useful to opt a file OUT of swc AST (when the default is .ts).");
     eprintln!("    --password P    encrypt with AES-256-GCM (Sprint 5.7.2). Argon2id KDF");
     eprintln!("                    with the Interactive preset (~100 ms on a modern desktop).");
     eprintln!("                    Output magic: NXE\\0 (no recovery) or NXR\\0 (with recovery).");
@@ -83,6 +97,32 @@ fn main() {
     let mut minify = false;
     let mut solid = false;
     let mut lzma_level: Option<u32> = None;
+    // Sprint 5.7.2 hotfix #47: explicit codec override. None =
+    // keep the Auto behaviour (entropy flip per chunk). Some(codec)
+    // = force that codec for the whole archive with no flip.
+    let mut codec_override: Option<nexus_compress::solid_archive::Codec> = None;
+    // Sprint 5.7.3 hotfix #49: --lossless. When true, every
+    // file is fed to the codec as Preprocessor::Raw (no
+    // minify, no swc AST, no entropy flip on extension). The
+    // archive is bit-exact reversible.
+    let mut lossless: bool = false;
+    // Sprint 5.7.18: --skip-archive. Skip archive files
+    // (`.zip`, `.tar`, `.gz`, `.rar`, …) during the walk.
+    let mut skip_archive: bool = false;
+    // Sprint 5.7.4 hotfix #50: --raw-ext / --minify-ext.
+    // Per-extension override lists. Empty by default. When
+    // populated, files whose extension matches the list are
+    // forced to the corresponding preprocessor regardless
+    // of the default rule.
+    let mut raw_ext: Vec<String> = Vec::new();
+    let mut minify_ext: Vec<String> = Vec::new();
+    // Sprint 5.7.7 hotfix #55: --corpus MODE. Controls
+    // the directory walk. Default is "everything" (no
+    // skip) — the user wanted control, and the previous
+    // hardcoded skip-list silently dropped files.
+    // Accepts: everything|source|minimal (with aliases
+    // all|full|src|code|min).
+    let mut corpus_mode: Option<nexus_compress::api::CorpusMode> = None;
     let mut password: Option<String> = None;
     let mut recovery: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -100,6 +140,27 @@ fn main() {
             "--level" => {
                 lzma_level = iter.next().and_then(|s| s.parse().ok());
             }
+            // Sprint 5.7.2 hotfix #47: accept both `--codec
+            // lzma` (separate arg) and `--codec=lzma` (single
+            // arg). The split is what makes the flag usable from
+            // the GUI, which builds the arg list as a flat
+            // string array of pre-split tokens.
+            arg if arg == "--codec" || arg.starts_with("--codec=") => {
+                let v = if let Some(eq) = a.strip_prefix("--codec=") {
+                    eq.to_string()
+                } else {
+                    iter.next().cloned().unwrap_or_default()
+                };
+                codec_override = match v.to_ascii_lowercase().as_str() {
+                    "lzma" | "lzma2" => Some(nexus_compress::solid_archive::Codec::Lzma),
+                    "zstd" => Some(nexus_compress::solid_archive::Codec::Zstd),
+                    "auto" | "" => None,
+                    other => {
+                        eprintln!("error: --codec must be auto|lzma|zstd, got '{}'", other);
+                        std::process::exit(2);
+                    }
+                };
+            }
             "--password" => {
                 password = iter.next().cloned();
             }
@@ -109,6 +170,47 @@ fn main() {
             "-h" | "--help" => {
                 print_help();
                 return;
+            }
+            "--lossless" | "--no-minify" => {
+                lossless = true;
+            }
+            // Sprint 5.7.18: --skip-archive flag. When set, the
+            // walker skips archive files (`.zip`, `.tar`,
+            // `.gz`, `.rar`, …) entirely. Useful for backing
+            // up source code without including 200 MB of
+            // release binaries you accidentally left in the
+            // repo. Default off to preserve current behavior.
+            "--skip-archive" => {
+                skip_archive = true;
+            }
+            "--raw-ext" => {
+                if let Some(v) = iter.next() {
+                    raw_ext.extend(
+                        v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+                    );
+                }
+            }
+            "--minify-ext" => {
+                if let Some(v) = iter.next() {
+                    minify_ext.extend(
+                        v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+                    );
+                }
+            }
+            // Sprint 5.7.7 hotfix #55: --corpus MODE.
+            arg if arg == "--corpus" || arg.starts_with("--corpus=") => {
+                let v = if let Some(eq) = a.strip_prefix("--corpus=") {
+                    eq.to_string()
+                } else {
+                    iter.next().cloned().unwrap_or_default()
+                };
+                match v.parse::<nexus_compress::api::CorpusMode>() {
+                    Ok(m) => corpus_mode = Some(m),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(2);
+                    }
+                }
             }
             other if other.starts_with("--") => {
                 eprintln!("unknown option: {}", other);
@@ -122,6 +224,12 @@ fn main() {
     if positional.is_empty() {
         print_help();
         std::process::exit(2);
+    }
+    // Sprint 5.7.7 hotfix #55: set NEXUS_CORPUS_MODE
+    // before the walk. The walker reads this env var
+    // in collect_paths(). Default (None) is Everything.
+    if let Some(m) = corpus_mode {
+        std::env::set_var("NEXUS_CORPUS_MODE", m.as_str());
     }
     let sub = positional[0].as_str();
     match sub {
@@ -147,23 +255,104 @@ fn main() {
                             }
                         })
                         .unwrap_or(6);
-                    let files = walk_dir(input).expect("walk dir");
+                    // Sprint 5.7.2 hotfix #47: translate the CLI
+                    // `--codec` flag into a `CompressionLevel` so
+                    // the encoder skips the entropy flip when
+                    // the user pinned a specific codec.
+                    let solid_level: nexus_compress::solid_archive::CompressionLevel =
+                        match codec_override {
+                            None => nexus_compress::solid_archive::CompressionLevel::Auto,
+                            Some(nexus_compress::solid_archive::Codec::Lzma) => {
+                                nexus_compress::solid_archive::CompressionLevel::Lzma(level)
+                            }
+                            Some(nexus_compress::solid_archive::Codec::Zstd) => {
+                                nexus_compress::solid_archive::CompressionLevel::Zstd(3)
+                            }
+                        };
+                    let files = walk_dir_with_skip(input).expect("walk dir");
                     if files.is_empty() {
                         eprintln!("error: directory has no files: {}", positional[1]);
                         std::process::exit(2);
                     }
                     let original_total: usize = files.iter().map(|(_, b)| b.len()).sum();
                     let t0 = std::time::Instant::now();
-                    let archive = nexus_compress::solid_archive::compress(&files, level)
-                        .expect("solid compress");
+                    // Sprint 5.7.3 hotfix #49: --lossless
+                    // bypasses the per-extension preprocessor.
+                    // We dispatch to the dedicated function so
+                    // the call site stays a single line; the
+                    // alternative (passing a bool down through
+                    // `compress`) would touch the public API
+                    // for every existing caller.
+                    let archive = if lossless {
+                        // When --lossless is set, the per-extension
+                        // overrides are still honoured: a file
+                        // pinned to Conservative would still be
+                        // Conservative. But the user picked
+                        // --lossless precisely to be safe, so we
+                        // force ALL files to Raw (overrides are
+                        // ignored under --lossless). This matches
+                        // the user's intent: "no minify at all".
+                        nexus_compress::solid_archive::compress_with_progress_lossless(
+                            &files,
+                            solid_level,
+                            |_, _, _| {},
+                        )
+                    } else {
+                        // Sprint 5.7.4 hotfix #50: per-extension
+                        // overrides. When the user passed
+                        // --raw-ext or --minify-ext, route through
+                        // the full-control entry point so the
+                        // overrides actually take effect.
+                        if !raw_ext.is_empty() || !minify_ext.is_empty() {
+                            let overrides = nexus_compress::solid_archive::PreprocessorOverrides::new(
+                                raw_ext.clone(),
+                                minify_ext.clone(),
+                            );
+                            nexus_compress::solid_archive::compress_with_progress_full_public(
+                                &files,
+                                solid_level,
+                                false,
+                                &overrides,
+                                |_, _, _| {},
+                            )
+                        } else {
+                            nexus_compress::solid_archive::compress(&files, solid_level)
+                        }
+                    }
+                    .expect("solid compress");
                     let ms = t0.elapsed().as_secs_f64() * 1000.0;
                     fs::write(output, &archive).expect("write output");
                     let ratio = original_total as f64 / archive.len().max(1) as f64;
+                    let codec_label = match codec_override {
+                        None => "AUTO",
+                        Some(nexus_compress::solid_archive::Codec::Lzma) => "LZMA",
+                        Some(nexus_compress::solid_archive::Codec::Zstd) => "ZSTD",
+                    };
+                    // Sprint 5.7.9: AUTO now resolves to Zstd
+                    // (the fast default), so its suffix should
+                    // be " Zstd 3" not " LZMA <level>". The
+                    // level arg in CLI is only used when the
+                    // user explicitly picked LZMA via --codec
+                    // lzma; for Auto/Zstd, zstd uses its own
+                    // internal preset (3 by default).
+                    let level_suffix = match codec_override {
+                        Some(nexus_compress::solid_archive::Codec::Lzma) => {
+                            format!(" {}", level)
+                        }
+                        Some(nexus_compress::solid_archive::Codec::Zstd) => String::new(),
+                        None => String::new(), // AUTO → Zstd (5.7.9)
+                    };
+                    // Sprint 5.7.3 hotfix #49: append the
+                    // lossless marker so the user can see the
+                    // archive is bit-exact reversible.
+                    let lossless_suffix = if lossless { " LOSSLESS" } else { "" };
                     eprintln!(
-                        "{} -> {} (SOLID v6 LZMA {}, {:.2}x, {} files, {} bytes -> {} bytes, {:.0} ms)",
+                        "{} -> {} (SOLID v6 {}{}{}, {:.2}x, {} files, {} bytes -> {} bytes, {:.0} ms)",
                         positional[1],
                         output,
-                        level,
+                        codec_label,
+                        level_suffix,
+                        lossless_suffix,
                         ratio,
                         files.len(),
                         original_total,
@@ -321,6 +510,49 @@ fn main() {
                     "{} -> {} ({} files, {:.2}x)",
                     positional[1], positional[2], result.n_files, result.aggregate_ratio
                 );
+            } else if let Some(fmt) = nexus_compress::external_decompress::detect_format(&input[..8.min(input.len())]) {
+                // Sprint 5.7.21-EXT: third-party archive
+                // formats (ZIP / TAR / TAR.GZ / GZ). The
+                // dispatch writes the extracted contents
+                // into a directory at `positional[2]`.
+                let out_path = Path::new(&positional[2]);
+                // Re-resolve the format using the file
+                // extension too (TAR has no magic, .tar.gz
+                // shares the gz magic).
+                let ext_lower = positional[1]
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let stem_ends_with_tar = Path::new(&positional[1])
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.ends_with(".tar"))
+                    .unwrap_or(false);
+                let fmt_resolved = if fmt == "tar" || ext_lower == "tar" {
+                    "tar"
+                } else if fmt == "gz" && ext_lower == "gz" && stem_ends_with_tar {
+                    "tar.gz"
+                } else if fmt == "gz" && ext_lower == "gz" {
+                    "gz"
+                } else {
+                    fmt
+                };
+                let stats = nexus_compress::external_decompress::extract_external(
+                    Path::new(&positional[1]),
+                    Some(out_path),
+                    fmt_resolved,
+                    |_ev| {},
+                )
+                .expect("external extract");
+                eprintln!(
+                    "{} -> {} ({} files, {} bytes, {})",
+                    positional[1],
+                    positional[2],
+                    stats.n_files,
+                    stats.restored_size,
+                    fmt_resolved
+                );
             } else {
                 let out = engine::decompress_any(&input).expect("decompress");
                 fs::write(&positional[2], &out).expect("write output");
@@ -349,28 +581,37 @@ fn main() {
 
 /// Walk a directory recursively and return `(relative_path, bytes)`
 /// for every regular file, sorted by relative path for determinism.
-fn walk_dir(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                walk(root, &path, out)?;
-            } else if file_type.is_file() {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let bytes = std::fs::read(&path)?;
-                out.push((rel, bytes));
-            }
-        }
-        Ok(())
+/// Walk a directory recursively and return `(relative_path, bytes)`
+/// for every regular file, sorted by relative path for determinism.
+///
+/// **Sprint 5.7.10-B:** thin wrapper around [`crate::walker::walk`],
+/// the single source of truth for corpus walking + skip-list
+/// filtering. The 110-line local walker (with its `CorpusModeLike`
+/// enum that mirrored `api::CorpusMode`) was deleted and the CLI
+/// now shares the GUI's walker code path. The `Thumbs.db` entry
+/// that was missing from the CLI's local skip-list is now picked
+/// up automatically.
+fn walk_dir_with_skip(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+    let mode = std::env::var("NEXUS_CORPUS_MODE")
+        .ok()
+        .and_then(|s| s.parse::<nexus_compress::api::CorpusMode>().ok())
+        .unwrap_or_default();
+    // Sprint 5.7.18: --skip-archive. When the flag is set, the
+    // walker filters out archive files (`.zip`, `.tar`, `.gz`,
+    // `.rar`, …) so they don't end up in the output. The flag
+    // is read from the same env-var convention as
+    // `NEXUS_CORPUS_MODE` so the engine and CLI stay in sync.
+    let skip_archive = std::env::var("NEXUS_SKIP_ARCHIVE")
+        .ok()
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let result = nexus_compress::walker::walk(root, mode, skip_archive)?;
+    if result.skipped_bytes > 0 {
+        eprintln!(
+            "[WALK-SKIP] total skipped: {} MiB of dev cache / build artifacts",
+            result.skipped_bytes / (1024 * 1024)
+        );
     }
-    let mut out = Vec::new();
-    walk(root, root, &mut out)?;
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    Ok(result.files)
 }
+

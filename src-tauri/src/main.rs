@@ -1,4 +1,4 @@
-//! Tauri 2.x entry point for NexusRAR.
+//! Tauri 2.x entry point for NexusCompress.
 //!
 //! The Tauri runtime is loaded here. The window config is in
 //! `tauri.conf.json`. The IPC commands are registered from
@@ -45,14 +45,16 @@ fn main() {
             commands::compress_bytes_cmd,
             commands::decompress_bytes_cmd,
             commands::compress_bytes_with_level_cmd,
-            commands::compress_bytes_with_backend_cmd,
-            commands::compress_directory_with_backend_cmd,
             commands::compress_target_cmd,
             commands::decompress_target_cmd,
             commands::peek_archive_target_cmd,
             commands::reveal_in_finder_cmd,
             commands::pick_save_location_cmd,
-            commands::backend_info_cmd,
+            // Sprint 5.7.10-E: removed `commands::backend_info_cmd`
+            // — the legacy backend enum is gone, the engine
+            // is the only public compress path, and the
+            // backend_info() helper that the GUI never read
+            // was deleted in the same commit.
             commands::engine_info_cmd,
             commands::self_test_cmd,
             commands::pick_file_cmd,
@@ -80,7 +82,14 @@ fn main() {
             commands::get_recent_events_cmd,
             commands::data_dir_cmd,
             commands::reset_stats_cmd,
+            // Sprint 5.7.19: "Best Mode" preview. The
+            // frontend calls this when the user clicks the
+            // "Mejor (Automático)" preset, before kicking off
+            // the actual compress. The engine returns the
+            // (mode, codec) tuple that resolve_best picked
+            // from the 5 MB sample.
+            commands::preview_corpus_cmd,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running NexusRAR Tauri app");
+        .expect("error while running NexusCompress Tauri app");
 }

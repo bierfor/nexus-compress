@@ -1,149 +1,74 @@
 "use client";
 
 /**
- * Sprint 5.6.29 home redesign — matches the user-supplied mockup.
+ * Sprint 5.7.21-B-Abstract: home view redesign.
+ *
+ * The previous version was a "marketing" landing with 5 feature pills,
+ * a gradient headline, a drag-drop CTA card, 3 colorful action cards,
+ * a 5-stat bar with different colors per stat, two duplicated
+ * "recent activity" sections, a rotating "tip of the day", and a
+ * keyboard shortcuts panel. Total: 674 lines of visual noise.
+ *
+ * The abstract version keeps the essential (greeting + 3 actions +
+ * recent activity + shortcuts) and removes everything else. The
+ * design follows the same principles as the Compress/Decompress
+ * page refactor:
+ *   - One accent color (cyan) for primary action
+ *   - Neutral surfaces for everything else
+ *   - No gradients, no shadows except primary CTA
+ *   - Typography hierarchy (size/weight) does the work
+ *   - The user reads the headline, picks an action, moves on
  *
  * Layout (top to bottom):
- *   1. Hero with greeting + headline + 5 feature pills + drag-drop CTA card
- *   2. Three big action cards (Comprimir / Extraer / Compartir)
- *   3. Estadísticas bar — 5 stat cards
- *   4. Actividad — recent operations log
- *   5. Right column: Actividad reciente + Atajos + Consejo del día
- *
- * Sprint 5.6.29 hotfix #15: all copy routed through t(); the page
- * is now fully localised in ES / EN / IT.
+ *   1. Greeting (1 line)
+ *   2. Headline (1 line, plain text)
+ *   3. Three action buttons (compact, single accent)
+ *   4. Recent activity (single column, 5 items)
+ *   5. Keyboard shortcuts (1 row of kbd chips)
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocale } from "@/components/LocaleProvider";
-import { useTheme } from "@/components/ThemeProvider";
 import { type View } from "./NeoTopBar";
 import { type RecentOp } from "@/components/RecentView";
-import { useAppStats, useRecentEvents } from "@/lib/useAppData";
-import {
-  formatCount,
-  formatBytes,
-  formatTimestampMs,
-} from "@/lib/format";
+import { useRecentEvents } from "@/lib/useAppData";
+import { getFileKind, getKindBadge } from "@/lib/fileIcons";
 import {
   Archive,
   FolderOpen,
   Send,
   ArrowRight,
-  FileText,
-  Hand,
-  Clock,
-  TrendingUp,
-  Activity as ActivityIcon,
-  Database,
-  Share2,
-  Lightbulb,
-  Keyboard,
-  Search,
-  Settings as SettingsIcon,
-  Command,
 } from "lucide-react";
-
-// ─────────────────────────────────────────────────────────────
-//  Types
-// ─────────────────────────────────────────────────────────────
 
 type ActionId = "compress" | "decompress" | "share";
 
 interface Action {
   id: ActionId;
   titleKey: import("@/lib/i18n").TranslationKey;
-  subKey: import("@/lib/i18n").TranslationKey;
-  tags: string[];
+  descKey: import("@/lib/i18n").TranslationKey;
   icon: typeof Archive;
-  gradient: string;
-  border: string;
-  iconBg: string;
-  iconColor: string;
-  buttonClass: string;
 }
 
 const ACTIONS: Action[] = [
   {
     id: "compress",
     titleKey: "action.compress.title" as import("@/lib/i18n").TranslationKey,
-    subKey: "action.compress.sub" as import("@/lib/i18n").TranslationKey,
-    tags: ["ZIP", "RAR", "TAR", "NXS6"],
+    descKey: "action.compress.sub" as import("@/lib/i18n").TranslationKey,
     icon: Archive,
-    gradient: "from-cyan-500/15 to-cyan-500/0",
-    border: "border-cyan-500/20 hover:border-cyan-500/40",
-    iconBg: "bg-cyan-500/15 border-cyan-500/30",
-    iconColor: "text-cyan-400",
-    buttonClass:
-      "bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border-cyan-500/30",
   },
   {
     id: "decompress",
     titleKey: "action.decompress.title" as import("@/lib/i18n").TranslationKey,
-    subKey: "action.decompress.sub" as import("@/lib/i18n").TranslationKey,
-    tags: ["RAR", "ZIP", "7Z", "TAR", "NXS6"],
+    descKey: "action.decompress.sub" as import("@/lib/i18n").TranslationKey,
     icon: FolderOpen,
-    gradient: "from-amber-500/15 to-amber-500/0",
-    border: "border-amber-500/20 hover:border-amber-500/40",
-    iconBg: "bg-amber-500/15 border-amber-500/30",
-    iconColor: "text-amber-400",
-    buttonClass:
-      "bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/30",
   },
   {
     id: "share",
     titleKey: "action.share.title" as import("@/lib/i18n").TranslationKey,
-    subKey: "action.share.sub" as import("@/lib/i18n").TranslationKey,
-    tags: ["P2P", "Cifrado E2E", "Sin servidor"],
+    descKey: "action.share.sub" as import("@/lib/i18n").TranslationKey,
     icon: Send,
-    gradient: "from-emerald-500/15 to-emerald-500/0",
-    border: "border-emerald-500/20 hover:border-emerald-500/40",
-    iconBg: "bg-emerald-500/15 border-emerald-500/30",
-    iconColor: "text-emerald-400",
-    buttonClass:
-      "bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/30",
   },
 ];
-
-const FEATURE_PILLS: { icon: typeof Hand; titleKey: import("@/lib/i18n").TranslationKey; subKey: import("@/lib/i18n").TranslationKey; tone: string }[] = [
-  { icon: Share2,        titleKey: "home.feature.p2p.title",     subKey: "home.feature.p2p.sub",     tone: "cyan" },
-  { icon: Archive,       titleKey: "home.feature.compress.title", subKey: "home.feature.compress.sub", tone: "blue" },
-  { icon: Database,      titleKey: "home.feature.encrypt.title",  subKey: "home.feature.encrypt.sub",  tone: "violet" },
-  { icon: Hand,          titleKey: "home.feature.nocounts.title",  subKey: "home.feature.nocounts.sub",  tone: "amber" },
-  { icon: Search,        titleKey: "home.feature.notrack.title",  subKey: "home.feature.notrack.sub",  tone: "emerald" },
-];
-
-const PILL_TONE: Record<string, { bg: string; border: string; text: string }> = {
-  cyan:    { bg: "bg-cyan-500/10",    border: "border-cyan-500/25",    text: "text-cyan-300" },
-  blue:    { bg: "bg-blue-500/10",    border: "border-blue-500/25",    text: "text-blue-300" },
-  violet:  { bg: "bg-violet-500/10",  border: "border-violet-500/25",  text: "text-violet-300" },
-  amber:   { bg: "bg-amber-500/10",   border: "border-amber-500/25",   text: "text-amber-300" },
-  emerald: { bg: "bg-emerald-500/10", border: "border-emerald-500/25", text: "text-emerald-300" },
-};
-
-const TIPS: import("@/lib/i18n").TranslationKey[] = [
-  "home.tip.dragdrop",
-  "home.tip.tar",
-  "home.tip.e2e",
-  "home.tip.darkmode",
-  "home.tip.shortcuts",
-];
-
-const KIND_ICON: Record<"compress" | "decompress" | "share", typeof Archive> = {
-  compress: Archive,
-  decompress: FolderOpen,
-  share: Send,
-};
-
-const KIND_TONE: Record<"compress" | "decompress" | "share", string> = {
-  compress: "text-cyan-400",
-  decompress: "text-amber-400",
-  share: "text-emerald-400",
-};
-
-// ─────────────────────────────────────────────────────────────
-//  Helpers
-// ─────────────────────────────────────────────────────────────
 
 function prettyBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -163,9 +88,7 @@ function relativeTime(
   return t("days_ago", { n: Math.floor(diff / 86_400_000) });
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Page
-// ─────────────────────────────────────────────────────────────
+
 
 export function LandingPage({
   onNavigate,
@@ -174,425 +97,125 @@ export function LandingPage({
   onNavigate: (v: View) => void;
   ops: RecentOp[];
 }) {
-  const { t, locale } = useLocale();
-  const { theme } = useTheme();
-  const { stats } = useAppStats();
-  const { ops: remoteOps } = useRecentEvents(10, ops);
-  const recent5 = (remoteOps.length > 0 ? remoteOps : ops).slice(0, 5);
-  const [tipIndex, setTipIndex] = useState(0);
-
-  // Rotate the daily tip every 12s.
+  const { t } = useLocale();
+  // Sprint 5.7.21-B-Abstract fix: previous version of the
+  // abstract home only read `ops` from props (in-memory list
+  // for the current session). The old LandingPage used
+  // useRecentEvents to fetch persisted events from db.rs
+  // (SQLite), which surfaces activity across app restarts.
+  // The home now merges both: persistent events from db.rs
+  // + in-memory ops from the current session (fallback when
+  // the Tauri runtime isn't available, e.g. `next dev`).
+  const { ops: persistedOps, refresh } = useRecentEvents(10, ops);
+  // Manual refresh trigger: the hook refreshes on window focus
+  // but navigating to the home after a compress doesn't always
+  // fire a focus event. We force a refresh on mount + whenever
+  // a new op lands in the in-memory list (current session).
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [lastSeenCount, setLastSeenCount] = useState(ops.length);
   useEffect(() => {
-    const id = setInterval(() => {
-      setTipIndex((i) => (i + 1) % TIPS.length);
-    }, 12_000);
-    return () => clearInterval(id);
-  }, []);
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey, lastSeenCount]);
+  useEffect(() => {
+    if (ops.length !== lastSeenCount) {
+      setLastSeenCount(ops.length);
+    }
+  }, [ops.length, lastSeenCount]);
+  const recent5 = useMemo(
+    () => persistedOps.slice(0, 5),
+    [persistedOps],
+  );
+  const hasMore = persistedOps.length > 5;
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-7xl mx-auto px-8 pt-8 pb-16">
-        {/* ── Hero + drag-drop CTA ─────────────────────────────── */}
-        <div className="grid grid-cols-3 gap-6 mb-8">
-          <div className="col-span-2">
-            {/* Feature pills row */}
-            <div className="flex items-center gap-2 mb-6 flex-wrap">
-              {FEATURE_PILLS.map((p) => {
-                const tone = PILL_TONE[p.tone];
-                const Icon = p.icon;
-                return (
-                  <div
-                    key={p.titleKey}
-                    className={`inline-flex items-center gap-2.5 px-3 py-2 rounded-xl border ${tone.bg} ${tone.border} ${tone.text}`}
-                  >
-                    <Icon size={14} className="shrink-0" />
-                    <div className="leading-tight">
-                      <p className="text-[11.5px] font-semibold">{t(p.titleKey)}</p>
-                      <p className="text-[10px] opacity-70">{t(p.subKey)}</p>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Greeting */}
-            <p className="text-zinc-400 text-[14px] mb-2 flex items-center gap-1.5">
-              <Hand size={14} />
-              {t("home.greeting")}
-            </p>
-            <h1 className="text-white text-[40px] font-semibold tracking-tight leading-[1.1] mb-3">
-              {t("home.headline1")}
-              <br />
-              <span className="bg-gradient-to-r from-cyan-300 to-emerald-300 bg-clip-text text-transparent">
-                {t("home.headline2")}
-              </span>
-              <span className="text-cyan-300">.</span>
-            </h1>
-            <p className="text-zinc-500 text-[14px]">
-              {t("home.subheadline")}
-            </p>
-          </div>
-
-          {/* Drag-drop CTA card on the right */}
-          <button
-            onClick={() => onNavigate("compress")}
-            className="group relative rounded-3xl p-6 bg-white/[0.02] border-2 border-dashed border-white/[0.10] hover:border-cyan-500/40 hover:bg-cyan-500/[0.04] transition-all duration-200 text-left flex flex-col justify-between min-h-[220px]"
-          >
-            <div className="flex justify-end">
-              <div className="w-12 h-12 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400 group-hover:scale-110 transition-transform duration-300">
-                <FolderOpen size={22} strokeWidth={1.5} />
-              </div>
-            </div>
-            <div>
-              <p className="text-white text-[14px] font-semibold mb-1">
-                {t("home.dropzone.title")}
-              </p>
-              <p className="text-zinc-500 text-[12px] mb-3 leading-relaxed">
-                {t("home.dropzone.desc")}
-              </p>
-              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500 text-white text-[12px] font-semibold group-hover:bg-blue-400 transition-colors">
-                {t("home.dropzone.cta")}
-                <ArrowRight size={12} />
-              </span>
-            </div>
-          </button>
+      <div className="max-w-4xl mx-auto px-8 pt-12 pb-16">
+        {/* Greeting + headline */}
+        <div className="mb-12">
+          <p className="text-zinc-500 text-[13px] mb-3">
+            {t("home.greeting")}
+          </p>
+          <h1 className="text-white text-[32px] font-semibold tracking-tight leading-[1.15]">
+            {t("home.subheadline")}
+          </h1>
         </div>
 
-        {/* ── 3 main action cards ─────────────────────────────── */}
-        <div className="grid grid-cols-3 gap-5 mb-8 stagger">
+        {/* Action cards: 3 columns, compact, single accent */}
+        <div className="grid grid-cols-3 gap-3 mb-12">
           {ACTIONS.map((a) => {
             const Icon = a.icon;
             return (
-              <div
+              <button
                 key={a.id}
-                className={`relative rounded-2xl border bg-gradient-to-br ${a.gradient} ${a.border} p-5 flex flex-col gap-4 transition-all duration-200 hover:-translate-y-0.5`}
+                onClick={() => onNavigate(a.id)}
+                className="group text-left p-5 rounded-2xl border border-white/[0.06] bg-white/[0.02] hover:border-cyan-500/30 hover:bg-cyan-500/[0.04] transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+                data-testid={`home-action-${a.id}`}
               >
-                {/* Icon + title */}
-                <div className="flex items-start gap-3">
-                  <div
-                    className={`w-12 h-12 rounded-xl border flex items-center justify-center shrink-0 ${a.iconBg} ${a.iconColor}`}
-                  >
-                    <Icon size={22} strokeWidth={1.8} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <h3 className="text-white text-[18px] font-semibold leading-tight">
-                      {t(a.titleKey)}
-                    </h3>
-                    <p className="text-zinc-400 text-[12.5px] mt-1 leading-snug">
-                      {t(a.subKey)}
-                    </p>
-                  </div>
+                <div className="flex items-center justify-between mb-4">
+                  <Icon size={20} className="text-cyan-400" strokeWidth={1.5} />
+                  <ArrowRight
+                    size={14}
+                    className="text-zinc-600 group-hover:text-cyan-400 group-hover:translate-x-0.5 transition-all"
+                  />
                 </div>
-
-                {/* Tags */}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {a.tags.map((tag) => (
-                    <span
-                      key={tag}
-                      className="px-2 py-0.5 rounded-md bg-white/[0.04] border border-white/[0.08] text-zinc-400 text-[10.5px] font-mono"
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-
-                {/* CTA */}
-                <button
-                  onClick={() => onNavigate(a.id)}
-                  className={`w-full py-2.5 rounded-xl border text-[13px] font-semibold inline-flex items-center justify-center gap-2 transition-all duration-150 hover:scale-[1.01] active:scale-[0.99] ${a.buttonClass}`}
-                >
-                  {t(`home.action.${a.id}.cta`)}
-                  <ArrowRight size={13} />
-                </button>
-              </div>
+                <h3 className="text-white text-[15px] font-semibold tracking-tight mb-1">
+                  {t(a.titleKey)}
+                </h3>
+                <p className="text-zinc-500 text-[12px] leading-snug">
+                  {t(a.descKey)}
+                </p>
+              </button>
             );
           })}
         </div>
 
-        {/* ── Main grid: stats + recent activity (right) ──────── */}
-        <div className="grid grid-cols-3 gap-5 mb-8">
-          {/* Left: Estadísticas + Actividad */}
-          <div className="col-span-2 space-y-5">
-            {/* Estadísticas bar */}
-            <div className="rounded-2xl bg-white/[0.02] border border-white/[0.06] p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <TrendingUp size={14} className="text-cyan-400" />
-                <h3 className="text-zinc-300 text-[13px] font-semibold">
-                  {t("home.stats.title")}
-                </h3>
-              </div>
-              <div className="grid grid-cols-5 gap-3">
-                <StatCard
-                  icon={FileText}
-                  value={
-                    stats ? formatCount(stats.total_files_processed, locale) : "—"
-                  }
-                  label={t("home.stats.processed.label")}
-                  sublabel={t("home.stats.processed.sub")}
-                  color="cyan"
-                />
-                <StatCard
-                  icon={Database}
-                  value={
-                    stats ? formatBytes(stats.total_bytes_saved, locale) : "—"
-                  }
-                  label={t("home.stats.saved.label")}
-                  sublabel={t("home.stats.saved.sub")}
-                  color="emerald"
-                />
-                <StatCard
-                  icon={TrendingUp}
-                  value={
-                    stats && stats.average_compression_ratio > 0
-                      ? `${Math.round(
-                          (1 - stats.average_compression_ratio) * 100,
-                        )}%`
-                      : "—"
-                  }
-                  label={t("home.stats.ratio.label")}
-                  sublabel={t("home.stats.ratio.sub")}
-                  color="amber"
-                />
-                <StatCard
-                  icon={Share2}
-                  value={
-                    stats ? formatCount(stats.total_files_shared, locale) : "—"
-                  }
-                  label={t("home.stats.shared.label")}
-                  sublabel={t("home.stats.shared.sub")}
-                  color="violet"
-                />
-                <StatCard
-                  icon={Clock}
-                  value={
-                    stats && stats.last_activity_timestamp > 0
-                      ? formatTimestampMs(
-                          stats.last_activity_timestamp * 1000,
-                          t as (k: string, vars?: Record<string, string | number>) => string,
-                        )
-                      : "—"
-                  }
-                  label={t("home.stats.last.label")}
-                  sublabel={t("home.stats.last.sub")}
-                  color="blue"
-                />
-              </div>
-            </div>
-
-            {/* Actividad log */}
-            <div className="rounded-2xl bg-white/[0.02] border border-white/[0.06] p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <ActivityIcon size={14} className="text-cyan-400" />
-                <h3 className="text-zinc-300 text-[13px] font-semibold">
-                  {t("home.activity.title")}
-                </h3>
-              </div>
-              <div className="space-y-2">
-                {recent5.length === 0 ? (
-                  <p className="text-zinc-500 text-[12.5px] text-center py-8 italic">
-                    {t("home.activity.empty")}
-                  </p>
-                ) : (
-                  recent5.slice(0, 3).map((op) => (
-                    <ActivityRow
-                      key={op.id}
-                      op={op}
-                      onClick={() => onNavigate(op.kind === "share" ? "share" : op.kind)}
-                    />
-                  ))
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Right: Recent activity, shortcuts, tip */}
-          <div className="space-y-5">
-            {/* Actividad reciente */}
-            <div className="rounded-2xl bg-white/[0.02] border border-white/[0.06] p-5">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-zinc-300 text-[13px] font-semibold">
-                  {t("home.recent.title")}
-                </h3>
-                <button
-                  onClick={() => onNavigate("recent")}
-                  className="text-zinc-500 hover:text-cyan-400 text-[11px] transition-colors"
-                >
-                  {t("home.recent.all")}
-                </button>
-              </div>
-              {recent5.length === 0 ? (
-                <p className="text-zinc-500 text-[12px] text-center py-6 italic">
-                  {t("home.recent.empty")}
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {recent5.map((op) => (
-                    <RecentRow
-                      key={op.id}
-                      op={op}
-                      onClick={() => onNavigate(op.kind === "share" ? "share" : op.kind)}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Atajos de teclado */}
-            <div className="rounded-2xl bg-white/[0.02] border border-white/[0.06] p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <Keyboard size={14} className="text-cyan-400" />
-                <h3 className="text-zinc-300 text-[13px] font-semibold">
-                  {t("home.shortcuts.title")}
-                </h3>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <Shortcut
-                  keys={["⌘", "K"]}
-                  label={t("home.shortcuts.cmdk")}
-                />
-                <Shortcut
-                  keys={["⇧", "S"]}
-                  label={t("home.shortcuts.share")}
-                />
-                <Shortcut
-                  keys={["⌘", "O"]}
-                  label={t("home.shortcuts.open")}
-                />
-                <Shortcut
-                  keys={["⌘", ","]}
-                  label={t("home.shortcuts.settings")}
-                />
-              </div>
+        {/* Recent activity */}
+        <div className="mb-12">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-zinc-400 text-[11px] tracking-[0.2em] uppercase">
+              {t("home.recent.title")}
+            </h2>
+            {persistedOps.length > 5 && (
               <button
-                className="mt-3 text-zinc-500 hover:text-cyan-400 text-[11px] flex items-center gap-1 transition-colors"
+                onClick={() => onNavigate("recent")}
+                className="text-zinc-500 hover:text-cyan-400 text-[11.5px] transition-colors"
               >
-                {t("home.shortcuts.all")}
-                <ArrowRight size={11} />
+                {t("home.recent.all")}
               </button>
+            )}
+          </div>
+          {recent5.length === 0 ? (
+            <p className="text-zinc-600 text-[12.5px] text-center py-12 italic">
+              {t("home.recent.empty")}
+            </p>
+          ) : (
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] divide-y divide-white/[0.04]">
+              {recent5.map((op) => (
+                <RecentRow
+                  key={op.id}
+                  op={op}
+                  onClick={() => onNavigate(op.kind === "share" ? "share" : op.kind)}
+                />
+              ))}
             </div>
+          )}
+        </div>
 
-            {/* Consejo del día */}
-            <div className="rounded-2xl bg-gradient-to-br from-amber-500/10 to-amber-500/0 border border-amber-500/20 p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <Lightbulb size={14} className="text-amber-400" />
-                <h3 className="text-amber-300 text-[13px] font-semibold">
-                  {t("home.tip.title")}
-                </h3>
-              </div>
-              <p
-                key={tipIndex}
-                className="text-zinc-300 text-[12.5px] leading-relaxed mb-3 animate-fade-in"
-              >
-                {t(TIPS[tipIndex])}
-              </p>
-              <button className="text-amber-400 hover:text-amber-300 text-[11.5px] font-medium inline-flex items-center gap-1 transition-colors">
-                {t("home.tip.more")}
-                <ArrowRight size={11} />
-              </button>
-            </div>
+        {/* Shortcuts */}
+        <div>
+          <h2 className="text-zinc-400 text-[11px] tracking-[0.2em] uppercase mb-3">
+            {t("home.shortcuts.title")}
+          </h2>
+          <div className="flex items-center gap-4 flex-wrap">
+            <Shortcut keys={["⌘", "K"]} label={t("home.shortcuts.cmdk")} />
+            <Shortcut keys={["⇧", "S"]} label={t("home.shortcuts.share")} />
+            <Shortcut keys={["⌘", "O"]} label={t("home.shortcuts.open")} />
+            <Shortcut keys={["⌘", ","]} label={t("home.shortcuts.settings")} />
           </div>
         </div>
       </div>
     </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────
-//  Subcomponents
-// ─────────────────────────────────────────────────────────────
-
-function StatCard({
-  icon: Icon,
-  value,
-  label,
-  sublabel,
-  color,
-}: {
-  icon: typeof FileText;
-  value: string;
-  label: string;
-  sublabel: string;
-  color: "cyan" | "emerald" | "amber" | "violet" | "blue";
-}) {
-  const tone: Record<typeof color, { bg: string; text: string }> = {
-    cyan:    { bg: "bg-cyan-500/10",    text: "text-cyan-400" },
-    emerald: { bg: "bg-emerald-500/10", text: "text-emerald-400" },
-    amber:   { bg: "bg-amber-500/10",   text: "text-amber-400" },
-    violet:  { bg: "bg-violet-500/10",  text: "text-violet-400" },
-    blue:    { bg: "bg-blue-500/10",    text: "text-blue-400" },
-  };
-  const t = tone[color];
-  return (
-    <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 flex flex-col gap-1.5">
-      <div className={`w-8 h-8 rounded-lg ${t.bg} flex items-center justify-center ${t.text}`}>
-        <Icon size={15} />
-      </div>
-      <p className="text-white text-[20px] font-semibold tabular-nums leading-tight">
-        {value}
-      </p>
-      <p className="text-zinc-400 text-[11px] font-medium leading-tight">
-        {label}
-      </p>
-      <p className="text-zinc-600 text-[10px] leading-tight">
-        {sublabel}
-      </p>
-    </div>
-  );
-}
-
-function ActivityRow({
-  op,
-  onClick,
-}: {
-  op: RecentOp;
-  onClick: () => void;
-}) {
-  const { t } = useLocale();
-  const Icon = KIND_ICON[op.kind];
-  const inputSize = op.originalBytes;
-  const outputSize = op.compressedBytes ?? op.restoredBytes ?? 0;
-  const saved = op.compressedBytes ? inputSize - outputSize : 0;
-  const savings = inputSize > 0 && saved > 0 ? saved / inputSize : 0;
-  const verb =
-    op.kind === "compress"   ? t("recent.compressed") :
-    op.kind === "decompress" ? t("recent.extracted")  :
-                               t("recent.shared");
-  const detail =
-    op.kind === "compress"
-      ? `${prettyBytes(inputSize)} → ${prettyBytes(outputSize)}`
-      : op.kind === "decompress"
-      ? `${op.filename} (${inputSize} archivos)`
-      : `Enlace P2P · ${prettyBytes(inputSize)}`;
-
-  return (
-    <button
-      onClick={onClick}
-      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/[0.03] transition-colors text-left"
-    >
-      <div className={`w-9 h-9 rounded-lg bg-white/[0.04] flex items-center justify-center shrink-0 ${KIND_TONE[op.kind]}`}>
-        <Icon size={15} />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-zinc-200 text-[12.5px] truncate">
-          <span className="font-medium">{op.filename}</span>{" "}
-          <span className="text-zinc-500">{verb}</span>
-        </p>
-        <p className="text-zinc-600 text-[10.5px] mt-0.5 truncate font-mono">
-          {detail}
-        </p>
-      </div>
-      <div className="flex items-center gap-2 shrink-0">
-        {savings > 0 && (
-          <span className={`text-[11px] font-mono ${KIND_TONE[op.kind]}`}>
-            −{(savings * 100).toFixed(0)}%
-          </span>
-        )}
-        <span className="text-zinc-600 text-[10.5px]">
-          {relativeTime(op.timestamp, t)}
-        </span>
-        <Check size={12} className="text-emerald-400" />
-      </div>
-    </button>
   );
 }
 
@@ -604,71 +227,94 @@ function RecentRow({
   onClick: () => void;
 }) {
   const { t } = useLocale();
-  const Icon = KIND_ICON[op.kind];
   const verb =
-    op.kind === "compress"   ? t("recent.compressed") :
-    op.kind === "decompress" ? t("recent.extracted")  :
-                               t("recent.shared");
+    op.kind === "compress"
+      ? t("recent.compressed")
+      : op.kind === "decompress"
+        ? t("recent.extracted")
+        : t("recent.shared");
+  const inputSize = op.originalBytes;
+  const outputSize = op.compressedBytes ?? op.restoredBytes ?? 0;
+  const saved =
+    op.compressedBytes && op.compressedBytes > 0
+      ? Math.round((1 - op.compressedBytes / op.originalBytes) * 100)
+      : null;
+
+  // Sprint 5.7.21-B-Home-Icons: file-type icon + kind badge
+  // overlay. The main icon reflects the file extension
+  // (FileCode / FileImage / FileVideo / etc.) and the corner
+  // badge reflects the op kind (compress / decompress / share).
+  const fileKind = getFileKind(op.filename);
+  const kindBadge = getKindBadge(op.kind);
+  const FileIcon = fileKind.icon;
+  const KindIcon = kindBadge.icon;
+
   return (
     <button
       onClick={onClick}
-      className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg hover:bg-white/[0.03] transition-colors text-left"
+      data-testid="home-recent-row"
+      className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/[0.02] transition-colors text-left group"
     >
-      <div className={`w-8 h-8 rounded-md bg-white/[0.04] flex items-center justify-center shrink-0 ${KIND_TONE[op.kind]}`}>
-        <Icon size={13} />
+      {/* File-type icon with kind badge overlay */}
+      <div className="relative shrink-0">
+        <div
+          className={
+            "w-9 h-9 rounded-lg flex items-center justify-center border " +
+            fileKind.bg +
+            " " +
+            fileKind.border
+          }
+        >
+          <FileIcon size={16} className={fileKind.color} strokeWidth={1.8} />
+        </div>
+        {/* Kind badge in the bottom-right corner — small
+            colored dot with the kind icon. Tells the user
+            at a glance what operation this row represents. */}
+        <div
+          className={
+            "absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center border border-[#0a0a0a] " +
+            kindBadge.bg
+          }
+        >
+          <KindIcon size={8} className={kindBadge.color} strokeWidth={2.5} />
+        </div>
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-zinc-200 text-[12.5px] truncate font-medium">
+        <p className="text-zinc-200 text-[13px] truncate font-medium group-hover:text-white transition-colors">
           {op.filename}
         </p>
-        <p className="text-zinc-600 text-[10.5px] mt-0.5 tabular-nums">
-          {prettyBytes(op.originalBytes)} · {verb}
+        <p className="text-zinc-600 text-[11px] mt-0.5 font-mono tabular-nums flex items-center gap-1.5">
+          <span>{prettyBytes(inputSize)} → {prettyBytes(outputSize)}</span>
+          <span className="text-zinc-700">·</span>
+          <span className="text-zinc-500">{verb}</span>
         </p>
       </div>
-      <div className="flex items-center gap-1.5 shrink-0">
-        <span className="text-zinc-600 text-[10.5px]">
-          {relativeTime(op.timestamp, t)}
+      {saved !== null && saved > 0 && (
+        <span className="text-cyan-400 text-[12px] font-mono tabular-nums shrink-0">
+          −{saved}%
         </span>
-        <Check size={11} className="text-emerald-400" />
-      </div>
+      )}
+      <span className="text-zinc-600 text-[11px] tabular-nums shrink-0">
+        {relativeTime(op.timestamp, t)}
+      </span>
     </button>
   );
 }
 
 function Shortcut({ keys, label }: { keys: string[]; label: string }) {
   return (
-    <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
-      <span className="text-zinc-300 text-[11.5px] truncate">{label}</span>
-      <div className="flex items-center gap-0.5 shrink-0">
+    <div className="flex items-center gap-2">
+      <div className="flex items-center gap-0.5">
         {keys.map((k) => (
           <kbd
             key={k}
-            className="px-1.5 py-0.5 rounded bg-white/[0.06] border border-white/[0.08] text-zinc-300 text-[10px] font-mono"
+            className="px-1.5 py-0.5 rounded bg-white/[0.04] border border-white/[0.08] text-zinc-300 text-[10.5px] font-mono"
           >
             {k}
           </kbd>
         ))}
       </div>
+      <span className="text-zinc-500 text-[12px]">{label}</span>
     </div>
-  );
-}
-
-// Inline check icon (kept here to avoid an extra lucide import)
-function Check({ size, className }: { size: number; className?: string }) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={3}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
   );
 }

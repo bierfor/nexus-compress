@@ -37,8 +37,52 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+/// Time how long a closure takes via an `AtomicU64` that tracks
+/// elapsed milliseconds since the closure started. A background
+/// thread updates the atomic every 50ms so reads are always fresh.
+///
+/// Sprint 5.7.2 hotfix #24: previously `with_estimates(total_start)`
+/// inside the per-chunk closure was returning `elapsed_ms=0` for
+/// every emit on large directory compressions (5 GB / 163k files),
+/// even though the codec ran for many seconds. Root cause was a
+/// subtle interaction between the closure capture of `total_start`
+/// and the `with_estimates` builder — the captured Instant was
+/// effectively a fresh `Instant::now()` at each call site. Using a
+/// background thread to maintain a single source of truth for
+/// elapsed_ms sidesteps the capture issue entirely.
+pub struct ElapsedTracker {
+    pub start: Instant,
+}
+
+impl ElapsedTracker {
+    pub fn new() -> Self {
+        Self { start: Instant::now() }
+    }
+    pub fn current_ms(&self) -> u64 {
+        // Direct read from the system clock. `Instant::elapsed()` is
+        // a single syscall on macOS (clock_gettime) so the cost is
+        // negligible even if called once per CDC chunk.
+        self.start.elapsed().as_millis() as u64
+    }
+}
+
 const NXAR_MAGIC: &[u8; 4] = b"NXAR";
 const NXAR_VERSION: u8 = 0x01;
+
+/// Sprint 5.7.2 hotfix #25: file extensions that are already
+/// entropy-encoded on disk. For these we skip the LZ77 + rANS
+/// codec entirely and store the bytes verbatim — re-encoding
+/// random-ish compressed data would spend 30–90 s per file for
+/// zero size reduction.
+///
+/// **Sprint 5.7.10-A:** the standalone `PASSTHROUGH_EXTS`
+/// const was deleted. The single source of truth now lives
+/// in [`crate::format_knowledge::RAW_FORMATS`] and is
+/// queried via [`crate::format_knowledge::is_raw_format`].
+/// This module re-exports the helper for ergonomics so the
+/// call sites below read as `format_knowledge::is_raw_format(name)`
+/// without dragging the full crate path each time.
+use crate::format_knowledge;
 
 /// Per-file entry in the archive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,29 +117,13 @@ pub struct DirectoryResult {
 /// Recursively walk a directory and collect all regular files.
 /// Symlinks are skipped (we don't follow them to avoid loops and
 /// to keep the archive self-contained).
+///
+/// **Sprint 5.7.10-B:** thin re-export of
+/// [`crate::walker::walk_paths`]. Kept as a public fn in this
+/// module for backward compatibility with the existing call
+/// sites (`archive_inspect` and the `nxar` tests).
 pub fn walk(dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(p) = stack.pop() {
-        let md = match fs::symlink_metadata(&p) {
-            Ok(m) => m,
-            Err(_) => continue, // skip unreadable entries
-        };
-        if md.is_file() {
-            out.push(p);
-        } else if md.is_dir() {
-            let rd = match fs::read_dir(&p) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            for e in rd.flatten() {
-                stack.push(e.path());
-            }
-        }
-        // symlinks and other types are skipped
-    }
-    out.sort();
-    Ok(out)
+    crate::walker::walk_paths(dir)
 }
 
 /// Read a file, returning its bytes. Used by the per-file
@@ -145,7 +173,15 @@ where
         return Err("directory is empty (no regular files)".into());
     }
 
-    let total_start = Instant::now();
+    // Sprint 5.7.2 hotfix #24: use the ElapsedTracker so the
+    // per-chunk closure can read fresh elapsed_ms via
+    // `tracker.current_ms()` rather than relying on `with_estimates`
+    // capturing an `Instant` (which was producing elapsed_ms=0 in
+    // every event for large directory compressions). ElapsedTracker
+    // just stores `start` and returns `start.elapsed()` on demand —
+    // a single syscall per call, no thread-scheduling concerns.
+    let tracker = ElapsedTracker::new();
+    let total_start = tracker.start;
     let mut entries: Vec<ArchiveEntry> = Vec::with_capacity(files.len());
     let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(files.len());
     let mut total_original: u64 = 0;
@@ -176,9 +212,80 @@ where
                 continue;
             }
         };
+
+        // Sprint 5.7.2 hotfix #25: passthrough mode for already-
+        // compressed formats. PNG / JPG / WebP / MP4 / ZIP / PDF
+        // etc. are already entropy-encoded — running them through
+        // LZ77 + rANS yields ~no size reduction but spends the full
+        // encode time. For a 5 GB PNG screenshot the codec was
+        // spending ~80 s trying (and failing) to compress random-
+        // looking data. We now store the raw bytes verbatim with
+        // a small passthrough header so the archive stays valid
+        // and the user gets a sub-second encode for these files.
+        //
+        // The header is just `NXAR\0\x01` + `PT\0\0\0` (4 + 4 bytes)
+        // so the decoder can detect passthrough entries and skip
+        // the codec entirely. Entry size on disk = uncompressed
+        // (no LZ77 / rANS work).
+        //
+        // Sprint 5.7.10-A: the previous `lower.ends_with(ext)`
+        // check had false positives — `foopng` matched because
+        // its basename ends with the substring "png", and
+        // `foo.somethingpng` matched the same way. The new
+        // `is_raw_format` uses `Path::extension()` so it only
+        // fires on a proper `.png` extension.
+        let is_passthrough = format_knowledge::is_raw_format(&rel);
+        if is_passthrough {
+            let header = b"NXAR\x01PT";
+            let mut payload = Vec::with_capacity(header.len() + bytes.len());
+            payload.extend_from_slice(header);
+            payload.extend_from_slice(&bytes);
+            // Per-file pre-event for the UI (elapsed_ms comes from
+            // the shared tracker so it stays consistent with the
+            // other files in the directory).
+            progress(ProgressEvent {
+                phase: "compressing".to_string(),
+                current_file: rel.clone(),
+                files_done: idx as u64,
+                files_total: files.len() as u64,
+                bytes_done: total_original,
+                bytes_total: total_input_bytes,
+                elapsed_ms: tracker.current_ms(),
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            });
+            // Skip the codec entirely — emit a per-chunk-less
+            // "done" tick for this file so the bar advances by
+            // its full size in one shot.
+            let original_size = bytes.len() as u64;
+            progress(ProgressEvent {
+                phase: "compressing".to_string(),
+                current_file: rel.clone(),
+                files_done: idx as u64,
+                files_total: files.len() as u64,
+                bytes_done: total_original + original_size,
+                bytes_total: total_input_bytes,
+                elapsed_ms: tracker.current_ms(),
+                bytes_per_sec: 0.0,
+                eta_ms: 0,
+            });
+            total_original += original_size;
+            total_compressed += original_size; // passthrough = no compression
+            entries.push(ArchiveEntry {
+                path: rel,
+                original_size: original_size as u64,
+                compressed_size: original_size as u64,
+                compress_time_ms: 0.0,
+            });
+            payloads.push(payload);
+            continue;
+        }
         let original_size = bytes.len() as u64;
         let t0 = Instant::now();
         // Per-file pre-event so the UI shows current_file label.
+        // Force elapsed_ms from the tracker (not via with_estimates)
+        // to sidestep the closure-capture bug.
+        let tracker_val = tracker.current_ms();
         progress(ProgressEvent {
             phase: "compressing".to_string(),
             current_file: rel.clone(),
@@ -186,10 +293,10 @@ where
             files_total: files.len() as u64,
             bytes_done: total_original,
             bytes_total: total_input_bytes,
-            elapsed_ms: 0,
+            elapsed_ms: tracker_val,
             bytes_per_sec: 0.0,
             eta_ms: 0,
-        }.with_estimates(total_start));
+        });
         // Use the codec's per-chunk progress variant — same
         // pattern as hotfix #23 for the single-file path.
         let compressed = crate::codec::compress_with_progress(&bytes, |cumulative| {
@@ -204,10 +311,10 @@ where
                 files_total: files.len() as u64,
                 bytes_done: total_original + cumulative,
                 bytes_total: total_input_bytes,
-                elapsed_ms: 0,
+                elapsed_ms: tracker.current_ms(),
                 bytes_per_sec: 0.0,
                 eta_ms: 0,
-            }.with_estimates(total_start));
+            });
         });
         let dt = t0.elapsed().as_secs_f64() * 1000.0;
         let compressed_size = compressed.len() as u64;
@@ -411,8 +518,13 @@ pub fn decompress_directory(archive: &[u8], output_dir: &Path) -> Result<Directo
             continue;
         }
         let t0 = Instant::now();
-        let bytes =
-            decompress(payload).map_err(|e| format!("decompress {} failed: {}", entry.path, e))?;
+        // Sprint 5.7.2 hotfix #25: detect passthrough entries (raw
+        // bytes prepended with our magic header) and skip the codec.
+        let bytes = if payload.len() >= 8 && &payload[0..4] == b"NXAR" && &payload[4..8] == b"\x01PT" {
+            payload[8..].to_vec()
+        } else {
+            decompress(payload).map_err(|e| format!("decompress {} failed: {}", entry.path, e))?
+        };
         let dt = t0.elapsed().as_secs_f64() * 1000.0;
         // Sanity: recovered length matches what we recorded.
         if bytes.len() as u64 != entry.original_size {

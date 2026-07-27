@@ -40,7 +40,13 @@ pub mod dedup;
 pub mod dict_codec;
 pub mod dictionary;
 pub mod engine;
+pub mod external_decompress;
 pub mod format;
+/// Sprint 5.7.10-A: single source of truth for which file
+/// extensions should bypass preprocessing. Replaces the
+/// four duplicated lists that used to live in
+/// `solid_archive.rs`, `nxar.rs`, and `api.rs`.
+pub mod format_knowledge;
 pub mod fs;
 pub mod lz77;
 pub mod minify;
@@ -49,7 +55,25 @@ pub mod ram;
 pub mod rans_v4;
 pub mod rle;
 pub mod solid_archive;
+pub mod scheduler;
+pub mod stats;
+/// Sprint 5.7.10-C: SupremeEngine — single entry point for
+/// compression. Replaces the leaky IPC frontier (8 separate
+/// fields parsed by the Tauri command + 4 different
+/// `compress_*_with_backend` dispatch functions) with a
+/// profile-driven API. The engine resolves the user's
+/// `CompressionProfile` into a `ResolvedPlan` (concrete
+/// backend + codec + preprocessor) internally.
+pub mod supreme_engine;
+/// Sprint 5.7.10-B: single source of truth for corpus walking
+/// + skip-list filtering. Replaces the four duplicated walkers
+/// that used to live in `nxar.rs`, `main.rs`, `api.rs`, and
+/// `bin/bench_solid.rs`.
+pub mod walker;
 
-pub use api::{compress_directory_with_backend, CompressionBackend};
+/// Sprint 5.7.10-E: removed the `compress_directory_with_backend`
+/// and `CompressionBackend` re-exports. The legacy dispatch
+/// surface is gone — the SupremeEngine (`crate::supreme_engine`)
+/// is the only public compress entry point.
 pub use codec::{compress, compress_premium, decompress};
 pub use format::{BlockType, NexusHeader};

@@ -17,6 +17,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useLocale } from "@/components/LocaleProvider";
 import type { View } from "@/components/NeoTopBar";
+import { getFileKind, getKindBadge } from "@/lib/fileIcons";
 import {
   Archive,
   FolderOpen,
@@ -308,7 +309,7 @@ export function RecentView({ ops, onNavigate, onClear }: RecentViewProps) {
               <div className="flex items-center gap-2">
                 <HardDrive size={12} className="text-zinc-600" />
                 <span>{t("recent.footer.default")}</span>
-                <span className="text-zinc-300 font-mono">~/NexusRAR</span>
+                <span className="text-zinc-300 font-mono">~/NexusCompress</span>
                 <button className="ml-1 text-zinc-500 hover:text-white transition-colors">
                   <Pencil size={11} />
                 </button>
@@ -647,25 +648,43 @@ function RecentTableRow({
   labels: ReturnType<typeof kindLabels>;
 }) {
   const meta = labels[op.kind] ?? labels.compress;
-  const Icon = meta.icon;
   const dest: View =
     op.kind === "share" ? "share" : op.kind === "compress" ? "compress" : "decompress";
-  const colorTone: Record<string, string> = {
-    cyan: "bg-cyan-500/10 text-cyan-300 border-cyan-500/30",
-    emerald: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
-    amber: "bg-amber-500/10 text-amber-300 border-amber-500/30",
-  };
+  // Sprint 5.7.21-B-FileIcons-Shared: use the shared file-icon
+  // helpers instead of the kind-only icon. The main icon now
+  // reflects the file extension (FileCode / FileImage / etc.)
+  // and the kind badge in the bottom-right corner shows the
+  // op kind (compress / decompress / share).
+  const fileKind = getFileKind(op.filename);
+  const kindBadge = getKindBadge(op.kind);
+  const FileIcon = fileKind.icon;
+  const KindIcon = kindBadge.icon;
   return (
     <div
       onClick={() => onNavigate(dest)}
       className="grid grid-cols-[2.4fr_1fr_0.8fr_1fr_1.2fr_60px] gap-4 px-5 py-3 items-center hover:bg-white/[0.03] transition-colors cursor-pointer group"
     >
-      {/* Nombre + path */}
+      {/* Nombre + path — with file-type icon + kind badge overlay */}
       <div className="flex items-center gap-3 min-w-0">
-        <div
-          className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${colorTone[meta.color]}`}
-        >
-          <Icon size={16} />
+        <div className="relative shrink-0">
+          <div
+            className={
+              "w-9 h-9 rounded-lg flex items-center justify-center border " +
+              fileKind.bg +
+              " " +
+              fileKind.border
+            }
+          >
+            <FileIcon size={16} className={fileKind.color} strokeWidth={1.8} />
+          </div>
+          <div
+            className={
+              "absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center border border-[#0a0a0a] " +
+              kindBadge.bg
+            }
+          >
+            <KindIcon size={8} className={kindBadge.color} strokeWidth={2.5} />
+          </div>
         </div>
         <div className="min-w-0">
           <p className="text-zinc-100 text-[12.5px] truncate font-medium">
@@ -678,9 +697,9 @@ function RecentTableRow({
       </div>
       {/* Tipo (chip) */}
       <span
-        className={`self-start mt-2 px-2.5 py-0.5 rounded-full text-[10.5px] font-medium border ${colorTone[meta.color]}`}
+        className="self-start mt-2 px-2.5 py-0.5 rounded-full text-[10.5px] font-medium border bg-white/[0.04] border-white/[0.08] text-zinc-300"
       >
-        {meta.chip}
+        {fileKind.icon === FileIcon ? (op.filename.split(".").pop()?.toLowerCase() ?? "?") : meta.chip}
       </span>
       {/* Tamaño */}
       <span className="text-zinc-300 text-[12px] font-mono tabular-nums">

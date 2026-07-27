@@ -39,6 +39,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::codec;
@@ -86,6 +87,63 @@ impl std::str::FromStr for CompressionLevel {
                 "unknown compression level '{}'; expected 'fast' or 'premium'",
                 other
             )),
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Sprint 5.7.7 hotfix #55: CorpusMode
+// -----------------------------------------------------------------------
+
+/// What to include when archiving a directory.
+///
+/// The user controls this with a 3-pill selector in the UI
+/// ("Everything" / "Source" / "Minimal") and a CLI flag
+/// (`--corpus=everything|source|minimal`). The default is
+/// `Everything` since 5.7.7 — the previous default of skipping
+/// dev caches was useful for ratio, but it silently dropped
+/// files the user might want to recover later (a freshly cloned
+/// repo with its `target/` or `.next/` is recoverable from
+/// the package manager, but an in-progress WIP isn't).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CorpusMode {
+    /// Include every file under the root. No skipping.
+    Everything,
+    /// Skip dev caches and build artifacts.
+    Source,
+    /// Keep only source code + manifests.
+    Minimal,
+}
+
+impl Default for CorpusMode {
+    fn default() -> Self {
+        Self::Everything
+    }
+}
+
+impl std::str::FromStr for CorpusMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "everything" | "all" | "full" => Ok(Self::Everything),
+            "source" | "src" | "code" => Ok(Self::Source),
+            "minimal" | "min" => Ok(Self::Minimal),
+            other => Err(format!(
+                "unknown corpus mode '{}'; expected 'everything', 'source', or 'minimal'",
+                other
+            )),
+        }
+    }
+}
+
+impl CorpusMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Everything => "everything",
+            Self::Source => "source",
+            Self::Minimal => "minimal",
         }
     }
 }
@@ -257,177 +315,6 @@ pub fn compress_bytes_with_level(input: &[u8], level: CompressionLevel) -> Compr
     }
 }
 
-/// Compression backend selector for the GUI.
-///
-/// Each backend has a different preprocessor + entropy coder:
-/// - `V4`: the original lossless codec (multi-stream LZ77 + rANS
-///   + trained dict). 100% reversible. LOSSLESS.
-/// - `V5Min`: LZMA + conservative text minify. Lossless on
-///   non-comment text, lossy when comments are present. ~102%
-///   of 7z on the corpus. Also strong on minified bundles
-///   (strips embedded source-map comments).
-/// - `V6`: swc AST minify (drops types, comments, formatting on
-///   `.js`/`.ts`/`.tsx`) + LZMA. LOSSY. Best on TypeScript
-///   source where type annotations are 70-80% of the bytes
-///   (~117% of 7z on the corpus).
-/// - `V6Solid`: same as `V6` but for a directory — single
-///   LZMA stream over the whole preprocessed corpus so the
-///   dictionary survives across files. +0.7% on the current
-///   corpus, larger wins on diverse source trees.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CompressionBackend {
-    V4,
-    V5Min,
-    V6,
-    /// Directory-only. Single LZMA stream over the whole corpus.
-    /// The CLI's `--solid` flag uses this; the Tauri UI exposes
-    /// it under the directory mode.
-    V6Solid,
-}
-
-impl std::str::FromStr for CompressionBackend {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "v4" => Ok(Self::V4),
-            "v5-min" | "v5min" | "v5" => Ok(Self::V5Min),
-            "v6" => Ok(Self::V6),
-            "v6-solid" | "v6solid" | "solid" => Ok(Self::V6Solid),
-            other => Err(format!(
-                "unknown backend '{other}' (use v4 | v5-min | v6 | v6-solid)"
-            )),
-        }
-    }
-}
-
-impl Default for CompressionBackend {
-    fn default() -> Self {
-        Self::V4
-    }
-}
-
-/// `CompressionBackend` info sent to the UI so the ConfigPanel can
-/// render descriptions and ratio hints.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendInfo {
-    pub id: String,
-    pub name: &'static str,
-    pub tagline: &'static str,
-    /// Honest one-liner about the lossy / lossless contract.
-    pub contract: &'static str,
-    /// Approximate ratio as % of 7z from `bench_v6` (corpus_real).
-    /// -1 means "not measured" (e.g. v4 uses its own bench).
-    pub pct_of_7z: f64,
-    /// Whether the backend is lossy.
-    pub lossy: bool,
-}
-
-pub fn backend_info() -> Vec<BackendInfo> {
-    vec![
-        BackendInfo {
-            id: "v4".to_string(),
-            name: "v4",
-            tagline: "Lossless · LZ77 + rANS + dict",
-            contract: "100% byte-identical roundtrip. Trained dict (5348 entries).",
-            pct_of_7z: 137.0, // v4 raw on the corpus_suite is 137% of 7z
-            lossy: false,
-        },
-        BackendInfo {
-            id: "v5-min".to_string(),
-            name: "v5 Text-Min",
-            tagline: "Text minify + LZMA",
-            contract: "Strips comments, collapses whitespace. Loses comments.",
-            pct_of_7z: 162.0, // bench_v6 v5-min aggregate (driven by main-app.js bundle)
-            lossy: true,
-        },
-        BackendInfo {
-            id: "v6".to_string(),
-            name: "v6 AST",
-            tagline: "swc AST minify + LZMA (single file)",
-            contract: "Drops types, comments, formatting from .js/.ts. Reversible in semantics only.",
-            pct_of_7z: 117.0, // bench_v6 v6 aggregate on ts_source category
-            lossy: true,
-        },
-        BackendInfo {
-            id: "v6-solid".to_string(),
-            name: "v6 Solid-AST",
-            tagline: "swc + LZMA · single stream over whole corpus",
-            contract: "Same as v6 but the LZMA dictionary spans all files. Best on multi-file source trees.",
-            pct_of_7z: 117.0, // bench_solid SOLID v6 = 8.78x, 7z = 7.48x = 117%
-            lossy: true,
-        },
-    ]
-}
-
-/// Compress in-memory bytes with the chosen backend.
-///
-/// `file_name` is used by `V6` to pick the right preprocessor
-/// (`.js`/`.ts`/`.tsx` get swc AST minify, everything else gets
-/// the conservative text minify). For `V4` and `V5Min` it's
-/// only used for stats.
-///
-/// `lzma_level` is the LZMA preset (0..=9). 6 = balanced
-/// (apples-to-apples with `xz -6`), 9 = max (apples-to-apples
-/// with `7z -mx=9`). Ignored by `V4` (which has its own LZ77
-/// strategy selector — see `CompressionLevel`).
-pub fn compress_bytes_with_backend(
-    input: &[u8],
-    file_name: &str,
-    backend: CompressionBackend,
-    lzma_level: u32,
-) -> CompressResult {
-    let start = Instant::now();
-    let compressed: Vec<u8> = match backend {
-        CompressionBackend::V4 => {
-            // Default to Fast LZ77 — the GUI's level slider can
-            // upgrade to Premium via compress_bytes_with_level.
-            crate::compress(input)
-        }
-        CompressionBackend::V5Min => {
-            // LZMA + conservative text minify.
-            let pre = crate::minify::minify(input);
-            crate::engine::compress_with("v5-min", &pre, false).unwrap_or_else(|_| pre)
-        }
-        CompressionBackend::V6 => {
-            // swc AST minify (when file_name ends in .js/.ts/etc.)
-            // + LZMA. engine::compress_v6 picks the right pre.
-            let ext = std::path::Path::new(file_name)
-                .extension()
-                .and_then(|e| e.to_str());
-            crate::engine::compress_v6(input, ext, lzma_level)
-        }
-        CompressionBackend::V6Solid => {
-            // For a single in-memory buffer, v6-solid is the same
-            // as v6 (no other files to share the dictionary with).
-            // The CLI uses the directory walker; the Tauri GUI
-            // should call compress_directory_with_backend instead.
-            let ext = std::path::Path::new(file_name)
-                .extension()
-                .and_then(|e| e.to_str());
-            crate::engine::compress_v6(input, ext, lzma_level)
-        }
-    };
-    let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-    let original_size = input.len() as u64;
-    let compressed_size = compressed.len() as u64;
-    let ratio = if compressed_size == 0 {
-        0.0
-    } else {
-        original_size as f64 / compressed_size as f64
-    };
-
-    CompressResult {
-        compressed,
-        original_size,
-        compressed_size,
-        ratio,
-        compress_time_ms,
-    }
-}
-
 /// Unified result returned by `compress_target` — covers BOTH
 /// single-file inputs and directory inputs under the same shape so
 /// the UI doesn't have to branch on `is_directory`.
@@ -441,6 +328,11 @@ pub struct CompressTargetResult {
     pub is_directory: bool,
     /// Size of the input on disk, in bytes (recursive for dirs).
     pub original_size: u64,
+    /// Bytes skipped by the dev-cache walk filter (hotfix #43).
+    /// The frontend shows this as a tooltip: "Skipped X MiB of
+    /// dev cache (`.next`, `node_modules`, …)" so users understand
+    /// a low ratio on a cache-heavy corpus is intentional.
+    pub skipped_bytes: u64,
     /// Size of the compressed output, in bytes.
     pub compressed_size: u64,
     /// `original_size / compressed_size`. 0.0 if no compression.
@@ -453,6 +345,13 @@ pub struct CompressTargetResult {
     pub compressed_bytes: Vec<u8>,
     /// Number of files in the archive (1 for a single-file input).
     pub n_files: u64,
+    /// Sprint 5.7.9 part 6: corpus breakdown by category
+    /// (source / build_artifact / other). The UI uses
+    /// this to warn the user when the archive is
+    /// dominated by build artifacts (where no codec
+    /// can do much). For a single-file input this is
+    /// the zero `CorpusBreakdown`.
+    pub corpus_breakdown: CorpusBreakdown,
     /// Path the compressed output was written to (next to the input
     /// file or inside the input directory). Empty if auto-save was
     /// skipped (e.g. permission error).
@@ -488,215 +387,6 @@ pub struct CompressTargetResult {
 ///
 /// If writing fails (permission error, etc.) the function still
 /// returns the bytes — the `output_path` field will be empty.
-pub fn compress_target<P>(
-    input_path: &Path,
-    backend: CompressionBackend,
-    lzma_level: u32,
-    output_dir: Option<&Path>,
-    mut progress: P,
-) -> ApiResult<CompressTargetResult>
-where
-    P: FnMut(ProgressEvent),
-{
-    let start = Instant::now();
-    let meta = std::fs::metadata(input_path).map_err(|e| {
-        ApiError::new(
-            "target.not_found",
-            format!("cannot stat {}: {}", input_path.display(), e),
-        )
-    })?;
-
-    let (compressed_bytes, total_original, n_files, is_dir): (Vec<u8>, u64, u64, bool) =
-        if meta.is_file() {
-            progress(ProgressEvent {
-                phase: "reading".to_string(),
-                current_file: input_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                files_done: 0,
-                files_total: 1,
-                bytes_done: 0,
-                bytes_total: meta.len(),
-                elapsed_ms: 0,
-                bytes_per_sec: 0.0,
-                eta_ms: 0,
-            }.with_estimates(start));
-            let bytes = std::fs::read(input_path)
-                .map_err(|e| ApiError::new("target.read_failed", format!("read failed: {}", e)))?;
-            let file_name = input_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let r = compress_bytes_with_backend(&bytes, &file_name, backend, lzma_level);
-            // Sprint 5.7.2 hotfix #23: re-emit a "compressing" event
-            // before the codec actually runs so the UI sees the bar
-            // at 0% with a real `start` timestamp. Then call the
-            // codec via the progress-aware variant (`codec::compress_
-            // with_progress`) and pipe per-chunk `bytes_done` into
-            // the same ProgressEvent callback. The codec finishes,
-            // then we emit one final "compressing" event with
-            // bytes_done=bytes_total so the bar hits 100% before
-            // transitioning to "done".
-            let compressed = {
-                let total = meta.len();
-                // Pre-event: 0% with real elapsed_ms / bytes_per_sec.
-                progress(ProgressEvent {
-                    phase: "compressing".to_string(),
-                    current_file: file_name.clone(),
-                    files_done: 0,
-                    files_total: 1,
-                    bytes_done: 0,
-                    bytes_total: total,
-                    elapsed_ms: 0,
-                    bytes_per_sec: 0.0,
-                    eta_ms: 0,
-                }.with_estimates(start));
-                // Codec with per-chunk progress. The throttle on
-                // the Tauri side (100 ms window) will dedupe bursts;
-                // we still get a smooth bar.
-                let bytes_done = std::cell::Cell::new(0u64);
-                crate::codec::compress_with_progress(&bytes, |cumulative| {
-                    // Throttle in-process to avoid emitting one event
-                    // per CDC chunk (could be hundreds for large
-                    // files). 4 KiB granularity is plenty for the
-                    // 100 ms IPC throttle downstream.
-                    let prev = bytes_done.get();
-                    if cumulative - prev >= 4096 || cumulative == total {
-                        bytes_done.set(cumulative);
-                        progress(ProgressEvent {
-                            phase: "compressing".to_string(),
-                            current_file: file_name.clone(),
-                            files_done: 0,
-                            files_total: 1,
-                            bytes_done: cumulative,
-                            bytes_total: total,
-                            elapsed_ms: 0,
-                            bytes_per_sec: 0.0,
-                            eta_ms: 0,
-                        }.with_estimates(start));
-                    }
-                })
-            };
-            progress(ProgressEvent {
-                phase: "done".to_string(),
-                current_file: file_name.clone(),
-                files_done: 1,
-                files_total: 1,
-                bytes_done: meta.len(),
-                bytes_total: meta.len(),
-                elapsed_ms: 0,
-                bytes_per_sec: 0.0,
-                eta_ms: 0,
-            }.with_estimates(start));
-            (compressed, meta.len(), 1u64, false)
-        } else if meta.is_dir() {
-            // Walk into the directory and use the directory backend.
-            // For V6Solid (the path that exercises the solid LZMA
-            // stream) we get per-file progress via the
-            // `solid_archive::compress_with_progress` hook. For other
-            // backends the directory backend dispatches per-file
-            // archiving with per-chunk progress via the
-            // nxar::compress_directory_with_progress hook (hotfix #23.1).
-            //
-            // The wrapping `with_progress` variant forwards every
-            // per-file + per-chunk event through the same `progress`
-            // closure so the UI bar advances smoothly. We also emit
-            // a pre-event at 0% with a real bytes_total before the
-            // work starts, so the user sees the bar at 0% with
-            // a non-zero denominator from the first paint.
-            let total_size = walk_dir_total_bytes(input_path);
-            progress(ProgressEvent {
-                phase: "compressing".to_string(),
-                current_file: String::new(),
-                files_done: 0,
-                files_total: 1, // updated below once we know n_files
-                bytes_done: 0,
-                bytes_total: total_size,
-                elapsed_ms: 0,
-                bytes_per_sec: 0.0,
-                eta_ms: 0,
-            }.with_estimates(start));
-            let (dir_result, archive) =
-                compress_directory_with_backend_with_progress(
-                    input_path,
-                    backend,
-                    lzma_level,
-                    |ev| progress(ev),
-                )?;
-            progress(ProgressEvent {
-                phase: "done".to_string(),
-                current_file: String::new(),
-                files_done: dir_result.n_files,
-                files_total: dir_result.n_files,
-                bytes_done: total_size,
-                bytes_total: total_size,
-                elapsed_ms: 0,
-                bytes_per_sec: 0.0,
-                eta_ms: 0,
-            }.with_estimates(start));
-            (
-                archive,
-                dir_result.total_original_size,
-                dir_result.n_files,
-                true,
-            )
-        } else {
-            return Err(ApiError::new(
-                "target.not_file_or_dir",
-                format!("{} is neither file nor directory", input_path.display()),
-            ));
-        };
-
-    let compress_time_ms = start.elapsed().as_secs_f64() * 1000.0;
-    let compressed_size = compressed_bytes.len() as u64;
-    let ratio = if compressed_size == 0 {
-        0.0
-    } else {
-        total_original as f64 / compressed_size as f64
-    };
-
-    // Auto-save the output. If the user picked a custom output
-    // directory, write there. Otherwise, write next to the input
-    // so the user can verify on disk.
-    let (mut output_path, output_ext) = compute_output_path(input_path, backend, is_dir);
-    if let Some(out_dir) = output_dir {
-        // Rebuild the path inside the user's chosen directory.
-        let file_name = match is_dir {
-            true => match input_path.file_name() {
-                Some(n) => format!("{}.{}", n.to_string_lossy(), output_ext),
-                None => format!("archive.{}", output_ext),
-            },
-            false => match input_path.file_name() {
-                Some(n) => format!("{}.{}", n.to_string_lossy(), output_ext),
-                None => format!("file.{}", output_ext),
-            },
-        };
-        output_path = out_dir.join(file_name).to_string_lossy().into_owned();
-    }
-    let written = std::fs::write(&output_path, &compressed_bytes)
-        .map(|_| output_path.clone())
-        .map_err(|e| {
-            // Surface as a warning rather than a hard error — the
-            // bytes are still returned in the response.
-            eprintln!("warn: could not write output to {}: {}", output_path, e);
-            e
-        })
-        .ok()
-        .unwrap_or_default();
-
-    Ok(CompressTargetResult {
-        is_directory: is_dir,
-        original_size: total_original,
-        compressed_size,
-        ratio,
-        compress_time_ms,
-        compressed_bytes,
-        n_files,
-        output_path: written,
-        output_ext,
-    })
-}
 
 /// Result of decompressing an archive by path. Mirrors the compress
 /// flow's uniform shape so the GUI doesn't have to branch on the
@@ -744,7 +434,7 @@ pub fn decompress_target_with_progress<P>(
     mut progress: P,
 ) -> ApiResult<DecompressTargetResult>
 where
-    P: FnMut(ProgressEvent),
+    P: Fn(ProgressEvent) + Send + Sync,
 {
     use std::io::Read;
     let start = Instant::now();
@@ -1019,6 +709,70 @@ where
                 1,
                 false,
             )
+        } else if let Some(fmt) = crate::external_decompress::detect_format(&head) {
+            // Sprint 5.7.21-EXT: route to the new
+            // external-format dispatcher for ZIP / TAR /
+            // TAR.GZ / GZ. The dispatch handles magic
+            // detection and progress events; we just
+            // unpack the stats it returns into the same
+            // `(kind, output_path, restored_size, n_files,
+            // is_dir)` tuple the NXS branches use.
+            //
+            // For .tar we also need the file extension
+            // (TAR has no magic). The dispatch accepts
+            // `fmt` as a string and we override with the
+            // extension when the magic-only detection is
+            // ambiguous.
+            let ext_lower = input_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            // Resolve the format as a `&'static str` so it
+            // matches the tuple type. Only 4 cases, so a
+            // match is cleanest (and avoids `Box::leak`).
+            let fmt_resolved: &'static str = if fmt == "tar" || (ext_lower == "tar") {
+                "tar"
+            } else if fmt == "gz" && ext_lower == "gz" {
+                "gz"
+            } else if ext_lower == "gz"
+                && input_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.ends_with(".tar"))
+                    .unwrap_or(false)
+            {
+                "tar.gz"
+            } else {
+                fmt
+            };
+            let stats = crate::external_decompress::extract_external(
+                input_path,
+                output_dir,
+                fmt_resolved,
+                |event: ProgressEvent| {
+                    // The dispatch already has a `start: Instant`
+                    // in scope. We forward the event with
+                    // elapsed/eta estimates so the GUI bar
+                    // stays consistent.
+                    progress(event.with_estimates(start));
+                },
+            )
+            .map_err(|e| {
+                // Re-wrap the error so it includes the
+                // format tag for the user-facing message.
+                ApiError::new(
+                    e.code,
+                    format!("{}: {}", fmt_resolved, e.message),
+                )
+            })?;
+            (
+                fmt_resolved,
+                stats.output_dir.to_string_lossy().into_owned(),
+                stats.restored_size,
+                stats.n_files,
+                true,
+            )
         } else {
             return Err(ApiError::new(
                 "decompress.unknown_format",
@@ -1069,6 +823,7 @@ pub fn decompress_target(input_path: &Path) -> ApiResult<DecompressTargetResult>
 /// Reed-Solomon parity). See `src/encrypted.rs` for the
 /// full design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RecoveryLevel {
     /// No parity shards. 0 % overhead, no recovery.
     Off,
@@ -1152,7 +907,7 @@ pub fn compress_target_with_password<P>(
     mut progress: P,
 ) -> ApiResult<CompressTargetResult>
 where
-    P: FnMut(ProgressEvent),
+    P: Fn(ProgressEvent) + Send + Sync,
 {
     use crate::encrypted::{compress_encrypted, EncryptOptions};
     let start = Instant::now();
@@ -1217,12 +972,40 @@ where
         // for the file enumeration; acceptable for a "secure
         // backup" UX where the user already expects a few-second
         // wait.
-        let total_size = walk_dir_total_bytes(input_path);
-        let (dir_result, archive) = compress_directory_with_backend(
-            input_path,
-            CompressionBackend::V6Solid,
-            6,
-        )?;
+        let total_size = crate::walker::total_bytes(input_path);
+        // Sprint 5.7.10-E: the legacy `compress_directory_with_backend`
+        // API is gone. We walk the tree directly via the new
+        // `walker` module and run the v6-solid pipeline on the
+        // file list. Same code path the GUI hits (just wrapped
+        // with the encrypted pipeline afterwards).
+        let walk = crate::walker::walk(input_path, crate::api::CorpusMode::Everything, false)
+            .map_err(|e| ApiError::new("directory.io", e.to_string()))?;
+        if walk.files.is_empty() {
+            return Err(ApiError::new(
+                "directory.empty",
+                format!("no files in {}", input_path.display()),
+            ));
+        }
+        let archive = crate::solid_archive::compress_with_progress(
+            &walk.files,
+            crate::solid_archive::CompressionLevel::Lzma(6),
+            |_file_idx, _total, _name| {},
+        )
+        .map_err(|e| ApiError::new("solid.compress", e))?;
+        let dir_result = DirectoryResult {
+            root: input_path.to_string_lossy().into_owned(),
+            n_files: walk.files.len() as u64,
+            total_original_size: walk.files.iter().map(|(_, b)| b.len() as u64).sum(),
+            total_compressed_size: archive.len() as u64,
+            aggregate_ratio: if archive.is_empty() {
+                0.0
+            } else {
+                walk.files.iter().map(|(_, b)| b.len() as u64).sum::<u64>() as f64
+                    / archive.len() as f64
+            },
+            total_time_ms: 0.0,
+            entries: Vec::new(),
+        };
         // Emit mid-progress to keep the bar moving.
         progress(ProgressEvent {
             phase: "compressing".to_string(),
@@ -1313,11 +1096,17 @@ where
     Ok(CompressTargetResult {
         is_directory: is_dir,
         original_size,
+        skipped_bytes: crate::stats::take_skipped_bytes(),
         compressed_size,
         ratio,
         compress_time_ms,
         compressed_bytes: compressed,
-        n_files: if is_dir { walk_dir_count(input_path) } else { 1 },
+        n_files: if is_dir { crate::walker::count_files(input_path) } else { 1 },
+        corpus_breakdown: if is_dir {
+            crate::stats::take_corpus_breakdown()
+        } else {
+            CorpusBreakdown::default()
+        },
         output_path: written,
         output_ext,
     })
@@ -1358,27 +1147,6 @@ fn compute_output_path_with_ext(
     (final_path.to_string_lossy().into_owned(), output_ext)
 }
 
-/// Count files in a directory (regular files only) for the
-/// `n_files` field of `CompressTargetResult` in the encrypted
-/// directory path. Used to populate the UI's "X files" stat.
-fn walk_dir_count(root: &Path) -> u64 {
-    fn walk(p: &Path) -> std::io::Result<u64> {
-        let mut n = 0u64;
-        for entry in std::fs::read_dir(p)? {
-            let entry = entry?;
-            let path = entry.path();
-            let ft = entry.file_type()?;
-            if ft.is_dir() {
-                n += walk(&path)?;
-            } else if ft.is_file() {
-                n += 1;
-            }
-        }
-        Ok(n)
-    }
-    walk(root).unwrap_or(0)
-}
-
 /// Decompress a V3-format encrypted archive (NXE\0 / NXR\0 magic).
 /// Requires `password`. Dispatches the same way `decompress_target`
 /// does (magic-byte check, then to the encrypted decoder).
@@ -1388,7 +1156,7 @@ pub fn decompress_target_with_password<P>(
     mut progress: P,
 ) -> ApiResult<DecompressTargetResult>
 where
-    P: FnMut(ProgressEvent),
+    P: Fn(ProgressEvent) + Send + Sync,
 {
     use crate::encrypted::decompress_encrypted;
     let start = Instant::now();
@@ -1636,6 +1404,53 @@ pub fn peek_archive_target(input_path: &Path) -> ApiResult<PeekResult> {
             files: vec![], // populated only after password + decrypt
         })
     } else {
+        // Sprint 5.7.21-EXT: peek support for the new
+        // external formats. The peek only reads the
+        // central directory (ZIP) or the manifest (TAR)
+        // — it does NOT decompress anything, so it's
+        // cheap. The frontend uses the returned file list
+        // to render the ArchivePreview (file count, total
+        // size, individual file rows).
+        if let Some(fmt) = crate::external_decompress::detect_format(&bytes) {
+            let ext_lower = input_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            let stem_ends_with_tar = input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.ends_with(".tar"))
+                .unwrap_or(false);
+            let fmt_resolved = if fmt == "tar" || ext_lower == "tar" {
+                "tar"
+            } else if fmt == "gz" && ext_lower == "gz" && stem_ends_with_tar {
+                "tar.gz"
+            } else if fmt == "gz" && ext_lower == "gz" {
+                "gz"
+            } else {
+                fmt
+            };
+            let (files, total) = crate::external_decompress::peek_external(
+                input_path,
+                fmt_resolved,
+            )?;
+            let n = files.len() as u64;
+            return Ok(PeekResult {
+                archive_kind: fmt_resolved,
+                n_files: n,
+                total_uncompressed: total,
+                compressed_size,
+                files: files
+                    .into_iter()
+                    .map(|e| ArchivePreviewEntry {
+                        path: e.path,
+                        size: e.size,
+                        is_dir: e.is_dir,
+                    })
+                    .collect(),
+            });
+        }
         Err(ApiError::new(
             "peek.unknown_format",
             format!(
@@ -1810,41 +1625,6 @@ fn strip_trailing_dot_star(p: &Path) -> std::path::PathBuf {
     }
 }
 
-fn compute_output_path(
-    input_path: &Path,
-    backend: CompressionBackend,
-    is_dir: bool,
-) -> (String, &'static str) {
-    let ext = match backend {
-        CompressionBackend::V4 => "nxs",
-        CompressionBackend::V5Min | CompressionBackend::V6 => "lz",
-        CompressionBackend::V6Solid => "nxs6",
-    };
-    let parent = input_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_default();
-    let stem = if is_dir {
-        // /foo/bar → /foo/bar.nxs6
-        input_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "archive".to_string())
-    } else {
-        // /foo/bar.txt → /foo/bar.txt.nxs (stems off the original name)
-        input_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "file".to_string())
-    };
-    let base = if is_dir {
-        parent.join(format!("{}.{}", stem, ext))
-    } else {
-        // /foo/bar.txt → /foo/bar.txt.nxs (append ext to full name)
-        parent.join(format!("{}.{}", stem, ext))
-    };
-    (base.to_string_lossy().into_owned(), ext)
-}
 
 /// Progress event emitted during `compress_target`.
 ///
@@ -1912,28 +1692,49 @@ impl ProgressEvent {
         }
         self
     }
-}
 
-/// Walk a directory and sum the byte sizes of every regular file.
-/// Used for the bytes_total in the progress bar.
-fn walk_dir_total_bytes(root: &Path) -> u64 {
-    fn walk(p: &Path) -> std::io::Result<u64> {
-        let mut total = 0u64;
-        for entry in std::fs::read_dir(p)? {
-            let entry = entry?;
-            let path = entry.path();
-            let ft = entry.file_type()?;
-            if ft.is_dir() {
-                total += walk(&path)?;
-            } else if ft.is_file() {
-                if let Ok(md) = entry.metadata() {
-                    total += md.len();
-                }
+    /// Sprint 5.7.2 hotfix #24: override `elapsed_ms` AFTER calling
+    /// `with_estimates(start)`. We need this because the closure
+    /// capture pattern used inside `compress_directory_with_progress`
+    /// and `compress_target`'s per-chunk closure was producing
+    /// `elapsed_ms=0` for every event on large directory compressions
+    /// (5 GB / 163k files). Root cause was a subtle interaction
+    /// between the closure capture of the `Instant` and the
+    /// `with_estimates` builder — the captured Instant was effectively
+    /// a fresh `Instant::now()` at each call site.
+    ///
+    /// Using a separate `ElapsedTracker` (background thread updating
+    /// an `AtomicU64`) provides a single source of truth for
+    /// `elapsed_ms`. We still call `with_estimates(start)` first to
+    /// populate `bytes_per_sec` and `eta_ms`, then override
+    /// `elapsed_ms` from the tracker.
+    pub fn with_elapsed_override(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = elapsed_ms;
+        // Recompute bytes_per_sec and eta_ms from the override so
+        // the displayed numbers stay consistent with elapsed_ms.
+        if self.elapsed_ms >= 100 {
+            let elapsed_s = self.elapsed_ms as f64 / 1000.0;
+            self.bytes_per_sec = if self.bytes_done > 0 {
+                self.bytes_done as f64 / elapsed_s
+            } else {
+                0.0
+            };
+            if self.bytes_total > self.bytes_done {
+                let remaining = self.bytes_total - self.bytes_done;
+                self.eta_ms = if self.bytes_per_sec > 0.0 {
+                    (remaining as f64 / self.bytes_per_sec * 1000.0) as u64
+                } else {
+                    0
+                };
+            } else {
+                self.eta_ms = 0;
             }
+        } else {
+            self.bytes_per_sec = 0.0;
+            self.eta_ms = 0;
         }
-        Ok(total)
+        self
     }
-    walk(root).unwrap_or(0)
 }
 
 /// Compress a directory using the chosen backend. The directory
@@ -1942,155 +1743,52 @@ fn walk_dir_total_bytes(root: &Path) -> u64 {
 /// concatenated and a single LZMA stream is written. For `V4`
 /// (the existing per-file nxar) and `V5Min` / `V6` the original
 /// per-file v4 archive is used.
-pub fn compress_directory_with_backend(
-    input_dir: &Path,
-    backend: CompressionBackend,
-    lzma_level: u32,
-) -> ApiResult<(DirectoryResult, Vec<u8>)> {
-    compress_directory_with_backend_with_progress(input_dir, backend, lzma_level, |_| {})
-}
-
-/// Sprint 5.7.2 hotfix #23.1 — same as
-/// `compress_directory_with_backend` but pipes a
-/// `ProgressEvent` callback through both code paths:
-///   - V6Solid: per-file `solid_archive::compress_with_progress`
-///   - per-file nxar: per-file + per-codec-chunk via
-///     `nxar::compress_directory_with_progress`
-///
-/// Without this, the directory compress path emits ONLY the
-/// final "done" event, so the UI bar sits at 0% until the
-/// very end and jumps to 100%.
-pub fn compress_directory_with_backend_with_progress<P>(
-    input_dir: &Path,
-    backend: CompressionBackend,
-    lzma_level: u32,
-    mut progress: P,
-) -> ApiResult<(DirectoryResult, Vec<u8>)>
-where
-    P: FnMut(ProgressEvent),
-{
-    match backend {
-        CompressionBackend::V6Solid => {
-            let files = walk_dir_for_solid(input_dir)?;
-            if files.is_empty() {
-                return Err(ApiError::new(
-                    "directory.empty",
-                    format!("no files in {}", input_dir.display()),
-                ));
-            }
-            let total_original: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
-            // Pre-walk event so the bar starts at 0% with a real
-            // bytes_total rather than waiting for the first
-            // mid-file event.
-            progress(ProgressEvent {
-                phase: "compressing".to_string(),
-                current_file: String::new(),
-                files_done: 0,
-                files_total: files.len() as u64,
-                bytes_done: 0,
-                bytes_total: total_original,
-                elapsed_ms: 0,
-                bytes_per_sec: 0.0,
-                eta_ms: 0,
-            });
-            // Per-file progress hook from solid_archive. The
-            // callback signature is (file_idx, total, name);
-            // we map it to ProgressEvent with bytes_done =
-            // cumulative original bytes processed.
-            let archive = crate::solid_archive::compress_with_progress(
-                &files,
-                lzma_level,
-                |file_idx, total, name| {
-                    let bytes_done: u64 = files
-                        .iter()
-                        .take(file_idx)
-                        .map(|(_, b)| b.len() as u64)
-                        .sum();
-                    progress(ProgressEvent {
-                        phase: "compressing".to_string(),
-                        current_file: name.to_string(),
-                        files_done: file_idx as u64,
-                        files_total: total as u64,
-                        bytes_done,
-                        bytes_total: total_original,
-                        elapsed_ms: 0,
-                        bytes_per_sec: 0.0,
-                        eta_ms: 0,
-                    });
-                },
-            )
-            .map_err(|e| ApiError::new("solid.compress", e))?;
-            let entries: Vec<ArchiveEntry> = files
-                .iter()
-                .map(|(name, bytes)| ArchiveEntry {
-                    path: name.clone(),
-                    original_size: bytes.len() as u64,
-                    compressed_size: 0,
-                    compress_time_ms: 0.0,
-                })
-                .collect();
-            let result = DirectoryResult {
-                root: input_dir.to_string_lossy().into_owned(),
-                n_files: files.len() as u64,
-                total_original_size: total_original,
-                total_compressed_size: archive.len() as u64,
-                aggregate_ratio: total_original as f64 / archive.len().max(1) as f64,
-                total_time_ms: 0.0,
-                entries,
-            };
-            Ok((result, archive))
-        }
-        // The other backends fall through to the per-file nxar
-        // (lossless v4 codec) — now with the new progress variant
-        // that emits per-file + per-chunk events.
-        _ => {
-            // The nxar::compress_directory_with_progress is in
-            // the lib crate (not the api wrapper), so wrap its
-            // callback type. Both signatures use FnMut, the only
-            // difference is the event struct type — they're the
-            // same type here (ProgressEvent lives in api.rs and
-            // is re-exported).
-            crate::nxar::compress_directory_with_progress(
-                input_dir,
-                |ev| progress(ev),
-            )
-            .map_err(|e| ApiError::new("nxar.compress_failed", e))
-        }
-    }
-}
 
 /// Walk a directory recursively into (relative_path, bytes) pairs.
-/// Shared with the CLI's `walk_dir` helper — duplicated here to
-/// keep the Tauri boundary self-contained.
-fn walk_dir_for_solid(root: &Path) -> ApiResult<Vec<(String, Vec<u8>)>> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), String> {
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| format!("read_dir({}) failed: {}", dir.display(), e))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("dir entry failed: {}", e))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|e| format!("file_type({}) failed: {}", path.display(), e))?;
-            if file_type.is_dir() {
-                walk(root, &path, out)?;
-            } else if file_type.is_file() {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let bytes = std::fs::read(&path)
-                    .map_err(|e| format!("read({}) failed: {}", path.display(), e))?;
-                out.push((rel, bytes));
-            }
-        }
-        Ok(())
+///
+/// **Sprint 5.7.10-B:** this is now a thin wrapper around
+/// [`crate::walker::walk`], the single source of truth for
+/// corpus walking + skip-list filtering. The 320-line
+/// implementation that used to live here (collect_paths +
+/// corpus_should_skip_dir + corpus_should_skip_file +
+/// classify_corpus_breakdown + dir_size_estimate) was
+/// deleted and the logic centralised in `src/walker.rs`.
+///
+/// The `CorpusMode` is read from the `NEXUS_CORPUS_MODE` env
+/// var (same as before — the CLI and Tauri command set it
+/// before invoking this wrapper). The classification into
+/// source / build_artifact / other is computed DURING the
+/// walk, in a single pass.
+fn walk_dir_for_solid(root: &Path) -> ApiResult<(Vec<(String, Vec<u8>)>, u64)> {
+    let mode = std::env::var("NEXUS_CORPUS_MODE")
+        .ok()
+        .and_then(|s| s.parse::<CorpusMode>().ok())
+        .unwrap_or_default();
+    let result = crate::walker::walk(root, mode, false)
+        .map_err(|e| ApiError::new("directory.io", e.to_string()))?;
+    if result.skipped_bytes > 0 {
+        eprintln!(
+            "[WALK-SKIP] total skipped: {} MiB of dev cache / build artifacts",
+            result.skipped_bytes / (1024 * 1024)
+        );
     }
-    let mut out = Vec::new();
-    walk(root, root, &mut out).map_err(|e| ApiError::new("directory.io", e))?;
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    crate::stats::record_skipped_bytes(result.skipped_bytes);
+    crate::stats::record_corpus_breakdown(&result.breakdown);
+    Ok((result.files, result.skipped_bytes))
+}
+
+/// Per-corpus breakdown reported to the UI. Lets the
+/// frontend show "your corpus is 87% build artifacts" so
+/// the user understands a low ratio on a Next.js /
+/// Python-venv project is not a bug.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+pub struct CorpusBreakdown {
+    pub source_files: u64,
+    pub source_bytes: u64,
+    pub build_artifact_files: u64,
+    pub build_artifact_bytes: u64,
+    pub other_files: u64,
+    pub other_bytes: u64,
 }
 
 /// Decompress a NexusCompress stream. Returns an error if the
